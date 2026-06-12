@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+#
+# deploy-wrapper - the ONLY command the CI deploy keys are allowed to run.
+#
+# Installed on the box at:  /opt/<app>/bin/deploy-wrapper   (root-owned, mode 0755)
+# Pinned & forced:
+#   - in each deploy user's ~/.ssh/authorized_keys:
+#         restrict,command="/opt/<app>/bin/deploy-wrapper" <pubkey>
+#   - in sshd_config (Match User deploy-<app>-* { ForceCommand ... })
+#
+# It accepts exactly three verbs over SSH - `upload <sha> <sha256>`, `activate <sha>`, `is-active` -
+# and rejects everything else. The target ENVIRONMENT is taken from the *identity* of the
+# connecting user, never from an argument, so the staging key has no way to name production.
+#
+set -euo pipefail
+set -f   # disable globbing before we word-split $SSH_ORIGINAL_COMMAND below
+
+
+# Each environment has its own deploy user + key. That mapping IS the security boundary:
+# a key can only ever act on the environment whose user it logged in as.
+case "$(id -un)" in
+  deploy-botonio-botsci-staging)    instance=staging ;;
+  deploy-botonio-botsci-production) instance=production ;;
+  *) echo "denied" >&2; exit 1 ;;   # any other user has no business running this
+esac
+
+# Per-environment paths. `current` is a symlink to the live release; the systemd unit's
+# ExecStart points at /opt/botonio-botsci/<env>/current/botonio-botsci.
+root="/opt/botonio-botsci/$instance"
+releases="$root/releases"
+current="$root/current"
+max_bytes=$((200 * 1024 * 1024))   # reject implausibly large uploads (the binary is ~tens of MB)
+
+
+# $SSH_ORIGINAL_COMMAND is whatever the client asked to run. We split it on whitespace and
+# whitelist every field below; nothing here is ever executed as a command.
+#
+# shellcheck disable=SC2086
+set -- ${SSH_ORIGINAL_COMMAND:-}
+action="${1:-}"
+
+# A release is named by its full 40-char git SHA; anything else is refused.
+is_sha() { [[ "${1:-}" =~ ^[0-9a-f]{40}$ ]]; }
+
+# An artifact's content digest is a 64-char lowercase sha256; anything else is refused.
+is_sha256() { [[ "${1:-}" =~ ^[0-9a-f]{64}$ ]]; }
+
+
+case "$action" in
+
+  # upload <sha> <sha256> : stream a release binary in on stdin, verify its content digest,
+  # store it under its git SHA. The digest is the artifact's sha256, computed by CI; it is
+  # checked before the binary is ever moved into place, so a corrupt or truncated stream
+  # can never become a runnable release (SSH already guards the transport - this guards the
+  # bytes end to end).
+  upload)
+    sha="${2:-}"
+    is_sha "$sha" || { echo "bad sha" >&2; exit 2; }
+    want_digest="${3:-}"
+    is_sha256 "$want_digest" || { echo "bad digest" >&2; exit 2; }
+
+    dest="$releases/$sha"
+    install -d -m 0755 "$dest"
+
+    # Write to a temp file first, size-check it, verify its digest, THEN atomically move into
+    # place - so a half-streamed, oversized, or corrupt upload can never become a release.
+    tmp="$(mktemp "$dest/.upload.XXXXXX")"
+    trap 'rm -f "$tmp"' EXIT
+    cat > "$tmp"
+    [ "$(stat -c %s "$tmp")" -le "$max_bytes" ] || { echo "upload too large" >&2; exit 2; }
+    got_digest="$(sha256sum "$tmp" | cut -d' ' -f1)"
+    [ "$got_digest" = "$want_digest" ] || { echo "digest mismatch" >&2; exit 2; }
+    chmod 0755 "$tmp"
+    mv -f "$tmp" "$dest/botonio-botsci"
+    trap - EXIT
+
+    echo "uploaded $sha to $instance"
+    ;;
+
+  # activate <sha> : point this environment's `current` at an uploaded release, then restart.
+  activate)
+    sha="${2:-}"
+    is_sha "$sha" || { echo "bad sha" >&2; exit 2; }
+    [ -x "$releases/$sha/botonio-botsci" ] || { echo "no such release" >&2; exit 2; }
+
+    # Atomic symlink swap: build the new link beside the old one, then rename over it.
+    ln -sfn "$releases/$sha" "$current.new"
+    mv -Tf "$current.new" "$current"
+
+    # The single privileged action - and sudoers permits ONLY this exact line for this user.
+    sudo /usr/bin/systemctl restart "botonio-botsci@$instance"
+
+    echo "activated $sha on $instance"
+    ;;
+
+  # is-active : report whether this environment's unit is up (needs no privilege).
+  is-active)
+    systemctl is-active "botonio-botsci@$instance" || true
+    ;;
+
+  *)
+    echo "denied" >&2; exit 1
+    ;;
+
+esac

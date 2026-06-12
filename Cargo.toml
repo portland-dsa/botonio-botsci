@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = ["crates/domain", "crates/backends", "crates/engine", "crates/bot"]
+
+[workspace.package]
+license = "GNU AGPLv3"
+license-file = "LICENSE"
