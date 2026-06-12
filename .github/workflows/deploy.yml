@@ -1,4 +1,4 @@
-# Build once on merge to master, deploy to staging automatically, promote the SAME
+# Build once on merge to main, deploy to staging automatically, promote the SAME
 # artifact to production behind a manual (required-reviewer) gate. The box has no public
 # SSH; CI reaches it as a short-lived, tagged ephemeral Tailscale node and talks only to
 # the shell-less per-instance deploy user - deploy-botonio-botsci-<staging|production> - whose
@@ -9,7 +9,7 @@
 name: deploy
 on:
   push:
-    branches: [master]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -75,7 +75,7 @@ jobs:
 
   deploy-production:
     needs: deploy-staging
-    environment: production # required-reviewer gate; restricted to master
+    environment: production # required-reviewer gate; restricted to main
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
