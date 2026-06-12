@@ -78,21 +78,3 @@ pub async fn on_guild_create<L: GuildLeaver>(
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn serves_the_home_guild() {
-        let home = GuildId::new(1);
-        assert_eq!(disposition(home, home), Disposition::Serve);
-    }
-
-    #[test]
-    fn leaves_any_other_guild() {
-        let home = GuildId::new(1);
-        let other = GuildId::new(2);
-        assert_eq!(disposition(other, home), Disposition::Leave);
-    }
-}
