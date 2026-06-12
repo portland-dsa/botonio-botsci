@@ -2,10 +2,7 @@
 # artifact to production behind a manual (required-reviewer) gate. The box has no public
 # SSH; CI reaches it as a short-lived, tagged ephemeral Tailscale node and talks only to
 # the shell-less per-instance deploy user - deploy-botonio-botsci-<staging|production> - whose
-# login identity is itself the staging/production boundary (docs/runbooks/host-provisioning.md section 6).
-#
-# NOTE (supply-chain, deferred): pin every third-party action to a full commit SHA before
-# relying on this pipeline (e.g. `actions/checkout@<40-hex> # v4`).
+# login identity is itself the staging/production boundary.
 name: deploy
 on:
   push:
