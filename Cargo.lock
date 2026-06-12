@@ -587,10 +587,13 @@ name = "discord-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
+ "cucumber",
  "domain",
  "dotenvy",
  "engine",
+ "futures",
  "poise",
  "sd-notify",
  "secrecy 0.10.3",
