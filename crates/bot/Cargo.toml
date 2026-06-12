@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
+async-trait = "0.1"
 dotenvy = "0.15.7"
 domain = { path = "../domain" }
 engine = { path = "../engine" }
@@ -34,6 +35,14 @@ chrono = "0.4"
 
 [dev-dependencies]
 serde_json = "1"
+cucumber = "0.21"
+futures = "0.3"
+
+# Behavior suite for the home-guild guard - offline, Cucumber, mocks only (no live
+# target). Protagonist: Botonio. Runs on every `cargo test` (no loopback server).
+[[test]]
+name = "guild_guard"
+harness = false
 
 # `sd-notify` is a Unix-datagram-socket protocol and is meaningless off Linux; gating
 # it here keeps non-Linux development builds (Windows/macOS) from pulling or compiling it.
