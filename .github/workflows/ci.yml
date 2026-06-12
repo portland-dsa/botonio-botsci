@@ -1,0 +1,54 @@
+# Offline pull-request gate. CI is a low-trust actor: it holds NO runtime credentials and
+# runs only the offline (mock) suites. Live API suites run in the local pre-push hook
+# (scripts/hooks/pre-push) on the machine that holds the tokens.
+#
+# NOTE (supply-chain hardening, deferred): the third-party actions below are pinned to
+# version tags for readability. Before this pipeline is relied on (and before the public-
+# repo move), pin each to a full commit SHA - e.g. `actions/checkout@<40-hex> # v4`.
+#
+# NOTE: `cargo fmt --check` is intentionally NOT a gate here - the workspace was never
+# rustfmt'd and adopting it is a separate, deliberate cleanup. See
+# project notes on rustfmt.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# Opt JS actions into Node 24 ahead of the 2026-06-16 forced cutover (checkout@v4
+# and gitleaks-action@v2 still ship Node 20). Drop once those actions go Node 24.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04 # matches the box's glibc; native build, no cross-compile
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # For gitleaks, it needs history in-tree
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: shellcheck (deploy scripts)
+        # shellcheck ships on the ubuntu-24.04 runner; lint the deploy-path shell so a
+        # quoting/globbing bug in the forced-command wrapper is caught mechanically.
+        run: shellcheck deploy/bin/deploy-wrapper scripts/hooks/pre-push
+      - name: test (offline mocks only - no credentials)
+        run: cargo test --workspace
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
