@@ -22,6 +22,7 @@
 
 mod client;
 mod error;
+pub mod fixtures;
 mod http;
 mod member;
 mod status;
