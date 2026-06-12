@@ -4,6 +4,7 @@ mod commands;
 mod config;
 mod data;
 mod error;
+mod guild_guard;
 mod notify;
 mod ping;
 mod render;
@@ -75,8 +76,22 @@ async fn main() -> anyhow::Result<()> {
             // Reply to any message that @-mentions the bot (see `ping`).
             event_handler: |ctx, event, _framework, data| {
                 Box::pin(async move {
-                    if let serenity::all::FullEvent::Message { new_message } = event {
-                        ping::on_message(ctx, new_message, data).await?;
+                    match event {
+                        serenity::all::FullEvent::Message { new_message } => {
+                            ping::on_message(ctx, new_message, data).await?;
+                        }
+                        // Refuse to operate anywhere but the configured home guild:
+                        // leave any other server the moment we see it (whether just
+                        // added or already present at connect). Defense in depth
+                        // beneath the per-interaction command/ping guards.
+                        serenity::all::FullEvent::GuildCreate { guild, is_new } => {
+                            let home = serenity::all::GuildId::new(data.config.guild_id);
+                            crate::guild_guard::on_guild_create(
+                                &*ctx.http, guild.id, home, *is_new,
+                            )
+                            .await;
+                        }
+                        _ => {}
                     }
                     Ok(())
                 })
