@@ -29,6 +29,19 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,botonio_botsci=debug"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
+    // Staging-only: when `SOLIDARITY_TECH_MOCK` is set, stand up the in-process mock
+    // Solidarity Tech server bound to the host:port of `SOLIDARITY_TECH_BASE_URL` -
+    // the same URL the client reads below - so staging serves fabricated members from
+    // a single address that cannot drift. Production sets neither var, so this is inert.
+    if std::env::var_os("SOLIDARITY_TECH_MOCK").is_some() {
+        let base = std::env::var("SOLIDARITY_TECH_BASE_URL").map_err(|_| {
+            anyhow::anyhow!("SOLIDARITY_TECH_MOCK is set but SOLIDARITY_TECH_BASE_URL is not")
+        })?;
+        let personas = std::env::var("SOLIDARITY_TECH_MOCK_PERSONAS").unwrap_or_default();
+        let addr = mock_st::spawn(base.trim_start_matches("http://"), &personas).await?;
+        tracing::warn!(%addr, "mock Solidarity Tech server active (staging fabricated data)");
+    }
+
     let cfg = BotConfig::from_env()?;
     let clients = Clients::from_env().await?;
     // Today the bot reads only Solidarity Tech (for the index); Discord is driven by the
