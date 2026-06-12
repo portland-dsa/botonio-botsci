@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Runs the live API suites before a push, so live verification gates the push WITHOUT CI
+# ever holding a credential (CI runs only the offline mock suites). Skip work-in-progress
+# pushes with `git push --no-verify`.
+#
+# One-time install (per clone):  git config core.hooksPath scripts/hooks
+#
+# The suites read the same `.env` you use for the live integration tests; with no `.env`
+# present (e.g. a fresh clone or CI), the hook is a no-op so it never blocks a push it
+# cannot meaningfully gate.
+set -euo pipefail
+
+if [ ! -f .env ]; then
+  echo "pre-push: no .env with live credentials present; skipping live suites" >&2
+  exit 0
+fi
+
+echo "pre-push: running live API suites (use 'git push --no-verify' to skip)..."
+
+# The live suite sits behind the `live-solidarity-tech` feature via required-features, so a
+# normal `cargo test` never builds it. Adjust the feature/target name to that declared in
+# crates/backends/Cargo.toml if it differs.
+cargo test -p backends --features live-discord,live-solidarity-tech --test solidarity_tech_live --test discord_live
+
+echo "pre-push: live suites passed"

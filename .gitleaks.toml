@@ -1,0 +1,12 @@
+# GDI gitleaks fake mock discord IDs are not in fact leaks
+#
+# (ty for looking out for me tho <3)
+title = "gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Fake/public Discord IDs in docs + tests"
+paths = ['''crates/domain/src/ids\.rs''']
+regexes = []

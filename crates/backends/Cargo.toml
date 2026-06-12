@@ -1,0 +1,62 @@
+[package]
+name = "backends"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Generate the mockall mocks of each `*Client` trait. Off by default; the
+# downstream crates (engine/cli) enable it in their dev-dependencies so their
+# orchestrator tests can mock the backends without a network.
+mock = ["dep:mockall"]
+# Per-backend gates for the live integration tests under `tests/*_live.rs`.
+live-discord = []
+live-solidarity-tech = []
+
+[dependencies]
+domain = { path = "../domain" }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+mockall = { version = "0.13", optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+secrecy = "0.10"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1"
+serenity = "0.12.5"
+thiserror = "2"
+tokio = { version = "1", features = ["time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+dotenvy = "0.15.7"
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "time",
+    "sync",
+] }
+tracing-subscriber = "0.3"
+wiremock = "0.6"
+# The backend contract + live suites are Cucumber (BDD); see tests/*.rs.
+cucumber = "0.21"
+futures = "0.3"
+
+# --- Contract suite: offline (wiremock), Cucumber, run by default. The target
+# keeps its historical filename; the protagonist drives the scenarios inside. ---
+[[test]]
+name = "solidarity_tech_mock" # contract - protagonist: Espio
+harness = false
+
+# --- Live suites: real APIs, Cucumber, single-concurrency. `required-features`
+# means a bare `cargo test` never builds or runs them. ---
+[[test]]
+name = "solidarity_tech_live"
+harness = false
+required-features = ["live-solidarity-tech"]
+
+[[test]]
+name = "discord_live"
+harness = false
+required-features = ["live-discord"]

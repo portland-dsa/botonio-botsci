@@ -1,0 +1,22 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+domain = { path = "../domain" }
+backends = { path = "../backends" }
+thiserror = "2"
+chrono = { version = "0.4", features = ["serde"] }
+serde_json = "1"
+tracing = "0.1"
+# Async trait definitions so `MemberStore` is object-safe from day one; a later
+# `diesel`-backed implementation drops in without a signature change.
+async-trait = "0.1"
+
+[dev-dependencies]
+# Enable the backends' mockall mocks so the store tests run without a network;
+# pull in a runtime for the `#[tokio::test]` async cases.
+backends = { path = "../backends", features = ["mock"] }
+mockall = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
