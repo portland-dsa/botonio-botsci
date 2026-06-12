@@ -4,7 +4,7 @@
 //! Split so the behavior is exercisable offline (mocks only - there is no live
 //! target): [`disposition`] is the pure decision, [`GuildLeaver`] is the one
 //! Discord action behind a mockable seam, and [`on_guild_create`] is the handler
-//! the gateway drives. See `docs/specs/2026-06-12-guild-auto-leave-design.md`.
+//! the gateway drives.
 
 use serenity::all::GuildId;
 
