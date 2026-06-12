@@ -37,7 +37,7 @@ jobs:
 
   deploy-staging:
     needs: build
-    environment: staging # holds the staging Tailscale auth key + DEPLOY_HOST
+    environment: staging # holds the staging Tailscale OAuth client creds + DEPLOY_HOST
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -46,7 +46,8 @@ jobs:
           path: ./artifact
       - uses: tailscale/github-action@v2
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }} # ephemeral, tagged tag:ci-deploy
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }} # mints an ephemeral key, tagged tag:ci-deploy
           tags: tag:ci-deploy
       - name: ship + restart + smoke check
         env:
@@ -84,7 +85,8 @@ jobs:
           path: ./artifact
       - uses: tailscale/github-action@v2
         with:
-          authkey: ${{ secrets.TS_AUTHKEY }}
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
           tags: tag:ci-deploy
       - name: ship + restart (same artifact)
         env:
