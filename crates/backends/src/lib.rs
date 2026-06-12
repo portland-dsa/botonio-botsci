@@ -14,6 +14,12 @@
 //!
 //! [`DryRun`]: util::DryRun
 
+// Tests set env vars to exercise `util::base_url`, which needs `unsafe` under
+// edition 2024 - so `deny` (overridable by a targeted `#[allow]`) under test, and
+// a hard `forbid` everywhere else.
+#![cfg_attr(test, deny(unsafe_code))]
+#![cfg_attr(not(test), forbid(unsafe_code))]
+
 pub mod prelude {
     pub use super::discord::DiscordClient;
     pub use super::solidarity_tech::SolidarityTechClient;

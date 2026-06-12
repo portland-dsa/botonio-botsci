@@ -38,6 +38,9 @@ mod tests {
     use super::base_url;
 
     #[test]
+    // Targeted allow: this test sets/removes a uniquely-named env var (safe in a
+    // single-threaded test). The crate root denies unsafe under test, forbids elsewhere.
+    #[allow(unsafe_code)]
     fn prefers_a_non_empty_override() {
         // SAFETY: single-threaded test; a unique var name avoids cross-test races.
         unsafe { std::env::set_var("TEST_BASE_URL_OVERRIDE_A", "http://127.0.0.1:9") };
@@ -49,6 +52,8 @@ mod tests {
     }
 
     #[test]
+    // Same env-var rationale as `prefers_a_non_empty_override`.
+    #[allow(unsafe_code)]
     fn falls_back_when_unset_or_blank() {
         unsafe { std::env::remove_var("TEST_BASE_URL_OVERRIDE_B") };
         assert_eq!(

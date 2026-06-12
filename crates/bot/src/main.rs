@@ -1,5 +1,7 @@
 //! The always-on Discord bot - currently a read-only membership card plus help.
 
+#![forbid(unsafe_code)]
+
 mod commands;
 mod config;
 mod data;

@@ -5,6 +5,8 @@
 //! every membership state without touching real records. Read-only and one
 //! endpoint by design; see the crate's design doc.
 
+#![forbid(unsafe_code)]
+
 mod persona;
 mod roster;
 mod server;
