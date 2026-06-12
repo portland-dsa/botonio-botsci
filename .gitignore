@@ -1,0 +1,74 @@
+/target
+.env
+
+.logs
+.build
+/.pipeline
+docs
+
+/.superpowers
+**/__pycache__
+
+
+# ── AI assistants & code tools ──────────────────────────────────────────────
+# Claude Code
+.claude/
+CLAUDE*.md
+
+# Cursor
+.cursor/
+
+# Aider
+.aider.tags.cache.v3/
+.aider.chat.history.md
+.aider.conf.yml
+.aiderignore
+
+# Windsurf
+.windsurf/
+
+# Cline / Roo Code
+.cline/
+.roo/
+.roomodes
+
+# Continue
+.continue/
+
+# Codeium
+.codeium/
+
+# Copilot
+.copilot-debug-log
+
+# ── IDEs & editors ───────────────────────────────────────────────────────────
+# VS Code (remove this if your team shares workspace settings)
+.vscode/
+
+# JetBrains (PyCharm, IntelliJ, etc.)
+.idea/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+\#*\#
+.\#*
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# macOS
+.DS_Store
+
+.lsp.json
