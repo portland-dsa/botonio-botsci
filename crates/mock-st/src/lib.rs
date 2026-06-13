@@ -25,9 +25,8 @@ use std::sync::Arc;
 /// every member reads as "not a member". Errors if `listen` cannot be bound, most
 /// often because another process already holds that port.
 pub async fn spawn(listen: &str, personas: &str) -> std::io::Result<SocketAddr> {
-    let today = chrono::Local::now().date_naive();
-    let roster = Arc::new(roster::build(personas, today));
-    let app = server::router(roster);
+    let map = Arc::new(roster::parse_map(personas));
+    let app = server::router(map);
 
     let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| {
         std::io::Error::new(

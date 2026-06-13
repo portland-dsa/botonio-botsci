@@ -28,13 +28,14 @@ pub fn parse_map(raw: &str) -> Vec<(u64, Persona)> {
     out
 }
 
-/// Build the served `/users` roster from the map, anchoring date-relative personas
-/// to `today`. Solidarity Tech ids are assigned sequentially per served record.
-pub fn build(raw: &str, today: NaiveDate) -> Vec<Value> {
-    parse_map(raw)
-        .into_iter()
+/// Build the served `/users` records from an already-parsed persona map, dating
+/// date-relative personas against `today`. Solidarity Tech ids are assigned
+/// sequentially. The server calls this per request, so dates stay current as a
+/// long-lived staging server ages rather than freezing at startup.
+pub fn records(map: &[(u64, Persona)], today: NaiveDate) -> Vec<Value> {
+    map.iter()
         .enumerate()
-        .map(|(i, (discord_id, persona))| persona.user_json(i as u64 + 1, discord_id, today))
+        .map(|(i, &(discord_id, persona))| persona.user_json(i as u64 + 1, discord_id, today))
         .collect()
 }
 
@@ -54,13 +55,13 @@ mod tests {
     #[test]
     fn empty_map_is_empty_roster() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        assert!(build("", today).is_empty());
+        assert!(records(&parse_map(""), today).is_empty());
     }
 
     #[test]
-    fn build_stamps_each_id_and_assigns_sequential_st_ids() {
+    fn records_stamp_each_id_and_assign_sequential_st_ids() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let roster = build("111=good_standing,222=lapsed", today);
+        let roster = records(&parse_map("111=good_standing,222=lapsed"), today);
         assert_eq!(roster.len(), 2);
         assert_eq!(roster[0]["id"], 1);
         assert_eq!(roster[1]["id"], 2);

@@ -9,6 +9,8 @@ use backends::solidarity_tech::fixtures::users_page;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::persona::Persona;
+
 /// The `GET /users` paging parameters. `user_list_ids` is intentionally not a
 /// field: the mock has exactly one list, so the filter is ignored (serde skips
 /// unknown query params) and any list query returns the whole roster.
@@ -20,18 +22,22 @@ struct UsersQuery {
     offset: Option<u32>,
 }
 
-/// Build the router over an already-built roster. Unmatched paths get axum's
-/// default `404`.
-pub fn router(roster: Arc<Vec<Value>>) -> Router {
+/// Build the router over the parsed persona map. The roster JSON is rebuilt per
+/// request (see [`list_users`]) so date-relative personas stay current on a
+/// long-lived server. Unmatched paths get axum's default `404`.
+pub fn router(personas: Arc<Vec<(u64, Persona)>>) -> Router {
     Router::new()
         .route("/users", get(list_users))
-        .with_state(roster)
+        .with_state(personas)
 }
 
 async fn list_users(
-    State(roster): State<Arc<Vec<Value>>>,
+    State(personas): State<Arc<Vec<(u64, Persona)>>>,
     Query(q): Query<UsersQuery>,
 ) -> Json<Value> {
+    // Rebuild against today's date each request, so date-relative personas (e.g.
+    // amber's renewal window) don't go stale as the server ages.
+    let roster = crate::roster::records(&personas, chrono::Local::now().date_naive());
     let limit = q.limit.unwrap_or(100) as usize;
     let offset = q.offset.unwrap_or(0) as usize;
     let (page, total) = paginate(&roster, limit, offset);
