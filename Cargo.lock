@@ -469,6 +469,7 @@ dependencies = [
  "anyhow",
  "clap",
  "console",
+ "crossbeam-utils",
  "cucumber-codegen",
  "cucumber-expressions",
  "derive_more",
@@ -487,6 +488,8 @@ dependencies = [
  "regex",
  "sealed",
  "smart-default",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -15,8 +15,6 @@ use super::wire::{
     CustomPropsListResponse, StWriteProps, UserUpdate, UsersListResponse, decode_members,
 };
 
-const ST_BASE_URL: &str = "https://api.solidarity.tech/v1";
-
 /// Page size (`_limit`) for filtered reads.
 ///
 /// A unique email or phone returns 0-1 rows in practice, so one page is plenty;
@@ -75,6 +73,11 @@ pub struct SolidarityTechHttp {
 }
 
 impl SolidarityTechHttp {
+    /// The real Solidarity Tech API base URL: the default when no
+    /// `SOLIDARITY_TECH_BASE_URL` override is set, and the URL the live suite pins
+    /// (it must reach prod regardless of any override set for the mock).
+    pub const API_BASE_URL: &'static str = "https://api.solidarity.tech/v1";
+
     /// Builds the client from the `SOLIDARITY_TECH_TOKEN` environment variable.
     ///
     /// Returns [`SolidarityTechError::MissingEnv`] if the variable is unset, or
@@ -91,7 +94,7 @@ impl SolidarityTechHttp {
         Ok(Self {
             // Defaults to the public API; `SOLIDARITY_TECH_BASE_URL` overrides it so a
             // divorced staging instance can point at a mock (see `crate::util::base_url`).
-            base_url: crate::util::base_url("SOLIDARITY_TECH_BASE_URL", ST_BASE_URL),
+            base_url: crate::util::base_url("SOLIDARITY_TECH_BASE_URL", Self::API_BASE_URL),
             token,
             client,
         })
