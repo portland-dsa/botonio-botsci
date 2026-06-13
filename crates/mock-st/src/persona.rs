@@ -27,8 +27,14 @@ pub enum Persona {
 }
 
 impl Persona {
-    /// Parse the persona name from an id-to-persona map entry, or `None` if it is
-    /// not one of the known personas.
+    /// The [`Persona`] named by an id-to-persona map entry, or `None` for an
+    /// unknown name.
+    ///
+    /// ```
+    /// use mock_st::Persona;
+    /// assert_eq!(Persona::parse("amber"), Some(Persona::Amber));
+    /// assert!(Persona::parse("nope").is_none());
+    /// ```
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name.trim() {
             "good_standing" => Self::GoodStanding,
@@ -40,9 +46,10 @@ impl Persona {
         })
     }
 
-    /// Build this persona's served `/users` user object: `st_id` is its Solidarity
-    /// Tech user id, `discord_user_id` is stamped into the custom property the index
-    /// keys on, and date-relative fields are anchored to `today`.
+    /// This persona's served `/users` user object, dated against `today`.
+    ///
+    /// `discord_user_id` is stamped into the `discord-user-id` custom property the
+    /// index keys on; `st_id` is the record's synthetic Solidarity Tech user id.
     pub fn user_json(self, st_id: u64, discord_user_id: u64, today: NaiveDate) -> Value {
         let ymd = |d: NaiveDate| d.format("%Y-%m-%d").to_string();
         // "Membership Status" is a select field: `[{label, value}]`; the decode

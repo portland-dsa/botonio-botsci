@@ -1,9 +1,9 @@
 //! In-process mock of Solidarity Tech's `GET /users`, for staging only.
 //!
-//! Serves a roster built from named personas (see [`Persona`]) keyed to real
-//! test-server Discord ids, so the staging bot reads fabricated members across
-//! every membership state without touching real records. Read-only and one
-//! endpoint by design; see the crate's design doc.
+//! [`spawn`] stands up a roster of fabricated members - built from named
+//! [`Persona`]s keyed to real test-server Discord ids - so the staging bot reads
+//! every membership state without touching real records. Read-only by design: it
+//! answers only the list read the bot's index build makes, nothing else.
 
 #![forbid(unsafe_code)]
 
@@ -16,13 +16,13 @@ pub use persona::Persona;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-/// Bind the mock to `listen`, build the roster from the `personas` map (dated to
-/// today), spawn the accept loop, and return the bound address.
+/// Start the mock server and return the address it bound.
 ///
-/// The listener is bound before returning, so a caller that points its client at
-/// the returned address and reads immediately cannot race a not-yet-listening
-/// server. `personas` is the `SOLIDARITY_TECH_MOCK_PERSONAS` value (an empty
-/// string yields an empty roster - everyone reads as "not a member").
+/// The listener is bound before this returns, so a caller that points its client at
+/// the address and reads immediately cannot race a not-yet-listening server; serving
+/// then continues on a background task. `personas` is the
+/// `SOLIDARITY_TECH_MOCK_PERSONAS` value - an empty string yields an empty roster, so
+/// every member reads as "not a member".
 pub async fn spawn(listen: &str, personas: &str) -> std::io::Result<SocketAddr> {
     let today = chrono::Local::now().date_naive();
     let roster = Arc::new(roster::build(personas, today));
