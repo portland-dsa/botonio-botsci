@@ -1,4 +1,6 @@
 # Extensionless shell scripts must keep LF endings - a CRLF shebang (`#!/usr/bin/env bash\r`)
 # is parsed as a bad interpreter on Linux, so a Windows checkout must not rewrite these.
-deploy/bin/deploy-wrapper text eol=lf
+deploy/bin/* text eol=lf
 scripts/hooks/pre-push    text eol=lf
+*.py text eol=lf
+*.sh text eol=lf
