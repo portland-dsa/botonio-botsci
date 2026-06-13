@@ -34,11 +34,12 @@ pub fn users_page(users: Vec<Value>, total_count: usize, limit: u32, offset: u32
 }
 
 /// Decode one `/users` user object through the real backend decode, exactly as a
-/// live read would. The JSON must be well-formed for the wire shape (it is, by
-/// construction in fixtures); a decode *rule* failure (malformed email, retired
-/// status) is returned as the same [`SolidarityTechError`] a live read yields.
+/// live read would. JSON that doesn't match the wire shape, and any decode-rule
+/// failure (malformed email, retired status), come back as a [`SolidarityTechError`]
+/// the way a live read surfaces them - never a panic.
 pub fn decode_user(value: &Value) -> Result<SolidarityTechMember, SolidarityTechError> {
-    let resp: UserResponse =
-        serde_json::from_value(value.clone()).expect("fixture user JSON is well-formed");
+    let resp: UserResponse = serde_json::from_value(value.clone()).map_err(|e| {
+        SolidarityTechError::MalformedMember(format!("user JSON did not match the wire shape: {e}"))
+    })?;
     SolidarityTechMember::try_from(resp)
 }
