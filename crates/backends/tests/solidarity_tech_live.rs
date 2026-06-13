@@ -23,6 +23,7 @@ use cucumber::{World as _, given, then, when};
 
 use backends::solidarity_tech::{SolidarityTechClient, SolidarityTechHttp, SolidarityTechMember};
 use backends::util::{DiscordHandle, DiscordUserId, DryRun, Email};
+use secrecy::SecretString;
 
 fn require_env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("required env var {key} is not set"))
@@ -46,9 +47,22 @@ struct LiveWorld {
 impl LiveWorld {
     async fn new() -> Self {
         dotenvy::dotenv().ok();
-        let client = SolidarityTechHttp::from_env()
-            .await
-            .expect("SolidarityTechHttp::from_env failed - is SOLIDARITY_TECH_TOKEN set?");
+        // The live suite must reach the real API. A developer may have
+        // SOLIDARITY_TECH_BASE_URL set in .env to point the bot at the local mock;
+        // ignore it and build against the real URL explicitly, so the suite is
+        // resilient to that.
+        if std::env::var_os("SOLIDARITY_TECH_BASE_URL").is_some() {
+            tracing::warn!(
+                api = SolidarityTechHttp::API_BASE_URL,
+                "ignoring SOLIDARITY_TECH_BASE_URL; the live suite uses the real API"
+            );
+        }
+        let token = SecretString::from(
+            backends::from_credstore_or_env("solidarity_tech_token", "SOLIDARITY_TECH_TOKEN")
+                .expect("SOLIDARITY_TECH_TOKEN is not set"),
+        );
+        let client =
+            SolidarityTechHttp::with_base_url(SolidarityTechHttp::API_BASE_URL.into(), token);
         Self {
             client,
             email: None,
@@ -208,6 +222,7 @@ async fn write_unchanged(world: &mut LiveWorld) {
 #[tokio::main]
 async fn main() {
     LiveWorld::cucumber()
+        .init_tracing()
         .max_concurrent_scenarios(1)
         .fail_on_skipped()
         .run_and_exit("tests/features/solidarity_tech_live")

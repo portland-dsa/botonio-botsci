@@ -8,6 +8,8 @@
 //! no secrets, so everything above can link it without pulling in IO. Anything
 //! that needs a backend's wire types or a client does not belong here.
 
+#![forbid(unsafe_code)]
+
 pub mod dry_run;
 pub mod ids;
 pub mod membership;

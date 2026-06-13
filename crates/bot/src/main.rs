@@ -1,5 +1,7 @@
 //! The always-on Discord bot - currently a read-only membership card plus help.
 
+#![forbid(unsafe_code)]
+
 mod commands;
 mod config;
 mod data;
@@ -28,6 +30,32 @@ async fn main() -> anyhow::Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,botonio_botsci=debug"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
+
+    // Staging-only: when `SOLIDARITY_TECH_MOCK` is set to a non-falsey value, stand up the
+    // in-process mock Solidarity Tech server bound to the host:port of
+    // `SOLIDARITY_TECH_BASE_URL` - the same URL the client reads below - so staging serves
+    // fabricated members from a single address that cannot drift. Production sets neither
+    // var, so this is inert.
+    let mock_enabled = std::env::var("SOLIDARITY_TECH_MOCK").is_ok_and(|v| {
+        // Off for "", "0", and "false", so `=0` disables rather than enabling on presence.
+        let v = v.trim();
+        !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+    });
+    if mock_enabled {
+        let base = std::env::var("SOLIDARITY_TECH_BASE_URL").map_err(|_| {
+            anyhow::anyhow!("SOLIDARITY_TECH_MOCK is set but SOLIDARITY_TECH_BASE_URL is not")
+        })?;
+        // Strip either scheme and any path, leaving host:port for the listener.
+        let listen = base
+            .trim_start_matches("https://")
+            .trim_start_matches("http://")
+            .split('/')
+            .next()
+            .unwrap_or(base.as_str());
+        let personas = std::env::var("SOLIDARITY_TECH_MOCK_PERSONAS").unwrap_or_default();
+        let addr = mock_st::spawn(listen, &personas).await?;
+        tracing::warn!(%addr, "mock Solidarity Tech server active (staging fabricated data)");
+    }
 
     let cfg = BotConfig::from_env()?;
     let clients = Clients::from_env().await?;

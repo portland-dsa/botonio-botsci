@@ -10,6 +10,8 @@
 //! It depends only on [`domain`] (the shared vocabulary) and [`backends`] (the
 //! clients, re-exported below); it never reaches up to a front-end.
 
+#![forbid(unsafe_code)]
+
 // Re-export the backends crate so callers keep addressing the clients as
 // `engine::backends::...`.
 pub use backends;
