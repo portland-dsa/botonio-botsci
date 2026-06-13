@@ -22,13 +22,22 @@ use std::sync::Arc;
 /// the address and reads immediately cannot race a not-yet-listening server; serving
 /// then continues on a background task. `personas` is the
 /// `SOLIDARITY_TECH_MOCK_PERSONAS` value - an empty string yields an empty roster, so
-/// every member reads as "not a member".
+/// every member reads as "not a member". Errors if `listen` cannot be bound, most
+/// often because another process already holds that port.
 pub async fn spawn(listen: &str, personas: &str) -> std::io::Result<SocketAddr> {
     let today = chrono::Local::now().date_naive();
     let roster = Arc::new(roster::build(personas, today));
     let app = server::router(roster);
 
-    let listener = tokio::net::TcpListener::bind(listen).await?;
+    let listener = tokio::net::TcpListener::bind(listen).await.map_err(|e| {
+        std::io::Error::new(
+            e.kind(),
+            format!(
+                "could not bind the mock Solidarity Tech server to {listen} \
+                 (is another process already using that port?): {e}"
+            ),
+        )
+    })?;
     let addr = listener.local_addr()?;
     tracing::info!(%addr, "mock Solidarity Tech server bound");
 
