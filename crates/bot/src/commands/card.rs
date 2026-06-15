@@ -5,7 +5,7 @@ use chrono::Utc;
 use serenity::all::User;
 
 use engine::backends::util::DiscordUserId;
-use engine::card::{self, PresentMember};
+use engine::card::{self, CardError, PresentMember};
 
 use crate::data::{Context, Error};
 use crate::render;
@@ -36,7 +36,39 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
     let subject = PresentMember {
         id: DiscordUserId(user.id.get()),
     };
-    let rec = card::resolve(&*ctx.data().store, &subject).await?;
+    let rec = match card::resolve(&*ctx.data().store, &subject).await {
+        Ok(rec) => rec,
+        Err(CardError::NoRecord) => {
+            // Expected outcome (the member has no linked record), so log at debug rather
+            // than error - but leave a trace so a systemic miss spike stays diagnosable.
+            // No identifiers: a count of these is enough to spot an outage.
+            tracing::debug!("no membership record found for card lookup");
+            ctx.send(
+                poise::CreateReply::default()
+                    .content(
+                        "I couldn't find a membership record for you. \
+                         If you think this is wrong, ask a moderator.",
+                    )
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(());
+        }
+        // The live database-error path: the store is Postgres-backed (`PgStore`), so any
+        // connection or query failure lands here. Log the detail and give the member a
+        // generic, PII-free reply rather than surfacing the error. (The in-memory store
+        // used in tests is `Infallible`, so this arm only fires against the real store.)
+        Err(CardError::Store(e)) => {
+            tracing::error!(error = %e, "membership card store lookup failed");
+            ctx.send(
+                poise::CreateReply::default()
+                    .content("Something went wrong on my end - please try again in a moment.")
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     // Nickname/display name and pronouns come from the interaction's member, not the
     // record. (Pronouns: read if serenity exposes them; otherwise always None.)

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/domain", "crates/backends", "crates/engine", "crates/bot", "crates/mock-st"]
+members = ["crates/domain", "crates/backends", "crates/engine", "crates/bot", "crates/mock-st", "crates/persistence"]
 
 [workspace.package]
 license = "GNU AGPLv3"

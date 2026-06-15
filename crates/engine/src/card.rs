@@ -15,32 +15,39 @@ use crate::util::DiscordUserId;
 /// the only key: a card is resolved by id alone, *never* by handle, because Discord
 /// usernames are mutable and recyclable, so matching PII on a handle would let a
 /// member who claimed a freed-up username inherit the prior holder's record. Built
-/// from an interaction's member (today) or a `fetch_member` result (an upcoming feature) - the
+/// from an interaction's member (today) or a `fetch_member` result - the
 /// id always comes from a member actually present, not an arbitrary input.
 pub struct PresentMember {
     pub id: DiscordUserId,
 }
 
-/// Why a card could not be produced.
+/// Why a card could not be produced. Generic over the store's own error so a
+/// fallible (e.g. Postgres-backed) [`MemberStore`] surfaces its read failure as
+/// [`CardError::Store`]; the in-memory store's `E` is [`std::convert::Infallible`],
+/// so that arm is unreachable there.
 #[derive(Debug, thiserror::Error)]
-pub enum CardError {
+pub enum CardError<E: std::error::Error + Send + Sync + 'static> {
     /// No Solidarity Tech record matched the subject.
     #[error("no membership record found")]
     NoRecord,
+    /// The store itself failed to answer the lookup.
+    #[error(transparent)]
+    Store(E),
 }
 
 /// Resolve a present member to their record by Discord **user id** only. Matching is
 /// never done by handle: usernames are mutable and recyclable, so a handle match
 /// could hand one member another member's PII (see [`PresentMember`]). A miss -
 /// including a member whose backend record was never id-linked - is
-/// [`CardError::NoRecord`].
+/// [`CardError::NoRecord`]; a store read failure is [`CardError::Store`].
 pub async fn resolve<S: MemberStore>(
     store: &S,
     subject: &PresentMember,
-) -> Result<MemberRecord, CardError> {
+) -> Result<MemberRecord, CardError<S::Error>> {
     store
         .by_discord_id(subject.id)
         .await
+        .map_err(CardError::Store)?
         .ok_or(CardError::NoRecord)
 }
 

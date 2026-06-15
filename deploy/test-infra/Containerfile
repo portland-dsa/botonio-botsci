@@ -1,0 +1,14 @@
+# Throwaway test Postgres for the `persistence` crate (see compose.yaml).
+#
+# Pinned to 18 to match the production major, so the sqlx cache is generated against
+# the same server version production runs. (See docs/runbooks/postgres-setup.md for
+# how the production cluster is provisioned at that major.)
+#
+# The init script in `initdb/` is baked into the image (COPY) rather than
+# bind-mounted, so it works regardless of whether the repo's drive is mounted into
+# the podman machine. Scripts in /docker-entrypoint-initdb.d/ run once when the
+# entrypoint initializes an empty data directory - which, with the tmpfs data dir in
+# compose.yaml, is every start.
+FROM docker.io/library/postgres:18-alpine
+
+COPY initdb/ /docker-entrypoint-initdb.d/

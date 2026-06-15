@@ -67,7 +67,7 @@ pub enum Error {
 /// (`Pin<Box<dyn Stream>>`) - reintroducing the `dyn` we deliberately avoid, and
 /// making every mock hand back a boxed stream. So instead the backend exposes a
 /// concrete `members_page(cursor) -> MemberPage` (the `next`), and the engine's
-/// generic `drain_pages` does the looping (the consumer): callers get
+/// generic `drain_pages` does the looping: callers get
 /// iterator-like ergonomics - a `Vec` back, no loop of their own - with zero
 /// `dyn` and a trivially mockable backend.
 ///

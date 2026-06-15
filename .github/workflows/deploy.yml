@@ -1,5 +1,5 @@
 # Build once on merge to main, deploy to staging automatically, promote the SAME
-# artifact to production behind a manual (required-reviewer) gate. The box has no public
+# artifact to production behind a manual gate. The box has no public
 # SSH; CI reaches it as a short-lived, tagged ephemeral Tailscale node and talks only to
 # the shell-less per-instance deploy user - deploy-botonio-botsci-<staging|production> - whose
 # login identity is itself the staging/production boundary.

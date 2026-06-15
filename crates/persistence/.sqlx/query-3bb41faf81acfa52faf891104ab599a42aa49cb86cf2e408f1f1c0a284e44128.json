@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM member_cache",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "3bb41faf81acfa52faf891104ab599a42aa49cb86cf2e408f1f1c0a284e44128"
+}

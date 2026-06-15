@@ -4,9 +4,10 @@
 //! The current implementation ([`InMemoryStore`]) holds the roster in RAM, swept
 //! from a Solidarity Tech user list. [`MemberRecord`] is deliberately flat and
 //! built from persistence-friendly primitives so a future implementation can back the same
-//! [`MemberStore`] trait with a `diesel` table without changing any caller.
+//! [`MemberStore`] trait with a sqlx-mapped Postgres table without changing any caller.
 
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
@@ -24,8 +25,12 @@ use crate::util::{DiscordHandle, DiscordUserId, Email};
 /// A member projected to the flat shape the card and the future cache share.
 /// Every field is a persistence-friendly primitive (`String`,
 /// `Option<NaiveDate>`, small text-mapped enums) so a future implementation maps it to one
-/// `diesel` table with no nesting.
-#[derive(Debug, Clone)]
+/// Postgres-backed table with no nesting.
+///
+/// `PartialEq`/`Eq` let two records be compared whole - the basis of the
+/// `PgStore`/`InMemoryStore` conformance test, which asserts a record survives the
+/// cache's encode/store/decode round-trip unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberRecord {
     pub discord_user_id: Option<DiscordUserId>,
     pub discord_handle: Option<DiscordHandle>,
@@ -93,6 +98,16 @@ impl Index {
         idx
     }
 
+    /// Build an index directly from already-projected [`MemberRecord`]s (the shape
+    /// the cache stores), as opposed to [`build`](Index::build) from a raw sweep.
+    pub fn from_records(records: Vec<MemberRecord>) -> Self {
+        let mut idx = Index::default();
+        for r in records {
+            idx.insert(r);
+        }
+        idx
+    }
+
     fn insert(&mut self, rec: MemberRecord) {
         if let Some(id) = rec.discord_user_id {
             self.by_id.entry(id.0).or_insert(rec);
@@ -108,14 +123,41 @@ impl Index {
     pub fn by_id(&self, id: DiscordUserId) -> Option<MemberRecord> {
         self.by_id.get(&id.0).cloned()
     }
+
+    /// Whether the index holds no members (every input record was a duplicate or
+    /// lacked a Discord id). Used to refuse replacing a populated roster with an
+    /// empty sweep.
+    pub fn is_empty(&self) -> bool {
+        self.by_id.is_empty()
+    }
 }
 
-/// Reverse lookup from a Discord id to a [`MemberRecord`]. Async from the start
-/// so a later `diesel`-backed implementation drops in without a signature change.
+/// Reverse lookup from a Discord id to a [`MemberRecord`]. Async and fallible from
+/// the start so a later Postgres-backed implementation drops in without a signature
+/// change; the in-memory impl's [`Error`](MemberStore::Error) is [`Infallible`].
 #[async_trait]
 pub trait MemberStore: Send + Sync {
+    /// How a read can fail. [`Infallible`] for the in-memory store; a database
+    /// error for a Postgres-backed one.
+    type Error: std::error::Error + Send + Sync + 'static;
+
     /// Look up a member by their Discord user snowflake.
-    async fn by_discord_id(&self, id: DiscordUserId) -> Option<MemberRecord>;
+    async fn by_discord_id(&self, id: DiscordUserId) -> Result<Option<MemberRecord>, Self::Error>;
+}
+
+/// Replace the whole cached roster in one shot - the write half of a refresh sweep.
+/// Fallible from the start for the same reason as [`MemberStore`]: the in-memory
+/// impl's [`Error`](RosterWrite::Error) is [`Infallible`], a Postgres-backed one's
+/// is a database error.
+#[async_trait]
+pub trait RosterWrite: Send + Sync {
+    /// How a write can fail. [`Infallible`] for the in-memory store.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Atomically replace the stored roster with `records`. An empty roster is a
+    /// no-op that preserves the current one: a sweep resolving to zero members is
+    /// treated as an upstream glitch, never a real membership of zero.
+    async fn replace_roster(&self, records: Vec<MemberRecord>) -> Result<(), Self::Error>;
 }
 
 /// The in-memory [`MemberStore`]: a snapshot [`Index`] behind a
@@ -146,14 +188,35 @@ impl InMemoryStore {
 
 #[async_trait]
 impl MemberStore for InMemoryStore {
-    async fn by_discord_id(&self, id: DiscordUserId) -> Option<MemberRecord> {
-        self.snapshot().by_id(id)
+    type Error = Infallible;
+
+    async fn by_discord_id(&self, id: DiscordUserId) -> Result<Option<MemberRecord>, Infallible> {
+        Ok(self.snapshot().by_id(id))
     }
 }
 
-/// Build the member index from a Solidarity Tech user list (pre-filtered to
-/// Discord-linked members) via [`drain_pages`] with a no-op progress reporter.
-pub async fn build_index(st: &impl SolidarityTechClient, list_id: &str) -> crate::Result<Index> {
+#[async_trait]
+impl RosterWrite for InMemoryStore {
+    type Error = Infallible;
+
+    async fn replace_roster(&self, records: Vec<MemberRecord>) -> Result<(), Infallible> {
+        let index = Index::from_records(records);
+        // Mirror PgStore: never overwrite a populated roster with an empty sweep.
+        if index.is_empty() {
+            return Ok(());
+        }
+        self.swap(index);
+        Ok(())
+    }
+}
+
+/// Sweep the Solidarity Tech user list (pre-filtered to Discord-linked members)
+/// into the flat [`MemberRecord`]s the cache stores. The store-agnostic half of the
+/// refresh: the caller hands the result to [`RosterWrite::replace_roster`].
+pub async fn sweep_roster(
+    st: &impl SolidarityTechClient,
+    list_id: &str,
+) -> crate::Result<Vec<MemberRecord>> {
     let st_members = drain_pages(
         &NoProgress,
         "solidarity tech discord list",
@@ -165,7 +228,7 @@ pub async fn build_index(st: &impl SolidarityTechClient, list_id: &str) -> crate
         list_id,
         "fetched discord-list members from solidarity tech"
     );
-    Ok(Index::build(st_members))
+    Ok(st_members.into_iter().map(MemberRecord::from).collect())
 }
 
 #[cfg(test)]
@@ -191,13 +254,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_index_fetches_the_discord_list() {
+    async fn sweep_roster_fetches_the_discord_list() {
         let mut st_client = MockSolidarityTechClient::new();
         st_client
             .expect_members_in_list_page()
             .returning(|_, _| ready_ok(st_page(vec![st("zoop", 42, "zoop")])));
-        let idx = build_index(&st_client, "1234").await.unwrap();
-        assert!(idx.by_id(DiscordUserId(42)).is_some());
+        let records = sweep_roster(&st_client, "1234").await.unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|r| r.discord_user_id == Some(DiscordUserId(42)))
+        );
     }
 
     #[test]
@@ -273,10 +340,71 @@ mod tests {
     #[tokio::test]
     async fn in_memory_store_reads_and_swaps() {
         let store = InMemoryStore::new(Index::build(vec![st("zoop", 42, "zoop")]));
-        assert!(store.by_discord_id(DiscordUserId(42)).await.is_some());
+        assert!(
+            store
+                .by_discord_id(DiscordUserId(42))
+                .await
+                .unwrap()
+                .is_some()
+        );
         // Swap in an index that no longer contains 42.
         store.swap(Index::build(vec![st("rose", 99, "rose")]));
-        assert!(store.by_discord_id(DiscordUserId(42)).await.is_none());
-        assert!(store.by_discord_id(DiscordUserId(99)).await.is_some());
+        assert!(
+            store
+                .by_discord_id(DiscordUserId(42))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .by_discord_id(DiscordUserId(99))
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_roster_does_not_wipe_a_populated_store() {
+        let store = InMemoryStore::new(Index::build(vec![st("zoop", 42, "zoop")]));
+        // An empty sweep must be a no-op, not a wipe.
+        store.replace_roster(vec![]).await.unwrap();
+        assert!(
+            store
+                .by_discord_id(DiscordUserId(42))
+                .await
+                .unwrap()
+                .is_some(),
+            "empty replace_roster must preserve the existing roster"
+        );
+    }
+
+    #[tokio::test]
+    async fn roster_of_only_unlinked_records_does_not_wipe() {
+        let store = InMemoryStore::new(Index::build(vec![st("zoop", 42, "zoop")]));
+        // Records with no Discord id are all dropped, leaving an empty index - which must
+        // be treated the same as an empty sweep, not as a wipe.
+        let unlinked = MemberRecord {
+            discord_user_id: None,
+            discord_handle: None,
+            email: Email("ghost@b.test".into()),
+            full_name: None,
+            standing: None,
+            join_date: None,
+            expires: None,
+            membership_type: None,
+            monthly_dues: None,
+            yearly_dues: None,
+        };
+        store.replace_roster(vec![unlinked]).await.unwrap();
+        assert!(
+            store
+                .by_discord_id(DiscordUserId(42))
+                .await
+                .unwrap()
+                .is_some(),
+            "a roster with no linkable members must preserve the existing roster"
+        );
     }
 }
