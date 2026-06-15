@@ -58,11 +58,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let cfg = BotConfig::from_env()?;
-    let clients = Clients::from_env().await?;
-    // Today the bot reads only Solidarity Tech (for the index); Discord is driven by the
-    // gateway token below. Share the one ST client with the refresh task via an `Arc`
-    // rather than building a second full `Clients`.
-    let solidarity_tech = Arc::new(clients.solidarity_tech);
+    // The bot reads only Solidarity Tech, for the membership index; Discord is driven by
+    // the gateway token below, and the slice-2 role-write client will be built from the
+    // gateway's shared `Http` (see `DiscordHttp::from_http`), not a second token here.
+    // Share the ST client with the refresh task via an `Arc`.
+    let solidarity_tech = Arc::new(Clients::from_env().await?.solidarity_tech);
 
     // First index build BEFORE serving - a bot that can't answer a card isn't ready.
     tracing::info!("building initial member index...");

@@ -85,33 +85,28 @@ pub struct MemberPage<T> {
     pub next: Option<String>,
 }
 
-/// Every live backend client, bundled so the engine takes one `&Clients`
-/// argument instead of two.
+/// The live backend clients built from the environment at startup.
 ///
-/// The fields are public so a caller can reach a backend-specific method that is
-/// not part of any shared trait. Built once at startup by
-/// [`from_env`](Clients::from_env).
+/// Currently just Solidarity Tech: the Discord write client is built from the
+/// gateway's shared `Http` in the bot via [`DiscordHttp::from_http`], not from a
+/// second token here, so it is not bundled. [`Clients`] stays the single place
+/// startup reads backend credentials, so any future non-gateway backend slots in
+/// beside Solidarity Tech. The field is public so a caller can reach a
+/// backend-specific method outside any shared trait.
+///
+/// [`DiscordHttp::from_http`]: discord::DiscordHttp::from_http
 pub struct Clients {
-    pub discord: discord::DiscordHttp,
     pub solidarity_tech: solidarity_tech::SolidarityTechHttp,
 }
 
 impl Clients {
-    /// Builds both backend clients from environment variables.
+    /// Builds the backend clients from environment variables.
     ///
     /// Each client wraps its token in `secrecy::SecretString`, so the tokens
-    /// never `Debug`-print. This is the single startup step that reads every
-    /// backend credential; a caller that needs only one backend builds that
-    /// client directly instead.
+    /// never `Debug`-print. This is the single startup step that reads backend
+    /// credentials.
     pub async fn from_env() -> Result<Self, Error> {
-        // Backends listed alphabetically so future additions slot in by name
-        // without overlapping diffs.
-        let discord = discord::DiscordHttp::from_env().await?;
         let solidarity_tech = solidarity_tech::SolidarityTechHttp::from_env().await?;
-
-        Ok(Clients {
-            discord,
-            solidarity_tech,
-        })
+        Ok(Clients { solidarity_tech })
     }
 }

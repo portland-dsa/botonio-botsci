@@ -15,17 +15,15 @@
 //!
 //! [`DryRun`]: crate::util::DryRun
 
-mod channels;
 mod client;
 mod error;
 mod http;
 mod roles;
 
-pub use channels::{ChannelKind, DiscordChannel};
 pub use client::DiscordClient;
 pub use error::DiscordError;
-pub use http::DiscordHttp;
-pub use roles::{DiscordMember, ManagedRole, MemberRoles, Role};
+pub use http::{DiscordHttp, resolve_managed_roles};
+pub use roles::{ManagedRole, MemberRoles, Role};
 
 #[cfg(feature = "mock")]
 pub use client::MockDiscordClient;
