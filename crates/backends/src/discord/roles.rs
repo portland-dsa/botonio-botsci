@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use serenity::model::id::RoleId;
 
-use crate::util::{DiscordHandle, DiscordUserId};
 pub use domain::Role;
 
 /// Discord-client-specific extension to the shared [`Role`] vocabulary.
@@ -25,33 +24,6 @@ impl RoleExt for Role {
             Role::Unverified => "DISCORD_ROLE_UNVERIFIED_ID",
         }
     }
-}
-
-/// A guild member, projected to what a role decision needs.
-///
-/// Returned by [`DiscordClient::list_members`](super::DiscordClient::list_members); a slim projection of serenity's
-/// `Member` that drops everything not needed for a role decision.
-#[derive(Debug, Clone)]
-pub struct DiscordMember {
-    /// The member's Discord user id.
-    pub id: DiscordUserId,
-    /// The member's username (handle).
-    pub handle: DiscordHandle,
-    /// Display name, resolved nick -> global name -> handle, skipping empties.
-    pub display_name: String,
-    /// The status role the member currently holds, if any. `None` means none of
-    /// the three are present (not "unknown"). Populated by
-    /// [`list_members`](super::DiscordClient::list_members) so callers can pass it to
-    /// [`set_role`](super::DiscordClient::set_role) as a hint and skip no-op writes.
-    pub current_status: Option<Role>,
-    /// Every role the member holds, by name (numeric id for any role not present
-    /// in the guild's role list), with the implicit `@everyone` excluded. Carried
-    /// so a caller can show a member's full role set, not just the managed status
-    /// role.
-    pub role_names: Vec<String>,
-    /// Whether this account is a bot. Bots are never members, so a role sweep
-    /// skips them and counts them separately.
-    pub bot: bool,
 }
 
 /// A managed status [`Role`] as resolved against the live guild at startup.
@@ -113,52 +85,12 @@ pub(crate) fn diff_status_roles(current: Option<Role>, target: Role) -> StatusDi
     }
 }
 
-/// Resolves a member's display name, preferring server nick, then global name,
-/// then handle.
-///
-/// Empty strings are treated as absent at each step, so the result is never the
-/// empty string even when the API returns an empty nick.
-pub(crate) fn display_name_from(
-    nick: Option<&str>,
-    global_name: Option<&str>,
-    handle: &str,
-) -> String {
-    let non_empty = |s: Option<&str>| s.filter(|v| !v.is_empty()).map(str::to_owned);
-    non_empty(nick)
-        .or_else(|| non_empty(global_name))
-        .unwrap_or_else(|| handle.to_owned())
-}
-
-/// Determines which status role, if any, a member currently holds.
-///
-/// A member should hold at most one, but data drift can leave several; in that
-/// case this warns and returns the highest-priority one per [`Role::ALL`]'s
-/// order rather than failing.
-pub(crate) fn pick_current_status(
-    member_roles: &[RoleId],
-    role_ids: &HashMap<Role, RoleId>,
-) -> Option<Role> {
-    let held: Vec<Role> = Role::ALL
-        .into_iter()
-        .filter(|r| role_ids.get(r).is_some_and(|id| member_roles.contains(id)))
-        .collect();
-    match held.len() {
-        0 => None,
-        1 => Some(held[0]),
-        _ => {
-            tracing::warn!(?held, "member holds multiple status roles; picking highest");
-            Some(held[0])
-        }
-    }
-}
-
 /// Maps a member's role ids to display names, falling back to the numeric id for
 /// any id absent from `names` (a role deleted since the guild list was fetched).
 ///
-/// Shared by [`list_members`](super::DiscordClient::list_members) and
-/// [`member_roles`](super::DiscordClient::member_roles) so both render a member's roles
-/// the same way. Discord never lists the implicit `@everyone` role in a member's
-/// `roles`, so it is naturally excluded.
+/// Used by [`member_roles`](super::DiscordClient::member_roles) to render a
+/// member's roles. Discord never lists the implicit `@everyone` role in a
+/// member's `roles`, so it is naturally excluded.
 pub(crate) fn role_names_for(
     member_roles: &[RoleId],
     names: &HashMap<RoleId, String>,
@@ -175,14 +107,6 @@ mod tests {
 
     fn rid(n: u64) -> RoleId {
         RoleId::new(n)
-    }
-
-    fn role_id_map() -> HashMap<Role, RoleId> {
-        HashMap::from([
-            (Role::Member, rid(1)),
-            (Role::DuesExpired, rid(2)),
-            (Role::Unverified, rid(3)),
-        ])
     }
 
     #[test]
@@ -227,38 +151,6 @@ mod tests {
     }
 
     #[test]
-    fn pick_status_none_when_no_status_role() {
-        let map = role_id_map();
-        // member holds only an unrelated role
-        assert_eq!(pick_current_status(&[rid(99)], &map), None);
-        // member holds no roles at all
-        assert_eq!(pick_current_status(&[], &map), None);
-    }
-
-    #[test]
-    fn pick_status_returns_held_role() {
-        let map = role_id_map();
-        assert_eq!(
-            pick_current_status(&[rid(2), rid(99)], &map),
-            Some(Role::DuesExpired)
-        );
-    }
-
-    #[test]
-    fn pick_status_picks_highest_when_multiple() {
-        let map = role_id_map();
-        // Member > DuesExpired > Unverified per Role::ALL
-        assert_eq!(
-            pick_current_status(&[rid(3), rid(2), rid(1)], &map),
-            Some(Role::Member)
-        );
-        assert_eq!(
-            pick_current_status(&[rid(3), rid(2)], &map),
-            Some(Role::DuesExpired)
-        );
-    }
-
-    #[test]
     fn role_names_for_maps_known_and_falls_back_to_id() {
         let names = HashMap::from([
             (rid(1), "Member".to_string()),
@@ -280,22 +172,5 @@ mod tests {
     fn role_names_for_empty_is_empty() {
         let names: HashMap<RoleId, String> = HashMap::new();
         assert!(role_names_for(&[], &names).is_empty());
-    }
-
-    #[test]
-    fn display_name_prefers_nick_then_global_then_handle() {
-        assert_eq!(
-            display_name_from(Some("nick"), Some("global"), "handle"),
-            "nick"
-        );
-        assert_eq!(display_name_from(None, Some("global"), "handle"), "global");
-        assert_eq!(display_name_from(None, None, "handle"), "handle");
-        // Defensive: empty-string nick treated as absent so we don't ever
-        // display "" as a name.
-        assert_eq!(
-            display_name_from(Some(""), Some("global"), "handle"),
-            "global"
-        );
-        assert_eq!(display_name_from(Some(""), Some(""), "handle"), "handle");
     }
 }
