@@ -2,7 +2,7 @@
 # runs only the offline (mock) suites. Live API suites run in the local pre-push hook
 # (scripts/hooks/pre-push) on the machine that holds the tokens.
 #
-# NOTE (supply-chain hardening, deferred): the third-party actions below are pinned to
+# NOTE: the third-party actions below are pinned to
 # version tags for readability. Before this pipeline is relied on (and before the public-
 # repo move), pin each to a full commit SHA - e.g. `actions/checkout@<40-hex> # v4`.
 #
@@ -31,6 +31,22 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-24.04 # matches the box's glibc; native build, no cross-compile
+    # Throwaway Postgres for the sqlx cache drift check below. Holds no real data and no
+    # credentials; it does not weaken CI's offline posture -
+    # the clippy/test steps never touch it. Pinned to 18 to match the production major.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: bot_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bot_ci"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,6 +63,20 @@ jobs:
         run: shellcheck deploy/bin/deploy-wrapper scripts/hooks/pre-push
       - name: test (offline mocks only - no credentials)
         run: cargo test --workspace
+      - name: sqlx cache drift check (committed .sqlx vs live schema)
+        # The offline clippy/test steps above already fail if a query changed without
+        # `cargo sqlx prepare`; this additionally catches schema-type drift (a migration
+        # changed a column the cached query reads). Builds sqlx-cli from crates.io (a few
+        # minutes) rather than pulling a prebuilt-binary action, to keep CI's trust
+        # surface to the registry it already uses.
+        working-directory: crates/persistence
+        env:
+          DATABASE_URL: postgres://postgres@localhost:5432/bot_ci
+        run: |
+          cargo install sqlx-cli --version ^0.9 --no-default-features --features rustls,postgres --locked
+          psql "$DATABASE_URL" -c "CREATE ROLE bot_app NOLOGIN;"
+          cargo sqlx migrate run
+          cargo sqlx prepare --check
       - name: gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:

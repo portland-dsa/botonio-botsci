@@ -95,6 +95,7 @@ class Target(Enum):
 class Tokens(Enum):
     DiscordBotToken = "discord_bot_token"
     SolidarityTechToken = "solidarity_tech_token"
+    DbMigrationPassword = "db_migration_password"
 
 
 class UniqueAppendAction(argparse.Action):
@@ -169,7 +170,6 @@ if args.from_sops:
     if file_trusted(args.secrets_dir):
         pass
 
-
 # =========================================
 # Main loop
 # =========================================
@@ -180,6 +180,13 @@ for target in map(lambda x: x.value, args.targets):
     install_d(path, gname=deploygroup)
 
     for token in map(lambda x: x.value, args.tokens):
+
+        if target == Target.Staging and token == Tokens.SolidarityTechToken:
+            print(
+                "Ignoring Solidarity Tech Token for target: {target} - it's unused because we use a mock for testing and safety purposes"
+            )
+            continue
+
         cred_path = path / f"{token}.cred"
 
         if args.from_sops:

@@ -73,7 +73,7 @@ pub enum MigsStatusError {
 impl MigsStatus {
     /// Whether this status counts as good standing - `true` only for
     /// [`MemberInGoodStanding`](Self::MemberInGoodStanding). The single source of
-    /// truth for the decisions that hinge on standing (the `Member` role).
+    /// truth for the decisions that hinge on standing.
     pub fn is_good(self) -> bool {
         matches!(self, Self::MemberInGoodStanding)
     }

@@ -8,6 +8,11 @@ Type=notify
 NotifyAccess=main
 # `%i` is the instance name (staging/production); each instance has its own release tree
 # at /opt/botonio-botsci/<instance>/, so staging and production never share a `current`.
+# Apply pending migrations before serving, under the migration credential (loaded in
+# the per-instance drop-in). A non-zero exit here aborts the start, so the bot never
+# runs against a partially-migrated schema. The migration is idempotent: only pending
+# migrations run, so a plain restart is safe.
+ExecStartPre=/opt/botonio-botsci/%i/current/botonio-botsci migrate
 ExecStart=/opt/botonio-botsci/%i/current/botonio-botsci
 WorkingDirectory=/opt/botonio-botsci/%i
 # Per-instance: User=, the LoadCredentialEncrypted= lines, and the config Environment=

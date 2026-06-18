@@ -18,7 +18,7 @@ pub struct BotConfig {
     /// The Discord bot token, for the gateway connection.
     pub token: SecretString,
     /// The Discord guild (server) the bot serves. Commands are registered only to this
-    /// guild, and every invocation is re-checked against it (the guild allowlist).
+    /// guild, and every invocation is re-checked against the guild allow-list.
     pub guild_id: u64,
     /// The role id that marks a moderator (gates the help "For moderators" topic).
     pub moderator_role_id: u64,
@@ -27,8 +27,12 @@ pub struct BotConfig {
     /// How often to rebuild the member index.
     pub refresh_interval: Duration,
     /// The Solidarity Tech user-list id whose members form the bot's index
-    /// (the list pre-filtered to members with a Discord handle/id).
+    /// (where the list is pre-filtered to members with a Discord handle/id).
     pub discord_list_id: String,
+    /// The runtime database connection string (peer auth over the Unix socket, no
+    /// password): `postgres:///bot_<env>?host=/var/run/postgresql&user=bot_<env>_app`.
+    /// Local development supplies it via `.env`; production via the unit's `Environment=`.
+    pub db_runtime_dsn: String,
 }
 
 /// Everything that can go wrong reading config.
@@ -61,6 +65,7 @@ impl BotConfig {
         let refresh_interval =
             parse_refresh_secs(std::env::var("BOT_INDEX_REFRESH_SECS").ok().as_deref());
         let discord_list_id = read("SOLIDARITY_TECH_DISCORD_LIST_ID")?;
+        let db_runtime_dsn = read("DB_RUNTIME_DSN")?;
         Ok(Self {
             token,
             guild_id,
@@ -68,6 +73,7 @@ impl BotConfig {
             accent_color,
             refresh_interval,
             discord_list_id,
+            db_runtime_dsn,
         })
     }
 }

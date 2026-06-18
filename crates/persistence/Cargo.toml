@@ -1,0 +1,23 @@
+[package]
+name = "persistence"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+# Gates the loopback-Postgres conformance tests (tests/conformance.rs). Off by
+# default so a plain `cargo test` stays offline and needs no database; the suite is
+# run from a shell that can bind loopback (see deploy/test-infra/).
+live-db = []
+
+[dependencies]
+domain = { path = "../domain" }
+engine = { path = "../engine" }
+async-trait = "0.1"
+thiserror = "2"
+chrono = { version = "0.4", default-features = false }
+sqlx = { version = "0.9", default-features = false, features = [
+    "runtime-tokio", "postgres", "macros", "chrono", "migrate",
+] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -26,7 +26,7 @@ const SONIC_SERVER: u64 = 1;
 const EGGMAN_SERVER: u64 = 666;
 
 /// A recording stand-in for serenity's HTTP: it remembers every guild it was asked
-/// to leave, and can be told to refuse the exit (the refused-exit scenario).
+/// to leave, and can be told to refuse the exit.
 #[derive(Debug, Default)]
 struct RecordingLeaver {
     left: Mutex<Vec<GuildId>>,

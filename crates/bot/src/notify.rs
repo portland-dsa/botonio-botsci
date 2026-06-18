@@ -24,9 +24,14 @@ pub fn watchdog_ping() {
 }
 
 /// The interval at which to send watchdog pings - half the configured `WatchdogSec` -
-/// or `None` if no watchdog is configured (or off Linux).
+/// or `None` if no watchdog is configured (or off Linux). A `WatchdogSec` so small that
+/// half of it rounds to zero is treated as unconfigured: `tokio::time::interval(0)`
+/// panics, and a sub-microsecond ping cadence is meaningless.
 pub fn watchdog_interval() -> Option<Duration> {
-    watchdog_usec().map(|usec| Duration::from_micros(usec / 2))
+    watchdog_usec().and_then(|usec| {
+        let half = usec / 2;
+        (half > 0).then(|| Duration::from_micros(half))
+    })
 }
 
 #[cfg(target_os = "linux")]

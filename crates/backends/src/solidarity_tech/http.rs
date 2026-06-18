@@ -129,7 +129,7 @@ impl SolidarityTechHttp {
 
     /// One page of `GET /users`, optionally filtered to the given user-list ids
     /// (comma-separated). `user_list_ids = None` is the unfiltered collection.
-    /// `lenient` skips a member whose custom property doesn't decode (with a warning)
+    /// `lenient` skips a member whose custom property doesn't decode
     /// instead of failing the page; both whole-roster sweeps pass `true` so one bad
     /// record never aborts the run.
     async fn users_page(

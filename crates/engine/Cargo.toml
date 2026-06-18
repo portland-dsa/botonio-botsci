@@ -11,7 +11,7 @@ chrono = { version = "0.4", features = ["serde"] }
 serde_json = "1"
 tracing = "0.1"
 # Async trait definitions so `MemberStore` is object-safe from day one; a later
-# `diesel`-backed implementation drops in without a signature change.
+# sqlx/Postgres-backed implementation drops in without a signature change.
 async-trait = "0.1"
 
 [dev-dependencies]

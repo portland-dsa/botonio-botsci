@@ -82,7 +82,7 @@ fn card_color(rec: &MemberRecord, today: NaiveDate) -> u32 {
     match rec.standing {
         Some(MigsStatus::MemberInGoodStanding) => match rec.expires {
             // Amber only as a heads-up for a *future* xdate in the reminder window; a
-            // past xdate does not turn a good-standing member red (standing is king).
+            // past xdate does not turn a good-standing member red - standing prevails.
             Some(x) if x >= today && (x - today).num_days() <= SOON_DAYS => COLOR_AMBER,
             _ => COLOR_GREEN,
         },

@@ -14,6 +14,7 @@ dotenvy = "0.15.7"
 domain = { path = "../domain" }
 engine = { path = "../engine" }
 mock-st = { path = "../mock-st" }
+persistence = { path = "../persistence" }
 poise = "0.6"
 serenity = { version = "0.12.5", default-features = false, features = [
     "client",
@@ -39,13 +40,13 @@ serde_json = "1"
 cucumber = "0.21"
 futures = "0.3"
 
-# Behavior suite for the home-guild guard - offline, Cucumber, mocks only (no live
-# target). Protagonist: Botonio. Runs on every `cargo test` (no loopback server).
+# Behavior suite for the home-guild guard - offline, Cucumber, mocks only.
+# Protagonist: Botonio. Runs on every `cargo test` (no loopback server).
 [[test]]
 name = "guild_guard"
 harness = false
 
 # `sd-notify` is a Unix-datagram-socket protocol and is meaningless off Linux; gating
-# it here keeps non-Linux development builds (Windows/macOS) from pulling or compiling it.
+# it here keeps non-Linux development builds from pulling or compiling it.
 [target.'cfg(target_os = "linux")'.dependencies]
 sd-notify = "0.4"
