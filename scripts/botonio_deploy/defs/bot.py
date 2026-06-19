@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from enum import Enum, StrEnum
 
-from . import SecretTokens
+from . import SecretTokens, EnvVars
 
 
 class BotSecretTokens(Enum):
@@ -23,11 +23,11 @@ class BotSecretTokens(Enum):
 class BotEnvironmentValues(StrEnum):
     """The non-secret ``Environment=`` keys rendered into a bot instance's override.conf."""
 
-    DiscordModeratorRoleId = "discord_role_id"
-    DiscordGuildId = "discord_guild_id"
-    StUserListId = "st_user_list_id"
+    DiscordModeratorRoleId = EnvVars.DiscordModeratorRoleId
+    DiscordGuildId = EnvVars.DiscordGuildId
+    StUserListId = EnvVars.StUserListId
 
     # Personas (staging mock only)
-    GoodStandingUserId = "good_standing_id"
-    ExpiringUserId = "expiring_standing_id"
-    LapsedUserId = "lapsed_user_id"
+    GoodStandingUserId = EnvVars.GoodStandingUserId
+    ExpiringUserId = EnvVars.ExpiringUserId
+    LapsedUserId = EnvVars.LapsedUserId

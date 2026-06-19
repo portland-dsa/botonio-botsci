@@ -1,0 +1,77 @@
+[Unit]
+Description=DSA membership bot (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+# `%i` is the instance name (staging/production); each instance has its own release tree
+# at /opt/botonio-botsci/<instance>/, so staging and production never share a `current`.
+# Apply pending migrations before serving, under the migration credential (loaded in
+# the per-instance drop-in). A non-zero exit here aborts the start, so the bot never
+# runs against a partially-migrated schema. The migration is idempotent: only pending
+# migrations run, so a plain restart is safe.
+ExecStartPre=/opt/botonio-botsci/%i/current/botonio-botsci migrate
+ExecStart=/opt/botonio-botsci/%i/current/botonio-botsci
+WorkingDirectory=/opt/botonio-botsci/%i
+# Per-instance: User=, the LoadCredentialEncrypted= lines, and the config Environment=
+# live in the matching botonio-botsci@<instance>.service.d/override.conf drop-in.
+
+# Readiness is gated on the first index build (the bot sends READY=1 only once the
+# gateway is up AND the index is built); give that room without hanging forever.
+TimeoutStartSec=180
+WatchdogSec=30
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# --- sandbox (validate on the box: systemd-analyze security botonio-botsci@staging) ----------
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RemoveIPC=true
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged ~@resources
+# AF_UNIX is REQUIRED: sd_notify speaks over a Unix datagram socket; omit it and the unit
+# never reaches "ready". AF_INET/AF_INET6 are the gateway + backend HTTPS.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+# Egress hardening: deny the internal/private networks the bot never needs.
+# Public egress (Discord, the backend APIs) and loopback (systemd-resolved
+# DNS at 127.0.0.53) stay open, so this is SSRF / lateral-movement containment. It does NOT
+# by itself divorce staging from real membership records: an IP filter can't tell the real Solidarity
+# Tech from Discord (shared CDN). That divorce is the per-instance *_BASE_URL override plus
+# the guild allowlist. NOTE: if this box ever uses a LAN DNS resolver, drop the
+# matching line or DNS breaks; a too-aggressive fence is caught by staging's smoke check
+# before production is promoted.
+IPAddressDeny=10.0.0.0/8
+IPAddressDeny=172.16.0.0/12
+IPAddressDeny=192.168.0.0/16
+IPAddressDeny=169.254.0.0/16
+IPAddressDeny=100.64.0.0/10
+IPAddressDeny=fc00::/7
+IPAddressDeny=fe80::/10
+
+[Install]
+WantedBy=multi-user.target

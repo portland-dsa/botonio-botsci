@@ -8,16 +8,19 @@ function, never at import time, so this module imports cleanly on Windows.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Dict, Generic, Iterable, Optional, Set, TypeVar
 
 from .defs import *
 
 ROOTNAME = "botonio-botsci"
 SOPS_AGE_KEYFILE = Path("/root/.config/sops/age/keys.txt")
+STAGED_SECRETS = Path("/tmp/botonio-botsci")
 
 
 def service(target: str) -> FileOwnership:
@@ -93,11 +96,30 @@ def _in_group(name: str, primary_gid: int, group: str) -> bool:
     return entry.gr_gid == primary_gid or name in entry.gr_mem
 
 
+def prepare(secrets_dir: Path) -> None:
+    """Escalate to root and refuse to read secrets out of an untrusted directory.
+
+    The standard preamble for the box-side provision verbs.
+    """
+    ensure_root()
+    assert_trusted(secrets_dir)
+
+
 def install_dir(dest, perms: FilePermissions, owner: FileOwnership = ROOT) -> None:
     """Ensure directory ``dest`` exists with the given mode and ownership (like ``install -d``)."""
     dest = Path(dest)
     dest.mkdir(mode=perms, parents=True, exist_ok=True)
     dest.chmod(perms)  # mkdir's mode is masked by umask; chmod forces it.
+    shutil.chown(dest, user=owner.user, group=owner.group)
+
+
+def install_file(
+    data: bytes, dest: Path, perms: FilePermissions, owner: FileOwnership = ROOT
+) -> None:
+    """Write ``data`` to ``dest`` with the given mode and ownership (like ``install -m``)."""
+    dest = Path(dest)
+    dest.write_bytes(data)
+    dest.chmod(perms)
     shutil.chown(dest, user=owner.user, group=owner.group)
 
 
@@ -125,10 +147,85 @@ def creds_encrypt(
     shutil.chown(dest, user=owner.user, group=owner.group)
 
 
-def sops_extract(enc_path: Path, key: SecretTokens) -> bytes:
-    """Decrypt a single key out of a SOPS file; returns raw ``bytes`` (fed onward over stdin)."""
-    return run(
-        ["sops", "-d", "--extract", f'["{key}"]', str(enc_path)],
-        capture=True,
-        text=False,
-    ).stdout
+# A SOPS key is always a string; every typed key enum (SecretTokens, BotEnvironmentValues, ...)
+# is a StrEnum, so it satisfies this bound - and `f"{key}"` renders the wire name, not the member.
+T = TypeVar("T", bound=str)
+
+
+@dataclass
+class ExtractedSecret(Generic[T]):
+    token_name: T
+    target: Targets
+    value: bytes
+
+
+class SecretsIter(Generic[T]):
+    def __init__(
+        self,
+        target: Iterable[Targets],
+        secrets_dir: Path,
+        tokens: Iterable[T],
+        *,
+        exceptions: Optional[Dict[Targets, Set[T]]] = None,
+    ):
+        self._target = iter(target)
+        self._curr_target: Optional[Targets] = None
+        self._secrets_file = None
+        self._secrets_dir = secrets_dir
+        self._tokens = tokens
+        self._tokens_iter = iter(self._tokens)
+        if exceptions is None:
+            exceptions = {}
+        self._exceptions = exceptions
+
+    def __iter__(self) -> SecretsIter[T]:
+        return self
+
+    def _sops_extract(self, key: T) -> bytes:
+        assert self._secrets_file is not None
+
+        return run(
+            ["sops", "-d", "--extract", f'["{key}"]', str(self._secrets_file)],
+            capture=True,
+            text=False,
+        ).stdout
+
+    def _next_target(self, force: bool = False) -> Targets:
+        if force or self._curr_target is None:
+            # Implicit behavior: this automatically raises StopIteration for us
+            self._curr_target = next(self._target)
+            self._secrets_file = (
+                self._secrets_dir / f"{self._curr_target.value}.enc.yaml"
+            )
+
+        return self._curr_target
+
+    def _next_token(self, force: bool = False) -> T:
+        if force or self._tokens_iter is None:
+            self._tokens_iter = iter(self._tokens)
+
+        try:
+            self._curr_token = next(self._tokens_iter)
+        except StopIteration:
+            self._next_target(True)
+            # Recursion is the simplest method here,
+            # this will never be more than one recursive level
+            return self._next_token(True)
+
+        return self._curr_token
+
+    def __next__(self) -> ExtractedSecret[T]:
+
+        value = None
+
+        while value is None:
+            token = self._next_token()
+            target = self._next_target()
+
+            if not (target in self._exceptions and token in self._exceptions[target]):
+                value = self._sops_extract(token)
+            else:
+                continue
+
+        assert self._curr_target is not None
+        return ExtractedSecret(self._curr_token, self._curr_target, value)

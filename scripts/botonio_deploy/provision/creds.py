@@ -23,7 +23,9 @@ from typing import Dict, FrozenSet, Optional, Set
 from cyclopts import App
 
 from .. import ops
+from ..ops import STAGED_SECRETS
 from ..defs import (
+    ALL_TARGETS,
     BotSecretTokens,
     FilePermissions,
     SecretTokens,
@@ -35,9 +37,7 @@ creds = App(
     name="creds", help="Provision systemd credentials from the encrypted secrets."
 )
 
-STAGED_SECRETS = Path("/tmp/botonio-botsci")
 DEFAULT_BOT_SECRETS = frozenset(set(BotSecretTokens))
-ALL_TARGETS = frozenset(Targets)
 
 
 def _run(
@@ -48,10 +48,10 @@ def _run(
     *,
     exceptions: Optional[Dict[Targets, Set[SecretTokens]]] = None,
 ):
-    _prepare(secrets_dir)
-    for target in targets:
-        print(f'provisioning target "{target}" for component "{component}"')
-        _provision_instance(component, target, secrets_dir, tokens, exceptions=exceptions)
+    ops.prepare(secrets_dir)
+    _provision_instances(
+        component, ops.SecretsIter(targets, secrets_dir, tokens, exceptions=exceptions)
+    )
 
 
 @creds.command(name="all")
@@ -59,7 +59,7 @@ def _run(
 def all(
     *,
     targets: FrozenSet[Targets] = ALL_TARGETS,
-    secrets_dir: Path = STAGED_SECRETS,
+    secrets_dir: Path = ops.STAGED_SECRETS,
     bot_tokens: FrozenSet[BotSecretTokens] = DEFAULT_BOT_SECRETS,
 ):
     """Provisions all secret credentials for all components of the bot ecosystem.
@@ -79,7 +79,7 @@ def all(
     # Both subcommands do this, but it's both not worth the effort to wire a whole argument
     # to prevent that and this explicit one guards against us removing it from the subcommands
     # for some reason later
-    _prepare(secrets_dir)
+    ops.prepare(secrets_dir)
 
     backup(secrets_dir=secrets_dir)
     bot(target=targets, secrets_dir=secrets_dir, tokens=bot_tokens)
@@ -105,7 +105,7 @@ def bot(
                             and silently ignored
     """
     exceptions = {Targets.Staging: {SecretTokens.SolidarityTechToken}}
-    secret_tokens: Set[SecretTokens] = {SecretTokens(tok) for tok in tokens}
+    secret_tokens: Set[SecretTokens] = {SecretTokens(tok.value) for tok in tokens}
 
     _run(set(target), secrets_dir, secret_tokens, "bot", exceptions=exceptions)
 
@@ -121,39 +121,25 @@ def backup(*, secrets_dir: Path = STAGED_SECRETS) -> None:
     Args:
         secrets_dir:    The (admin:root owned, 0o700 mode) directory the `.enc.yaml` files exist in.
     """
-    tokens = {SecretTokens(tok) for tok in BackupSecretTokens}
+    tokens = {SecretTokens(tok.value) for tok in BackupSecretTokens}
 
     _run({Targets.Production}, secrets_dir, tokens, "backup")
 
 
-def _prepare(secrets_dir: Path) -> None:
-    """Escalate to root and refuse to read secrets out of an untrusted directory."""
-    ops.ensure_root()
-    ops.assert_trusted(secrets_dir)
-
-
-def _provision_instance(
-    component: str,
-    target: Targets,
-    secrets_dir: Path,
-    tokens: Set[SecretTokens],
-    *,
-    exceptions: Optional[Dict[Targets, Set[SecretTokens]]] = None,
+def _provision_instances(
+    component: str, secrets_iterator: ops.SecretsIter[SecretTokens]
 ) -> None:
     """Decrypt one instance's tokens out of SOPS and re-encrypt each into a systemd credential."""
-    enc = secrets_dir / f"{target}.enc.yaml"
-    etc = Path("/etc") / ops.ROOTNAME / component / target
-    owner = ops.service(target)
-    ops.install_dir(etc, FilePermissions.GroupDir, owner)
 
-    for token in tokens:
-        if (
-            exceptions is not None
-            and target in exceptions
-            and token in exceptions[target]
-        ):
-            continue
+    for secret in secrets_iterator:
+        target = secret.target
 
-        dest = etc / f"{token.value}.cred"
-        ops.creds_encrypt(token, ops.sops_extract(enc, token), dest, owner)
+        print(f"provisioning {secret.token_name} for {component} on target {target}")
+
+        etc = Path("/etc") / ops.ROOTNAME / component / target
+        owner = ops.service(target)
+        ops.install_dir(etc, FilePermissions.GroupDir, owner)
+        dest = etc / f"{secret.token_name}.cred"
+
+        ops.creds_encrypt(secret.token_name, secret.value, dest, owner)
         print(f"ok: {dest}")

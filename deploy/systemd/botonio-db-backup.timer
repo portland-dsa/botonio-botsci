@@ -1,5 +1,3 @@
-# Nightly trigger for bot-db-backup.service. Enable with:
-#   systemctl enable --now bot-db-backup.timer
 [Unit]
 Description=Nightly encrypted off-box backup of the production membership database
 

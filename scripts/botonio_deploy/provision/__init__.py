@@ -8,9 +8,11 @@ from __future__ import annotations
 from cyclopts import App
 
 from .creds import creds
+from .systemd import systemd
 
 provision = App(
     name="provision",
     help="Provision the box from its encrypted secrets.",
 )
 provision.command(creds)
+provision.command(systemd)

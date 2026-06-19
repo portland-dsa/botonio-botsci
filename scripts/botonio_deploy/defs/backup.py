@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from enum import Enum, StrEnum
 
-from . import SecretTokens
+from . import SecretTokens, EnvVars
 
 
 class BackupSecretTokens(Enum):
@@ -22,6 +22,6 @@ class BackupSecretTokens(Enum):
 class BackupEnvironmentValues(StrEnum):
     """The non-secret ``Environment=`` keys for the backup timer."""
 
-    B2BucketName = "b2_bucket_name"
-    B2KeyId = "b2_key_id"
-    BackupAgeRecipient = "box_age_pubkey"
+    B2BucketName = EnvVars.B2BucketName
+    B2KeyId = EnvVars.B2KeyId
+    BackupAgeRecipient = EnvVars.BackupAgeRecipient

@@ -28,11 +28,29 @@ class Targets(StrEnum):
     Production = "production"
 
 
+ALL_TARGETS = frozenset(Targets)
+
+
 class SecretTokens(StrEnum):
     DiscordBotToken = "discord_bot_token"
     SolidarityTechToken = "solidarity_tech_token"
     DbMigrationPassword = "db_migration_password"
     B2ApplicationKey = "b2_application_key"
+
+
+class EnvVars(StrEnum):
+    DiscordModeratorRoleId = "discord_mod_id"
+    DiscordGuildId = "discord_guild_id"
+    StUserListId = "st_user_list_id"
+    # Discord: Personas (staging mock only)
+    GoodStandingUserId = "good_standing_id"
+    ExpiringUserId = "expiring_standing_id"
+    LapsedUserId = "lapsed_user_id"
+
+    # B2 Stuff
+    B2BucketName = "b2_bucket_name"
+    B2KeyId = "b2_key_id"
+    BackupAgeRecipient = "box_age_pubkey"
 
 
 class FilePermissions(IntEnum):
@@ -116,7 +134,9 @@ from .bot import BotEnvironmentValues, BotSecretTokens
 
 __all__ = [
     "Targets",
+    "ALL_TARGETS",
     "SecretTokens",
+    "EnvVars",
     "FilePermissions",
     "FileOwnership",
     "ROOT",
