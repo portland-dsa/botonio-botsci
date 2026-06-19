@@ -9,6 +9,7 @@ from cyclopts import App
 
 from .creds import creds
 from .systemd import systemd
+from .db import db
 
 provision = App(
     name="provision",
@@ -16,3 +17,4 @@ provision = App(
 )
 provision.command(creds)
 provision.command(systemd)
+provision.command(db)
