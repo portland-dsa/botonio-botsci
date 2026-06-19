@@ -9,17 +9,17 @@ A containerized PostgreSQL for local development and CI. It backs two things in 
 It is deliberately throwaway: trust authentication, an in-memory (`tmpfs`) data
 directory, and a non-standard host port. It holds no real data and is safe to wipe.
 **It is not the production database** - that one is provisioned by hand with real
-hardening per.
+hardening and credentials.
 
 ## Bring it up
 
 ```sh
 podman compose -f deploy/test-infra/compose.yaml up -d --build
-export DATABASE_URL=postgres://postgres@localhost:55432/bot_dev
+export DATABASE_URL=postgres://postgres@localhost:55432/botonio_dev
 ```
 
 The cluster listens on host port **55432** (mapped to the container's 5432) so it
-never clashes with a Postgres already running on 5432. The `bot_app` group role
+never clashes with a Postgres already running on 5432. The `botonio_app` group role
 the migrations grant to is created automatically on startup (baked into the image
 from `initdb/`).
 

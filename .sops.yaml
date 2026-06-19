@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: secrets[\\/].*\.enc\.ya?ml$ # match .yml too; [\\/] for win+nix path seps
+    age: "age1wrk9tqsk9f5g258q3dla2utjpyeh5q9u28k8w97pn30gmu36cqnq959hy5,age157h9dve7su6uguer30pexnhntgysqttsyd6umrutshkkzmpp9qnqlvuttw"

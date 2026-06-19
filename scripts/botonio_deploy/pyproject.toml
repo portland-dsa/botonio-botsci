@@ -1,0 +1,19 @@
+[project]
+name = "botonio-deploy"
+version = "0.1.0"
+description = "Provision and deploy the botonio-botsci box from its encrypted secrets."
+requires-python = ">=3.10"
+# cyclopts is the only direct dependency; uv.lock pins it and its (pure-Python) transitives.
+dependencies = ["cyclopts>=3"]
+
+[tool.uv]
+# Not a wheel: `uv sync` just gives a dev venv with cyclopts to run/test against.
+package = false
+
+[tool.pyright]
+# We develop on Windows but target the Linux box - tell the type checker the platform so the
+# POSIX-only stdlib (os.geteuid, pwd, grp) resolves with autocomplete and no warnings. Analysis
+# only; the runtime code still imports those lazily, box-side. Pylance picks this up when
+# scripts/botonio_deploy is opened as a workspace folder.
+pythonPlatform = "Linux"
+pythonVersion = "3.12"

@@ -39,11 +39,11 @@ jobs:
         image: postgres:18
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
-          POSTGRES_DB: bot_ci
+          POSTGRES_DB: botonio_ci
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d bot_ci"
+          --health-cmd "pg_isready -U postgres -d botonio_ci"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 30
@@ -71,10 +71,10 @@ jobs:
         # surface to the registry it already uses.
         working-directory: crates/persistence
         env:
-          DATABASE_URL: postgres://postgres@localhost:5432/bot_ci
+          DATABASE_URL: postgres://postgres@localhost:5432/botonio_ci
         run: |
           cargo install sqlx-cli --version ^0.9 --no-default-features --features rustls,postgres --locked
-          psql "$DATABASE_URL" -c "CREATE ROLE bot_app NOLOGIN;"
+          psql "$DATABASE_URL" -c "CREATE ROLE botonio_app NOLOGIN;"
           cargo sqlx migrate run
           cargo sqlx prepare --check
       - name: gitleaks
