@@ -15,8 +15,12 @@ engine = { path = "../engine" }
 async-trait = "0.1"
 thiserror = "2"
 chrono = { version = "0.4", default-features = false }
+secrecy = "0.10"
+hmac = "0.12"
+sha2 = "0.10"
+serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = [
-    "runtime-tokio", "postgres", "macros", "chrono", "migrate",
+    "runtime-tokio", "postgres", "macros", "chrono", "migrate", "json",
 ] }
 
 [dev-dependencies]
