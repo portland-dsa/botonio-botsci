@@ -16,6 +16,7 @@
 // `engine::backends::...`.
 pub use backends;
 
+pub mod audit;
 pub mod card;
 pub mod error;
 pub use error::{Error, Result};
