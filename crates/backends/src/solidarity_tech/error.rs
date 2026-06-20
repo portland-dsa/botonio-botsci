@@ -5,9 +5,11 @@ use domain::MigsStatusError;
 /// Everything that can go wrong in a [`SolidarityTechClient`](super::SolidarityTechClient) call.
 #[derive(Debug, thiserror::Error)]
 pub enum SolidarityTechError {
-    /// A transport-level failure from `reqwest` (connection, timeout, TLS).
+    /// A transport-level failure from `reqwest` (connection, timeout, TLS). The message
+    /// is a failure-kind description, never `reqwest`'s own `Display`: that embeds the
+    /// request URL, which for a `find_members` request carries the member's email (PII).
     #[error("solidarity tech http error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(String),
     /// The API returned a non-2xx status; `body` is the raw response text, kept
     /// for diagnostics (it carries no token).
     #[error("solidarity tech returned status {status}: {body}")]
@@ -44,4 +46,29 @@ pub enum SolidarityTechError {
     /// skips such a record rather than failing the whole lookup.
     #[error("malformed solidarity tech member: {0}")]
     MalformedMember(String),
+}
+
+impl From<reqwest::Error> for SolidarityTechError {
+    fn from(e: reqwest::Error) -> Self {
+        SolidarityTechError::Http(redact_request_url(&e))
+    }
+}
+
+/// A PII-safe description of a `reqwest` transport failure.
+///
+/// `reqwest::Error`'s `Display` embeds the request URL, and a [`find_members`] URL carries
+/// the member's email. Report the failure by kind only - never the URL - so a transport
+/// error can be logged without leaking the address being looked up.
+///
+/// [`find_members`]: super::SolidarityTechClient::find_members
+fn redact_request_url(e: &reqwest::Error) -> String {
+    if e.is_timeout() {
+        "request timed out".to_string()
+    } else if e.is_connect() {
+        "could not connect".to_string()
+    } else if e.is_decode() {
+        "could not decode the response".to_string()
+    } else {
+        "transport failure".to_string()
+    }
 }

@@ -1,7 +1,8 @@
 //! In-process mock of Solidarity Tech's `GET /users`, for staging only.
 //!
 //! [`spawn`] stands up a roster of fabricated members - built from named
-//! [`Persona`]s keyed to real test-server Discord ids - so the staging bot reads
+//! [`Persona`]s keyed to real test-server Discord ids (or, for the email-only
+//! persona, an email) - so the staging bot reads
 //! every membership state without touching real records. Read-only by design: it
 //! answers only the list read the bot's index build makes, nothing else.
 

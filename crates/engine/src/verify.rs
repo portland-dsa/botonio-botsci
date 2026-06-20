@@ -13,7 +13,7 @@ use crate::audit::AuditLog;
 use crate::backends::discord::DiscordClient;
 use crate::backends::solidarity_tech::SolidarityTechClient;
 use crate::store::{IdentityWrite, MemberRecord, MemberStore};
-use crate::util::{DiscordHandle, DiscordUserId};
+use crate::util::{DiscordHandle, DiscordUserId, Email};
 
 /// The identity repair a successful match implies.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +45,46 @@ pub enum MatchOutcome {
     Miss,
 }
 
+/// What [`match_by_email`] decided from the records a membership email resolved to.
+///
+/// `#[must_use]` for the same reason as [`MatchOutcome`]: dropping it would discard the
+/// conflict guard and silently run an assignment against an unresolved member.
+#[derive(Debug)]
+#[must_use]
+pub enum EmailMatchOutcome {
+    /// One record is safe to claim for this Discord account, with the repair to apply.
+    Matched {
+        record: MemberRecord,
+        heal: HealAction,
+    },
+    /// The email belongs to a record bound to a different account, or to several
+    /// records none of which is already this account's - resolve by hand.
+    Conflict,
+    /// No Solidarity Tech record carries this email.
+    Miss,
+}
+
+/// The [`HealAction`] a successful match implies, from the stored record and the
+/// member's current identity. A record that already carries a Discord id only ever
+/// needs its handle refreshed; one with no id is backfilled. Shared by
+/// [`match_member`] (id/handle path) and [`match_by_email`] (email path) so both agree.
+fn heal_for(
+    record: &MemberRecord,
+    target: DiscordUserId,
+    target_handle: &DiscordHandle,
+) -> HealAction {
+    match record.discord_user_id {
+        Some(_) => {
+            if record.discord_handle.as_ref() == Some(target_handle) {
+                HealAction::None
+            } else {
+                HealAction::UpdateHandle(target_handle.clone())
+            }
+        }
+        None => HealAction::BackfillId(target),
+    }
+}
+
 /// Decide the verification outcome from the two cache reads.
 ///
 /// An id hit is authoritative and repairs only a drifted handle. On an id miss, a
@@ -58,19 +98,15 @@ pub fn match_member(
     target_handle: &DiscordHandle,
 ) -> MatchOutcome {
     if let Some(record) = by_id {
-        let heal = if record.discord_handle.as_ref() == Some(target_handle) {
-            HealAction::None
-        } else {
-            HealAction::UpdateHandle(target_handle.clone())
-        };
+        let heal = heal_for(&record, target_id, target_handle);
         return MatchOutcome::Matched { record, heal };
     }
     if let Some(record) = by_handle {
         return match record.discord_user_id {
-            None => MatchOutcome::Matched {
-                record,
-                heal: HealAction::BackfillId(target_id),
-            },
+            None => {
+                let heal = heal_for(&record, target_id, target_handle);
+                MatchOutcome::Matched { record, heal }
+            }
             // An id is present and necessarily differs from `target_id` (an equal id
             // would have been found by the id lookup), so the handle now points at a
             // record bound to another account.
@@ -80,6 +116,51 @@ pub fn match_member(
     MatchOutcome::Miss
 }
 
+/// Decide which (if any) of the records a typed email resolved to may be claimed for
+/// `target`.
+///
+/// A unique email yields zero or one row in practice. Zero is a [`Miss`]. One is a clean
+/// [`Matched`] when its stored Discord id is empty or already `target`'s, and a
+/// [`Conflict`] when it is some other account's. More than one is a [`Matched`] only when
+/// exactly one already carries `target`'s id (an idempotent re-verify); otherwise it is a
+/// [`Conflict`], because the code never guesses which of several records to bind.
+///
+/// This is the email key's form of Part 1's impersonation guard: never bind an account to
+/// a record that already belongs to a different one.
+///
+/// [`Miss`]: EmailMatchOutcome::Miss
+/// [`Matched`]: EmailMatchOutcome::Matched
+/// [`Conflict`]: EmailMatchOutcome::Conflict
+pub fn match_by_email(
+    matches: Vec<MemberRecord>,
+    target: DiscordUserId,
+    target_handle: &DiscordHandle,
+) -> EmailMatchOutcome {
+    // A record already bound to this account wins outright, at any match count.
+    if let Some(record) = matches
+        .iter()
+        .find(|r| r.discord_user_id == Some(target))
+        .cloned()
+    {
+        let heal = heal_for(&record, target, target_handle);
+        return EmailMatchOutcome::Matched { record, heal };
+    }
+    match matches.len() {
+        0 => EmailMatchOutcome::Miss,
+        1 => {
+            let record = matches.into_iter().next().expect("len checked");
+            match record.discord_user_id {
+                None => {
+                    let heal = heal_for(&record, target, target_handle);
+                    EmailMatchOutcome::Matched { record, heal }
+                }
+                Some(_) => EmailMatchOutcome::Conflict,
+            }
+        }
+        _ => EmailMatchOutcome::Conflict,
+    }
+}
+
 /// What a verification resolved to - the moderator-facing result.
 #[derive(Debug, PartialEq, Eq)]
 pub enum VerifyOutcome {
@@ -87,6 +168,9 @@ pub enum VerifyOutcome {
     Verified(Role),
     /// No record found; the member was assigned `Unverified`.
     Unverified,
+    /// A manual email lookup found no record; nothing was changed (the member already
+    /// holds `Unverified` from the automatic miss that opened the manual flow).
+    NotFound,
     /// The handle is on record for a different account; nothing was changed.
     Conflict,
 }
@@ -102,6 +186,29 @@ pub enum VerifyError {
     Audit(String),
     #[error("discord role write failed: {0}")]
     Discord(String),
+    #[error("solidarity tech read failed: {0}")]
+    SolidarityTech(String),
+}
+
+/// How a verification was initiated, written to the audit row's `method` field so a query
+/// or operator can tell the automatic id/handle path ([`verify`]) from the manual email
+/// path ([`verify_by_email`]). A closed set, so a call site cannot record a typo'd value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VerifyMethod {
+    /// The automatic match on the member's Discord id then handle.
+    Discord,
+    /// The moderator-supplied membership-email lookup.
+    Email,
+}
+
+impl VerifyMethod {
+    /// The stable string written to the audit `method` field.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Discord => "discord",
+            Self::Email => "email",
+        }
+    }
 }
 
 /// Verify `target` and assign their role, on behalf of moderator `invoker`.
@@ -143,8 +250,24 @@ where
     match match_member(by_id, by_handle, target, &target_handle) {
         MatchOutcome::Matched { record, heal } => {
             let role = record.role();
-            record_outcome(audit, invoker, target, "verified", Some(role)).await?;
-            assign_role_or_record_failure(discord, audit, invoker, target, role).await?;
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "verified",
+                Some(role),
+                VerifyMethod::Discord,
+            )
+            .await?;
+            assign_role_or_record_failure(
+                discord,
+                audit,
+                invoker,
+                target,
+                role,
+                VerifyMethod::Discord,
+            )
+            .await?;
             self_heal(
                 solidarity_tech,
                 store,
@@ -157,31 +280,57 @@ where
             Ok(VerifyOutcome::Verified(role))
         }
         MatchOutcome::Miss => {
-            record_outcome(audit, invoker, target, "unverified", Some(Role::Unverified)).await?;
-            assign_role_or_record_failure(discord, audit, invoker, target, Role::Unverified)
-                .await?;
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "unverified",
+                Some(Role::Unverified),
+                VerifyMethod::Discord,
+            )
+            .await?;
+            assign_role_or_record_failure(
+                discord,
+                audit,
+                invoker,
+                target,
+                Role::Unverified,
+                VerifyMethod::Discord,
+            )
+            .await?;
             Ok(VerifyOutcome::Unverified)
         }
         MatchOutcome::Conflict => {
             // No role is granted, but the attempt is still recorded.
-            record_outcome(audit, invoker, target, "conflict", None).await?;
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "conflict",
+                None,
+                VerifyMethod::Discord,
+            )
+            .await?;
             Ok(VerifyOutcome::Conflict)
         }
     }
 }
 
-/// Append one `member_verify` audit row. The detail is non-identifying: the outcome and
-/// (when a role is granted) its name - never the conflicting account or any PII.
+/// Append one `member_verify` audit row. The detail is non-identifying: the outcome,
+/// method, and (when a role is granted) its name - never the conflicting account or any PII.
 async fn record_outcome<A: AuditLog>(
     audit: &A,
     actor: DiscordUserId,
     subject: DiscordUserId,
     outcome: &str,
     role: Option<Role>,
+    method: VerifyMethod,
 ) -> Result<(), VerifyError> {
     let detail = match role {
-        Some(r) => serde_json::json!({ "outcome": outcome, "role": r.as_str() }),
-        None => serde_json::json!({ "outcome": outcome }),
+        Some(r) => {
+            serde_json::json!({ "outcome": outcome, "role": r.as_str(), "method": method.as_str() })
+        }
+        None => serde_json::json!({ "outcome": outcome, "method": method.as_str() }),
     };
     audit
         .record(actor, subject, "member_verify", detail)
@@ -246,6 +395,7 @@ async fn assign_role_or_record_failure<Dc, A>(
     invoker: DiscordUserId,
     target: DiscordUserId,
     role: Role,
+    method: VerifyMethod,
 ) -> Result<(), VerifyError>
 where
     Dc: DiscordClient,
@@ -255,7 +405,7 @@ where
         return Ok(());
     };
     if let Err(audit_err) =
-        record_outcome(audit, invoker, target, "verify_failed", Some(role)).await
+        record_outcome(audit, invoker, target, "verify_failed", Some(role), method).await
     {
         tracing::warn!(
             error = %audit_err,
@@ -300,11 +450,119 @@ async fn self_heal<St, S>(
     }
 }
 
+/// Verify `target` from a moderator-supplied membership `email`, the manual fallback when
+/// the automatic id/handle match in [`verify`] misses.
+///
+/// Reads Solidarity Tech live by email (the cache holds no email index), projects the
+/// hits, and decides with [`match_by_email`]. A match audits before writing, assigns the
+/// standing role, and writes the discovered Discord identity back to Solidarity Tech and
+/// the cache (best-effort, as in [`verify`]). A miss writes no role - the member already
+/// holds `Unverified` from the automatic miss - and a conflict writes nothing. Every
+/// outcome is audited with `method: "email"`, never the email itself.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_by_email<St, Dc, S, A>(
+    solidarity_tech: &St,
+    discord: &Dc,
+    store: &S,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+    target_handle: DiscordHandle,
+    email: Email,
+) -> Result<VerifyOutcome, VerifyError>
+where
+    St: SolidarityTechClient,
+    Dc: DiscordClient,
+    S: MemberStore + IdentityWrite,
+    A: AuditLog,
+{
+    let members = solidarity_tech
+        .find_by_email(&email)
+        .await
+        .map_err(|e| VerifyError::SolidarityTech(e.to_string()))?;
+    let records: Vec<MemberRecord> = members.into_iter().map(MemberRecord::from).collect();
+
+    match match_by_email(records, target, &target_handle) {
+        EmailMatchOutcome::Matched { record, heal } => {
+            let role = record.role();
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "verified",
+                Some(role),
+                VerifyMethod::Email,
+            )
+            .await?;
+            assign_role_or_record_failure(
+                discord,
+                audit,
+                invoker,
+                target,
+                role,
+                VerifyMethod::Email,
+            )
+            .await?;
+            self_heal(
+                solidarity_tech,
+                store,
+                &record,
+                target,
+                &target_handle,
+                &heal,
+            )
+            .await;
+            Ok(VerifyOutcome::Verified(role))
+        }
+        EmailMatchOutcome::Conflict => {
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "conflict",
+                None,
+                VerifyMethod::Email,
+            )
+            .await?;
+            Ok(VerifyOutcome::Conflict)
+        }
+        EmailMatchOutcome::Miss => {
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "not_found",
+                None,
+                VerifyMethod::Email,
+            )
+            .await?;
+            Ok(VerifyOutcome::NotFound)
+        }
+    }
+}
+
 #[cfg(test)]
 mod match_tests {
     use super::*;
     use crate::store::MemberRecord;
-    use crate::util::{DiscordHandle, Email, StUserId};
+    use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
+    use domain::MigsStatus;
+
+    fn rec(st: &str, id: Option<u64>, handle: &str) -> MemberRecord {
+        MemberRecord {
+            st_user_id: StUserId(st.into()),
+            discord_user_id: id.map(DiscordUserId),
+            discord_handle: Some(DiscordHandle(handle.into())),
+            email: Email("m@b.test".into()),
+            full_name: None,
+            standing: Some(MigsStatus::MemberInGoodStanding),
+            join_date: None,
+            expires: None,
+            membership_type: None,
+            monthly_dues: None,
+            yearly_dues: None,
+        }
+    }
 
     /// The security guard: a handle hit whose record already carries a *different* id
     /// (the id lookup missed, so it cannot be this member's) must never backfill - that
@@ -331,5 +589,71 @@ mod match_tests {
             &DiscordHandle("rosy".into()),
         );
         assert!(matches!(out, MatchOutcome::Conflict));
+    }
+
+    #[test]
+    fn email_zero_matches_is_a_miss() {
+        let out = match_by_email(vec![], DiscordUserId(9), &DiscordHandle("rosy".into()));
+        assert!(matches!(out, EmailMatchOutcome::Miss));
+    }
+
+    #[test]
+    fn email_single_unlinked_match_backfills_the_id() {
+        let out = match_by_email(
+            vec![rec("st-1", None, "rosy")],
+            DiscordUserId(9),
+            &DiscordHandle("rosy".into()),
+        );
+        match out {
+            EmailMatchOutcome::Matched { heal, .. } => {
+                assert_eq!(heal, HealAction::BackfillId(DiscordUserId(9)));
+            }
+            other => panic!("expected Matched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn email_single_match_already_ours_with_drifted_handle_updates_handle() {
+        let out = match_by_email(
+            vec![rec("st-1", Some(9), "old")],
+            DiscordUserId(9),
+            &DiscordHandle("rosy".into()),
+        );
+        match out {
+            EmailMatchOutcome::Matched { heal, .. } => {
+                assert_eq!(heal, HealAction::UpdateHandle(DiscordHandle("rosy".into())));
+            }
+            other => panic!("expected Matched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn email_single_match_bound_to_other_account_is_a_conflict() {
+        let out = match_by_email(
+            vec![rec("st-1", Some(5), "rosy")],
+            DiscordUserId(9),
+            &DiscordHandle("rosy".into()),
+        );
+        assert!(matches!(out, EmailMatchOutcome::Conflict));
+    }
+
+    #[test]
+    fn email_many_matches_none_ours_is_a_conflict() {
+        let out = match_by_email(
+            vec![rec("st-1", None, "rosy"), rec("st-2", Some(5), "rosy")],
+            DiscordUserId(9),
+            &DiscordHandle("rosy".into()),
+        );
+        assert!(matches!(out, EmailMatchOutcome::Conflict));
+    }
+
+    #[test]
+    fn email_many_matches_one_already_ours_is_matched() {
+        let out = match_by_email(
+            vec![rec("st-1", Some(9), "rosy"), rec("st-2", None, "rosy")],
+            DiscordUserId(9),
+            &DiscordHandle("rosy".into()),
+        );
+        assert!(matches!(out, EmailMatchOutcome::Matched { .. }));
     }
 }
