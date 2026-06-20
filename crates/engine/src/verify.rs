@@ -27,7 +27,12 @@ pub enum HealAction {
 }
 
 /// What [`match_member`] decided.
+///
+/// `#[must_use]`: discarding this throws away the conflict guard and the miss decision,
+/// silently running an assignment against an unresolved member, so a caller that drops it
+/// is a compile error rather than a security hole.
 #[derive(Debug)]
+#[must_use]
 pub enum MatchOutcome {
     /// A clean match, with the repair (if any) to apply.
     Matched {
@@ -139,7 +144,7 @@ where
         MatchOutcome::Matched { record, heal } => {
             let role = record.role();
             record_outcome(audit, invoker, target, "verified", Some(role)).await?;
-            assign_role(discord, target, role).await?;
+            assign_role_or_record_failure(discord, audit, invoker, target, role).await?;
             self_heal(
                 solidarity_tech,
                 store,
@@ -153,7 +158,8 @@ where
         }
         MatchOutcome::Miss => {
             record_outcome(audit, invoker, target, "unverified", Some(Role::Unverified)).await?;
-            assign_role(discord, target, Role::Unverified).await?;
+            assign_role_or_record_failure(discord, audit, invoker, target, Role::Unverified)
+                .await?;
             Ok(VerifyOutcome::Unverified)
         }
         MatchOutcome::Conflict => {
@@ -183,24 +189,80 @@ async fn record_outcome<A: AuditLog>(
         .map_err(|e| VerifyError::Audit(e.to_string()))
 }
 
-/// Set the member's status role, reading their current one first so the write no-ops
-/// when it already matches.
+/// Set the member's status role to exactly `role`: add it if missing and strip every
+/// *other* managed role they hold.
+///
+/// Reading the member's full set of managed roles (not just one) matters because
+/// [`DiscordClient::set_role`] only removes the single role handed to it as `current`. A
+/// member who has somehow accumulated two managed roles - a previous assignment whose
+/// removal half failed, or a hand-applied role - would otherwise keep the stale extra. So
+/// one held role drives `set_role` (stripped in the same call as the add) and any further
+/// held roles are removed after. A member already holding exactly `role` is a no-op.
 async fn assign_role<Dc: DiscordClient>(
     discord: &Dc,
     target: DiscordUserId,
     role: Role,
 ) -> Result<(), VerifyError> {
-    let current = discord
+    let held = discord
         .member_roles(target)
         .await
         .map_err(|e| VerifyError::Discord(e.to_string()))?
-        .held
-        .into_iter()
-        .next();
+        .held;
+    // Every managed role to strip is everything held except the target itself.
+    let stale: Vec<Role> = held.iter().copied().filter(|&r| r != role).collect();
+    // Drive set_role's single removal with one stale role so it is stripped in the same
+    // call as the add; with nothing stale, name the target only when it is already held,
+    // which makes set_role a true no-op rather than a redundant re-add.
+    let current = stale
+        .first()
+        .copied()
+        .or_else(|| held.contains(&role).then_some(role));
     discord
         .set_role(target, current, role)
         .await
-        .map_err(|e| VerifyError::Discord(e.to_string()))
+        .map_err(|e| VerifyError::Discord(e.to_string()))?;
+    // Any held managed roles beyond the one set_role already removed.
+    if stale.len() > 1 {
+        discord
+            .remove_roles(target, &stale[1..])
+            .await
+            .map_err(|e| VerifyError::Discord(e.to_string()))?;
+    }
+    Ok(())
+}
+
+/// Assign the role, and if the Discord write fails, append a `verify_failed` follow-up to
+/// the audit log before surfacing the error.
+///
+/// The `verified`/`unverified` row was written *before* the attempt (audit-before-write,
+/// so no grant is ever unattributable). A failed write would otherwise leave the log
+/// showing a success that never landed; this reconciling row records that it did not. The
+/// follow-up is best-effort - the role write already failed, so there is no granted action
+/// left to gate - so its own failure is logged, not surfaced, and the caller still gets the
+/// original Discord error.
+async fn assign_role_or_record_failure<Dc, A>(
+    discord: &Dc,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+    role: Role,
+) -> Result<(), VerifyError>
+where
+    Dc: DiscordClient,
+    A: AuditLog,
+{
+    let Err(e) = assign_role(discord, target, role).await else {
+        return Ok(());
+    };
+    if let Err(audit_err) =
+        record_outcome(audit, invoker, target, "verify_failed", Some(role)).await
+    {
+        tracing::warn!(
+            error = %audit_err,
+            "verify: could not record the verify_failed follow-up after a failed role write"
+        );
+    }
+    Err(e)
 }
 
 /// Write the discovered identity back to Solidarity Tech and then the cache. Best-effort:
