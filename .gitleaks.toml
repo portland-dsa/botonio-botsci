@@ -1,4 +1,4 @@
-# GDI gitleaks fake mock discord IDs are not in fact leaks
+# GDI gitleaks, the fake mock discord IDs and the deploy token-NAME enum are not in fact leaks
 #
 # (ty for looking out for me tho <3)
 title = "gitleaks"
@@ -7,6 +7,9 @@ title = "gitleaks"
 useDefault = true
 
 [allowlist]
-description = "Fake/public Discord IDs in docs + tests"
-paths = ['''crates/domain/src/ids\.rs''']
+description = "Non-secret definitional strings: fake/public Discord IDs and deploy token-name enums (key names, never values)"
+paths = [
+    '''crates/domain/src/ids\.rs''',
+    '''scripts/botonio_deploy/defs/__init__\.py''',
+]
 regexes = []
