@@ -1,6 +1,6 @@
 {
   "include": ["scripts/botonio_deploy"],
-  "exclude": ["**/.venv", "**/__pycache__", "**/node_modules", "**/.*"],
+  "exclude": ["**/.venv", "**/__pycache__", "**/node_modules", "**/.*", "**/assets"],
   "venvPath": "scripts/botonio_deploy",
   "venv": ".venv",
   "pythonPlatform": "Linux",

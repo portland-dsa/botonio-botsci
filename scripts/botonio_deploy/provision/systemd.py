@@ -29,6 +29,7 @@ systemd = App(
 )
 
 SYSTEMD_CONF_PATH = Path("/etc/systemd/system")
+SBIN_PATH = Path("/usr/local/sbin")
 
 DEFAULT_BOT_VARS = frozenset(BotEnvironmentValues)
 DEFAULT_BACKUP_VARS = frozenset(BackupEnvironmentValues)
@@ -72,10 +73,12 @@ def _collect(
     return values
 
 
-def _install_static(name: str, dest: Path) -> None:
-    """Copy a bundled static unit file (no templating) into place, 0644 root."""
+def _install_static(
+    name: str, dest: Path, perms: FilePermissions = FilePermissions.WorldConfig
+) -> None:
+    """Copy a bundled static file (no templating) into place at ``perms``, root-owned."""
     data = resources.files("botonio_deploy").joinpath(f"assets/{name}").read_bytes()
-    ops.install_file(data, dest, FilePermissions.WorldConfig)
+    ops.install_file(data, dest, perms)
     print(f"ok: {dest}")
 
 
@@ -149,3 +152,7 @@ def backup(
 
     _render("backup", env_iter, _find_unit_path, _find_template)
     _install_static(f"{BACKUP_BASENAME}.timer", SYSTEMD_CONF_PATH / f"{BACKUP_BASENAME}.timer")
+    # The executable the service runs (root, 0700 - lives under /usr/local/sbin, not a unit).
+    _install_static(
+        f"{BACKUP_BASENAME}.py", SBIN_PATH / BACKUP_BASENAME, FilePermissions.PrivateDir
+    )
