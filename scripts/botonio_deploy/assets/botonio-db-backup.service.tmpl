@@ -1,9 +1,9 @@
 # Encrypted, off-box backup of the production membership database. Triggered by
-# botonio-db-backup.timer; the work is in scripts/ops/bot-db-backup.py. Install that script
+# botonio-db-backup.timer; the work is in scripts/ops/botonio-db-backup.py. Install that script
 # at /usr/local/sbin/botonio-db-backup (root, 0700).
 [Unit]
 Description=Encrypted off-box backup of the production membership database
-After=postgresql@18-main.service network-online.target
+After=postgresql@18-botonio.service network-online.target
 Wants=network-online.target
 
 [Service]

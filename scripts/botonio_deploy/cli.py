@@ -9,12 +9,14 @@ from __future__ import annotations
 from cyclopts import App
 
 from .provision import provision
+from .redeploy import redeploy
 
 app = App(
     name="botonio-deploy",
     help="Easy setup tool for updating the bot's creds, DB, and other system-level setup changes",
 )
 app.command(provision)
+app.command(redeploy)
 
 
 def main() -> None:

@@ -14,13 +14,16 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, Generic, Iterable, Optional, Set, TypeVar
+from typing import Dict, Generic, Iterable, List, Optional, Set, TypeVar
 
 from .defs import *
 
 ROOTNAME = "botonio-botsci"
 SOPS_AGE_KEYFILE = Path("/root/.config/sops/age/keys.txt")
 STAGED_SECRETS = Path("/tmp/botonio-botsci")
+# Where redeploy stashes the encrypted secrets inside the .pyz; `provision --bundled-secrets`
+# reads them back out via importlib.resources.
+BUNDLED_SECRETS_DIR = "_bundled_secrets"
 
 
 def service(target: str) -> FileOwnership:
@@ -105,6 +108,35 @@ def prepare(secrets_dir: Path) -> None:
     assert_trusted(secrets_dir)
 
 
+def scp(
+    file: Path,
+    host: str,
+    *,
+    user: Optional[str] = None,
+    target_dir: str = "",
+    ensure_exists: bool = False,
+) -> None:
+    """Copy ``file`` to ``host`` over scp (into ``target_dir``, the login's home by default).
+
+    ``user`` selects the login (``user@host``). With ``ensure_exists`` the destination dir is
+    created first at mode 0700 - as the *login* user, not root, so it's for a user-writable
+    staging dir, not the root-only secrets dir. The file is sent as a bare name with ``cwd`` set
+    to its parent, so a Windows drive letter (``Z:\\...``) is never mistaken for an scp
+    ``host:path``.
+    """
+    if user is not None:
+        payload = f"{user}@{host}"
+    else:
+        payload = host
+
+    payload_dir = f"{payload}:{target_dir}"
+
+    if ensure_exists:
+        run(["ssh", payload, f"install -d -m 700 {target_dir}"])
+
+    run(["scp", file.name, payload_dir], cwd=file.parent)
+
+
 def install_dir(dest, perms: FilePermissions, owner: FileOwnership = ROOT) -> None:
     """Ensure directory ``dest`` exists with the given mode and ownership (like ``install -d``)."""
     dest = Path(dest)
@@ -121,6 +153,15 @@ def install_file(
     dest.write_bytes(data)
     dest.chmod(perms)
     shutil.chown(dest, user=owner.user, group=owner.group)
+
+
+def daemon_reload() -> None:
+    """Make systemd re-read unit files after they have been installed or changed.
+
+    Without this, ``systemctl`` warns that the unit changed on disk and refuses to act on the
+    new definition until reloaded.
+    """
+    run(["systemctl", "daemon-reload"])
 
 
 def creds_encrypt(

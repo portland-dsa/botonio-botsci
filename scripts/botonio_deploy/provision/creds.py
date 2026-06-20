@@ -81,7 +81,10 @@ def all(
     # for some reason later
     ops.prepare(secrets_dir)
 
-    backup(secrets_dir=secrets_dir)
+    # The backup is a production-only, box-level component; only provision it when production
+    # is in scope, so a staging-only run never reaches for production secrets.
+    if Targets.Production in targets:
+        backup(secrets_dir=secrets_dir)
     bot(target=targets, secrets_dir=secrets_dir, tokens=bot_tokens)
 
 

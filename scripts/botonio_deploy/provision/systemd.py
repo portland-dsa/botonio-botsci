@@ -95,7 +95,9 @@ def all(
     ops.prepare(secrets_dir)
 
     bot(targets=targets, secrets_dir=secrets_dir, vars=bot_vars)
-    backup(secrets_dir=secrets_dir, vars=backup_vars)
+    # The backup unit is production-only; skip it unless production is in scope.
+    if Targets.Production in targets:
+        backup(secrets_dir=secrets_dir, vars=backup_vars)
 
 
 @systemd.command
@@ -129,6 +131,7 @@ def bot(
 
     _render("bot", env_iter, _find_unit_path, _find_template)
     _install_static(f"{BOT_BASENAME}.service", SYSTEMD_CONF_PATH / f"{BOT_BASENAME}.service")
+    ops.daemon_reload()
 
 
 @systemd.command
@@ -156,3 +159,4 @@ def backup(
     _install_static(
         f"{BACKUP_BASENAME}.py", SBIN_PATH / BACKUP_BASENAME, FilePermissions.PrivateDir
     )
+    ops.daemon_reload()
