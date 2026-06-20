@@ -194,6 +194,25 @@ pub trait RosterWrite: Send + Sync {
     async fn replace_roster(&self, records: Vec<MemberRecord>) -> Result<(), Self::Error>;
 }
 
+/// Repair one member's stored Discord identity in place, keyed by their Solidarity
+/// Tech id. The write-through half of verification's self-heal: distinct from
+/// [`RosterWrite`], which only ever replaces the whole roster. Fallible from the
+/// start for the same reason as the other store traits.
+#[async_trait]
+pub trait IdentityWrite: Send + Sync {
+    /// How a write can fail. [`Infallible`] for the in-memory store.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Set the Discord user id and handle on the member with `st_user_id`. A member
+    /// the store does not hold is a silent no-op (nothing to repair).
+    async fn link_identity(
+        &self,
+        st_user_id: &StUserId,
+        discord_id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), Self::Error>;
+}
+
 /// The in-memory [`MemberStore`]: a snapshot [`Index`] behind a
 /// `RwLock<Arc<Index>>`. Reads clone out the `Arc` and never block a concurrent
 /// rebuild; the write lock is held only for the pointer swap itself.
@@ -244,6 +263,39 @@ impl RosterWrite for InMemoryStore {
             return Ok(());
         }
         self.swap(index);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl IdentityWrite for InMemoryStore {
+    type Error = Infallible;
+
+    async fn link_identity(
+        &self,
+        st_user_id: &StUserId,
+        discord_id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), Infallible> {
+        // Rebuild from the current snapshot with the one record's identity updated,
+        // then swap - the same copy-on-write the roster refresh uses.
+        let mut records: Vec<MemberRecord> = {
+            let snap = self.snapshot();
+            snap.by_id
+                .values()
+                .chain(snap.by_handle.values())
+                .cloned()
+                .collect()
+        };
+        records.sort_by(|a, b| a.st_user_id.0.cmp(&b.st_user_id.0));
+        records.dedup_by(|a, b| a.st_user_id == b.st_user_id);
+        for rec in &mut records {
+            if rec.st_user_id == *st_user_id {
+                rec.discord_user_id = Some(discord_id);
+                rec.discord_handle = Some(handle.clone());
+            }
+        }
+        self.swap(Index::from_records(records));
         Ok(())
     }
 }
