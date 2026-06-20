@@ -8,6 +8,8 @@ Group=botonio-botsci-staging
 # Secrets (delivered into $$CREDENTIALS_DIRECTORY, never the process environment).
 # One Discord bot token serves both the gateway and the HTTP API (read as DISCORD_BOT_TOKEN).
 LoadCredentialEncrypted=discord_bot_token:/etc/botonio-botsci/bot/staging/discord_bot_token.cred
+# The HMAC key that hashes the Discord ids written to the append-only audit log.
+LoadCredentialEncrypted=audit_hash_key:/etc/botonio-botsci/bot/staging/audit_hash_key.cred
 
 # Non-secret config (the test server + application).
 Environment=DISCORD_GUILD_ID=${discord_guild_id}
@@ -16,6 +18,11 @@ Environment=SOLIDARITY_TECH_DISCORD_LIST_ID=${st_user_list_id}
 Environment=BOT_ACCENT_COLOR=#c8102e
 Environment=BOT_INDEX_REFRESH_SECS=900
 Environment=RUST_LOG=info,botonio_botsci=debug
+# Audit log (the append-only record of moderator card lookups): AUDIT_KEY_ID is stamped on
+# each row and bumped when audit_hash_key is rotated; BOT_LOOKUP_RATE_PER_MIN caps how many
+# other-member card lookups one moderator may run per minute.
+Environment=AUDIT_KEY_ID=v1
+Environment=BOT_LOOKUP_RATE_PER_MIN=10
 
 # Local membership cache (Postgres). The runtime connection authenticates by peer over
 # the Unix socket - no password (the long-running process holds no DB secret). The

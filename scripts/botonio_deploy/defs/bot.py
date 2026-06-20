@@ -18,6 +18,7 @@ class BotSecretTokens(Enum):
     DiscordBotToken = SecretTokens.DiscordBotToken
     SolidarityTechToken = SecretTokens.SolidarityTechToken
     DbMigrationPassword = SecretTokens.DbMigrationPassword
+    AuditHashKey = SecretTokens.AuditHashKey
 
 
 class BotEnvironmentValues(StrEnum):
