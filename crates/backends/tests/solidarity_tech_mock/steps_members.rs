@@ -734,7 +734,7 @@ async fn blanks_user_id_only(world: &mut EspioWorld) {
 #[then("no Solidarity Tech request is made")]
 async fn no_request_made(world: &mut EspioWorld) {
     match world.last.as_ref().expect("no write was made") {
-        Outcome::Write(r) => r.as_ref().expect("dry-run write errored"),
+        Outcome::Write(r) => r.as_ref().expect("the no-op write should succeed"),
         _ => panic!("last call was not a write"),
     };
     // The `expect(0)` mock would panic on drop if any request had been sent;
