@@ -18,7 +18,7 @@ use engine::backends::discord::{DiscordError, MemberRoles, MockDiscordClient, Ro
 use engine::backends::solidarity_tech::{MockSolidarityTechClient, SolidarityTechMember};
 use engine::store::{IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-use engine::verify::{VerifyError, VerifyOutcome, verify};
+use engine::verify::{VerifyError, VerifyOutcome, verify, verify_by_email};
 
 use domain::MigsStatus;
 
@@ -241,6 +241,78 @@ impl VerifyWorld {
             .await,
         );
     }
+
+    async fn run_by_email(&mut self, target: DiscordUserId, handle: DiscordHandle, email: Email) {
+        let store = CountingStore {
+            inner: InMemoryStore::new(Index::build(self.members.clone())),
+            links: self.cache_writes.clone(),
+        };
+
+        let assigned = self.assigned_role.clone();
+        let stripped_via_set = self.stripped_roles.clone();
+        let stripped_via_remove = self.stripped_roles.clone();
+        let held = self.held_roles.clone();
+        let fails = self.discord_fails;
+        let mut discord = MockDiscordClient::new();
+        discord.expect_member_roles().returning(move |_| {
+            ready_ok(MemberRoles {
+                held: held.clone(),
+                ..Default::default()
+            })
+        });
+        discord
+            .expect_set_role()
+            .returning(move |_u, current, role| {
+                *assigned.lock().unwrap() = Some(role);
+                if let Some(removed) = current {
+                    stripped_via_set.lock().unwrap().push(removed);
+                }
+                if fails {
+                    return ready_err(DiscordError::MissingEnv("simulated role write failure"));
+                }
+                ready_ok(())
+            });
+        discord.expect_remove_roles().returning(move |_u, roles| {
+            stripped_via_remove.lock().unwrap().extend_from_slice(roles);
+            ready_ok(())
+        });
+
+        let w_identity = self.st_writes.clone();
+        let w_handle = self.st_writes.clone();
+        let by_email = self.members.clone();
+        let wanted = email.clone();
+        let mut st = MockSolidarityTechClient::new();
+        st.expect_find_by_email().returning(move |_e| {
+            let hits: Vec<SolidarityTechMember> = by_email
+                .iter()
+                .filter(|m| m.email == wanted)
+                .cloned()
+                .collect();
+            ready_ok(hits)
+        });
+        st.expect_set_discord_identity().returning(move |_, _, _| {
+            w_identity.lock().unwrap().push("identity");
+            ready_ok(())
+        });
+        st.expect_set_discord_handle().returning(move |_, _| {
+            w_handle.lock().unwrap().push("handle");
+            ready_ok(())
+        });
+
+        self.last = Some(
+            verify_by_email(
+                &st,
+                &discord,
+                &store,
+                &self.audit,
+                DiscordUserId(SONIC),
+                target,
+                handle,
+                email,
+            )
+            .await,
+        );
+    }
 }
 
 #[given(regex = r"^(\w+) is in our records by handle with no Discord id$")]
@@ -365,6 +437,35 @@ async fn attempt_and_failure_recorded(world: &mut VerifyWorld) {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["outcome"], "verified");
     assert_eq!(rows[1]["outcome"], "verify_failed");
+}
+
+#[when(regex = r"^Sonic verifies (\w+) by email$")]
+async fn sonic_verifies_by_email(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    let email = Email(format!("{}@b.test", name.to_lowercase()));
+    world.run_by_email(id, handle, email).await;
+}
+
+#[then(regex = r"^the email lookup finds no record$")]
+async fn email_not_found(world: &mut VerifyWorld) {
+    assert!(matches!(world.last, Some(Ok(VerifyOutcome::NotFound))));
+    assert!(world.assigned_role.lock().unwrap().is_none());
+}
+
+#[then(regex = r"^the not-found lookup is recorded in the audit log$")]
+async fn not_found_recorded(world: &mut VerifyWorld) {
+    let rows = world.audit.rows.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["outcome"], "not_found");
+    assert_eq!(rows[0]["method"], "email");
+}
+
+#[then("the email verification is recorded with method email")]
+async fn email_verification_recorded(world: &mut VerifyWorld) {
+    let rows = world.audit.rows.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["method"], "email");
+    assert_eq!(rows[0]["outcome"], "verified");
 }
 
 #[tokio::main]
