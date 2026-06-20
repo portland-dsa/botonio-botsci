@@ -33,6 +33,13 @@ pub struct BotConfig {
     /// password): `postgres:///bot_<env>?host=/var/run/postgresql&user=bot_<env>_app`.
     /// Local development supplies it via `.env`; production via the unit's `Environment=`.
     pub db_runtime_dsn: String,
+    /// HMAC key for hashing the ids written to the audit log. Loaded from the
+    /// credential store or `AUDIT_HASH_KEY`.
+    pub audit_hash_key: SecretString,
+    /// Names the audit HMAC key, stored beside each row so the key can be rotated.
+    pub audit_key_id: String,
+    /// Per-moderator ceiling on member-card lookups of *other* members, per minute.
+    pub lookup_rate_per_min: u32,
 }
 
 /// Everything that can go wrong reading config.
@@ -66,6 +73,13 @@ impl BotConfig {
             parse_refresh_secs(std::env::var("BOT_INDEX_REFRESH_SECS").ok().as_deref());
         let discord_list_id = read("SOLIDARITY_TECH_DISCORD_LIST_ID")?;
         let db_runtime_dsn = read("DB_RUNTIME_DSN")?;
+        let audit_hash_key = SecretString::from(
+            engine::backends::from_credstore_or_env("audit_hash_key", "AUDIT_HASH_KEY")
+                .ok_or(ConfigError::Missing("AUDIT_HASH_KEY"))?,
+        );
+        let audit_key_id = std::env::var("AUDIT_KEY_ID").unwrap_or_else(|_| "v1".to_owned());
+        let lookup_rate_per_min =
+            parse_lookup_rate(std::env::var("BOT_LOOKUP_RATE_PER_MIN").ok().as_deref());
         Ok(Self {
             token,
             guild_id,
@@ -74,6 +88,9 @@ impl BotConfig {
             refresh_interval,
             discord_list_id,
             db_runtime_dsn,
+            audit_hash_key,
+            audit_key_id,
+            lookup_rate_per_min,
         })
     }
 }
@@ -89,6 +106,19 @@ fn parse_accent(s: &str) -> Result<u32, String> {
         return Err(format!("expected 6 hex digits, got {s:?}"));
     }
     u32::from_str_radix(hex, 16).map_err(|e| e.to_string())
+}
+
+/// Default per-moderator lookup ceiling when `BOT_LOOKUP_RATE_PER_MIN` is
+/// unset or invalid.
+const DEFAULT_LOOKUP_RATE: u32 = 10;
+
+/// Parse the per-minute lookup ceiling, falling back to [`DEFAULT_LOOKUP_RATE`].
+/// A `0` is clamped up to 1: a ceiling of zero would refuse every moderator lookup,
+/// which is never the intent of setting the variable.
+fn parse_lookup_rate(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_LOOKUP_RATE)
+        .max(1)
 }
 
 /// Parse a seconds string into a `Duration`, falling back to [`DEFAULT_REFRESH`].
@@ -130,5 +160,14 @@ mod tests {
         // 0 would panic `tokio::time::interval`; sub-minute values would hammer the API.
         assert_eq!(parse_refresh_secs(Some("0")), MIN_REFRESH);
         assert_eq!(parse_refresh_secs(Some("5")), MIN_REFRESH);
+    }
+
+    #[test]
+    fn lookup_rate_falls_back_and_clamps() {
+        assert_eq!(parse_lookup_rate(None), DEFAULT_LOOKUP_RATE);
+        assert_eq!(parse_lookup_rate(Some("25")), 25);
+        assert_eq!(parse_lookup_rate(Some("xyz")), DEFAULT_LOOKUP_RATE);
+        // Zero would refuse every lookup; clamp up to 1.
+        assert_eq!(parse_lookup_rate(Some("0")), 1);
     }
 }
