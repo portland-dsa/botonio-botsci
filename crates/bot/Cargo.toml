@@ -32,11 +32,11 @@ tokio = { version = "1", features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 secrecy = "0.10"
+serde_json = "1"
 thiserror = "2"
 chrono = "0.4"
 
 [dev-dependencies]
-serde_json = "1"
 cucumber = "0.21"
 futures = "0.3"
 
@@ -44,6 +44,13 @@ futures = "0.3"
 # Protagonist: Botonio. Runs on every `cargo test` (no loopback server).
 [[test]]
 name = "guild_guard"
+harness = false
+
+# Behavior suite for the moderator lookup decision core (`src/lookup.rs`). Offline,
+# Cucumber, mocks only - no database, no gateway. Cast: Sonic (moderator), Eggman
+# (non-moderator snoop), Tails (member with a record), Shadow (member with none).
+[[test]]
+name = "lookup"
 harness = false
 
 # `sd-notify` is a Unix-datagram-socket protocol and is meaningless off Linux; gating

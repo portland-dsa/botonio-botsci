@@ -66,6 +66,93 @@ impl RateLimiter {
     }
 }
 
+use engine::audit::AuditLog;
+use engine::card::{self, CardError};
+use engine::store::{MemberRecord, MemberStore};
+
+/// What a lookup resolved to. The poise adapters render each variant; the Cucumber
+/// suite asserts on them directly. `Debug` so the Cucumber `World` (which must be
+/// `Debug`) can hold one.
+#[derive(Debug)]
+pub enum LookupOutcome {
+    /// The invoker viewing their own card - `None` when they have no record. Never
+    /// gated, rate-limited, or audited.
+    SelfCard(Option<MemberRecord>),
+    /// A moderator's successful view of another member's card.
+    Card(MemberRecord),
+    /// A privileged lookup that found no record for the target.
+    NotFound,
+    /// A non-moderator tried to view someone other than themselves.
+    NotModerator,
+    /// The moderator exceeded their per-minute lookup allowance.
+    RateLimited,
+    /// The store (or the audit write) failed; the caller shows a generic reply.
+    StoreError(String),
+}
+
+/// Resolve a lookup, applying the privilege rule for viewing *another* member.
+///
+/// Viewing yourself is always allowed and never recorded. Viewing anyone else
+/// requires the moderator role, is rate-limited, and - whether or not a record is
+/// found - is written to the audit log. The audit write is fail-closed: if it
+/// cannot be recorded, no card is revealed (a [`LookupOutcome::StoreError`]), so a
+/// successful reveal always has a matching audit row.
+pub async fn lookup<S, A>(
+    store: &S,
+    audit: &A,
+    limiter: &RateLimiter,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+    is_moderator: bool,
+) -> LookupOutcome
+where
+    S: MemberStore,
+    A: AuditLog,
+{
+    // Self lookups bypass the gate, the limiter, and the audit log entirely.
+    if target == invoker {
+        return match store.by_discord_id(invoker).await {
+            Ok(rec) => LookupOutcome::SelfCard(rec),
+            Err(e) => LookupOutcome::StoreError(e.to_string()),
+        };
+    }
+    if !is_moderator {
+        return LookupOutcome::NotModerator;
+    }
+    if !limiter.check(invoker, Instant::now()) {
+        return LookupOutcome::RateLimited;
+    }
+
+    // A moderator viewing another member: resolve, then record before revealing.
+    let record = match card::resolve(store, &card::PresentMember { id: target }).await {
+        Ok(rec) => Some(rec),
+        Err(CardError::NoRecord) => None,
+        Err(CardError::Store(e)) => return LookupOutcome::StoreError(e.to_string()),
+    };
+    let outcome = if record.is_some() {
+        "found"
+    } else {
+        "not_found"
+    };
+    if let Err(e) = audit
+        .record(
+            invoker,
+            target,
+            "card_lookup",
+            serde_json::json!({ "outcome": outcome }),
+        )
+        .await
+    {
+        // Fail closed: never reveal a card we could not audit.
+        tracing::error!(error = %e, "audit write failed; refusing the lookup");
+        return LookupOutcome::StoreError(e.to_string());
+    }
+    match record {
+        Some(rec) => LookupOutcome::Card(rec),
+        None => LookupOutcome::NotFound,
+    }
+}
+
 #[cfg(test)]
 mod rate_limiter_tests {
     use super::*;
@@ -100,5 +187,83 @@ mod rate_limiter_tests {
         assert!(limiter.check(DiscordUserId(1), now));
         // A different moderator has their own allowance.
         assert!(limiter.check(DiscordUserId(2), now));
+    }
+}
+
+#[cfg(test)]
+mod core_tests {
+    use super::*;
+    use std::convert::Infallible;
+
+    use engine::store::{InMemoryStore, Index};
+
+    /// An audit sink that always fails, to exercise the fail-closed path.
+    struct FailingAudit;
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("audit unavailable")]
+    struct AuditDown;
+
+    #[async_trait::async_trait]
+    impl AuditLog for FailingAudit {
+        type Error = AuditDown;
+        async fn record(
+            &self,
+            _: DiscordUserId,
+            _: DiscordUserId,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<(), AuditDown> {
+            Err(AuditDown)
+        }
+    }
+
+    /// A never-failing sink for the happy-path assertion.
+    struct NoopAudit;
+
+    #[async_trait::async_trait]
+    impl AuditLog for NoopAudit {
+        type Error = Infallible;
+        async fn record(
+            &self,
+            _: DiscordUserId,
+            _: DiscordUserId,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<(), Infallible> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_failure_refuses_the_reveal() {
+        let store = InMemoryStore::new(Index::default());
+        let limiter = RateLimiter::new(10);
+        let outcome = lookup(
+            &store,
+            &FailingAudit,
+            &limiter,
+            DiscordUserId(1),
+            DiscordUserId(2),
+            true,
+        )
+        .await;
+        assert!(matches!(outcome, LookupOutcome::StoreError(_)));
+    }
+
+    #[tokio::test]
+    async fn non_moderator_is_refused_without_audit() {
+        let store = InMemoryStore::new(Index::default());
+        let limiter = RateLimiter::new(10);
+        let outcome = lookup(
+            &store,
+            &NoopAudit,
+            &limiter,
+            DiscordUserId(1),
+            DiscordUserId(2),
+            false,
+        )
+        .await;
+        assert!(matches!(outcome, LookupOutcome::NotModerator));
     }
 }
