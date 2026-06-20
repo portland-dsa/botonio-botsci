@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO member_cache\n               (st_user_id, discord_user_id, discord_handle, email, full_name, standing,\n                join_date, expires, membership_type, monthly_dues, yearly_dues)\n               SELECT * FROM UNNEST(\n                   $1::text[], $2::bigint[], $3::text[], $4::text[], $5::text[], $6::text[],\n                   $7::date[], $8::date[], $9::text[], $10::text[], $11::text[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Int8Array",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "TextArray",
+        "DateArray",
+        "DateArray",
+        "TextArray",
+        "TextArray",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f4f354296a99bbfb9bde56961a1f720cb0df9f7b0c341dcc24a61b7b5207df7"
+}
