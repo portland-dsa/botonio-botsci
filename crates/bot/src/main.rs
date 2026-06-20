@@ -7,6 +7,7 @@ mod config;
 mod data;
 mod error;
 mod guild_guard;
+mod lookup;
 mod notify;
 mod ping;
 mod render;
