@@ -7,7 +7,12 @@
 //! different account. [`verify`] is the orchestrator that executes a decision against
 //! the backends, the cache, and the audit log.
 
-use crate::store::MemberRecord;
+use domain::Role;
+
+use crate::audit::AuditLog;
+use crate::backends::discord::DiscordClient;
+use crate::backends::solidarity_tech::SolidarityTechClient;
+use crate::store::{IdentityWrite, MemberRecord, MemberStore};
 use crate::util::{DiscordHandle, DiscordUserId};
 
 /// The identity repair a successful match implies.
@@ -68,6 +73,169 @@ pub fn match_member(
         };
     }
     MatchOutcome::Miss
+}
+
+/// What a verification resolved to - the moderator-facing result.
+#[derive(Debug, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    /// Matched; the member was assigned this standing-derived role.
+    Verified(Role),
+    /// No record found; the member was assigned `Unverified`.
+    Unverified,
+    /// The handle is on record for a different account; nothing was changed.
+    Conflict,
+}
+
+/// Why a verification could not complete. The two store/audit failures are stringified
+/// (their concrete types are the store's and audit log's associated errors); the role
+/// write keeps its own message. Each maps to a generic, PII-free reply at the bot.
+#[derive(Debug, thiserror::Error)]
+pub enum VerifyError {
+    #[error("cache read failed: {0}")]
+    Store(String),
+    #[error("audit write failed: {0}")]
+    Audit(String),
+    #[error("discord role write failed: {0}")]
+    Discord(String),
+}
+
+/// Verify `target` and assign their role, on behalf of moderator `invoker`.
+///
+/// Reads the cache by id then handle, decides via [`match_member`], records the
+/// decided outcome to the audit log *before* any write (so no grant is unattributable;
+/// an audit failure refuses the grant), assigns the role, and then repairs the stored
+/// identity link in Solidarity Tech and the cache. The self-heal is best-effort: once
+/// the role is set, a write-back failure is logged and the next run re-heals, rather
+/// than denying the member a role they have earned.
+pub async fn verify<St, Dc, S, A>(
+    solidarity_tech: &St,
+    discord: &Dc,
+    store: &S,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+    target_handle: DiscordHandle,
+) -> Result<VerifyOutcome, VerifyError>
+where
+    St: SolidarityTechClient,
+    Dc: DiscordClient,
+    S: MemberStore + IdentityWrite,
+    A: AuditLog,
+{
+    let by_id = store
+        .by_discord_id(target)
+        .await
+        .map_err(|e| VerifyError::Store(e.to_string()))?;
+    // The id hit wins; only read by handle when it missed.
+    let by_handle = match &by_id {
+        Some(_) => None,
+        None => store
+            .by_handle(&target_handle)
+            .await
+            .map_err(|e| VerifyError::Store(e.to_string()))?,
+    };
+
+    match match_member(by_id, by_handle, target, &target_handle) {
+        MatchOutcome::Matched { record, heal } => {
+            let role = record.role();
+            record_outcome(audit, invoker, target, "verified", Some(role)).await?;
+            assign_role(discord, target, role).await?;
+            self_heal(
+                solidarity_tech,
+                store,
+                &record,
+                target,
+                &target_handle,
+                &heal,
+            )
+            .await;
+            Ok(VerifyOutcome::Verified(role))
+        }
+        MatchOutcome::Miss => {
+            record_outcome(audit, invoker, target, "unverified", Some(Role::Unverified)).await?;
+            assign_role(discord, target, Role::Unverified).await?;
+            Ok(VerifyOutcome::Unverified)
+        }
+        MatchOutcome::Conflict => {
+            // No role is granted, but the attempt is still recorded.
+            record_outcome(audit, invoker, target, "conflict", None).await?;
+            Ok(VerifyOutcome::Conflict)
+        }
+    }
+}
+
+/// Append one `member_verify` audit row. The detail is non-identifying: the outcome and
+/// (when a role is granted) its name - never the conflicting account or any PII.
+async fn record_outcome<A: AuditLog>(
+    audit: &A,
+    actor: DiscordUserId,
+    subject: DiscordUserId,
+    outcome: &str,
+    role: Option<Role>,
+) -> Result<(), VerifyError> {
+    let detail = match role {
+        Some(r) => serde_json::json!({ "outcome": outcome, "role": r.as_str() }),
+        None => serde_json::json!({ "outcome": outcome }),
+    };
+    audit
+        .record(actor, subject, "member_verify", detail)
+        .await
+        .map_err(|e| VerifyError::Audit(e.to_string()))
+}
+
+/// Set the member's status role, reading their current one first so the write no-ops
+/// when it already matches.
+async fn assign_role<Dc: DiscordClient>(
+    discord: &Dc,
+    target: DiscordUserId,
+    role: Role,
+) -> Result<(), VerifyError> {
+    let current = discord
+        .member_roles(target)
+        .await
+        .map_err(|e| VerifyError::Discord(e.to_string()))?
+        .held
+        .into_iter()
+        .next();
+    discord
+        .set_role(target, current, role)
+        .await
+        .map_err(|e| VerifyError::Discord(e.to_string()))
+}
+
+/// Write the discovered identity back to Solidarity Tech and then the cache. Best-effort:
+/// the role is already granted, so a failure here is logged, not surfaced.
+async fn self_heal<St, S>(
+    solidarity_tech: &St,
+    store: &S,
+    record: &MemberRecord,
+    target: DiscordUserId,
+    handle: &DiscordHandle,
+    heal: &HealAction,
+) where
+    St: SolidarityTechClient,
+    S: IdentityWrite,
+{
+    let st_id = record.st_user_id.as_str();
+    let st_result = match heal {
+        HealAction::UpdateHandle(h) => solidarity_tech.set_discord_handle(st_id, h).await,
+        HealAction::BackfillId(id) => {
+            solidarity_tech
+                .set_discord_identity(st_id, handle, *id)
+                .await
+        }
+        HealAction::None => return,
+    };
+    if let Err(e) = st_result {
+        tracing::warn!(error = %e, "verify: solidarity tech self-heal failed; role granted, will re-heal");
+        return;
+    }
+    if let Err(e) = store
+        .link_identity(&record.st_user_id, target, handle)
+        .await
+    {
+        tracing::warn!(error = %e, "verify: cache write-through failed; role granted, will re-heal");
+    }
 }
 
 #[cfg(test)]
