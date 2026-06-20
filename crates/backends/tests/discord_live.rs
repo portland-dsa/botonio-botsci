@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use cucumber::{World as _, given, then, when};
 
 use backends::discord::{DiscordClient, DiscordHttp, MemberRoles, Role};
-use backends::util::{DiscordUserId, DryRun};
+use backends::util::DiscordUserId;
 
 /// Reads a required env var, panicking with the var name if absent - a missing
 /// credential should fail the live run loudly rather than silently skip.
@@ -168,7 +168,7 @@ async fn given_user_known_status(world: &mut DiscordWorld) {
         Some(role) => role,
         None => {
             client
-                .set_role(user, None, Role::Member, DryRun::LIVE)
+                .set_role(user, None, Role::Member)
                 .await
                 .expect("priming set_role failed");
             wait_for_status(client, user, Some(Role::Member)).await;
@@ -211,7 +211,7 @@ async fn when_round_trip_role(world: &mut DiscordWorld) {
         _ => Role::DuesExpired,
     };
     client
-        .set_role(user, original, flip_to, DryRun::LIVE)
+        .set_role(user, original, flip_to)
         .await
         .expect("set_role flip failed");
     let after_flip = wait_for_status(client, user, Some(flip_to)).await;
@@ -220,12 +220,7 @@ async fn when_round_trip_role(world: &mut DiscordWorld) {
     // bare `set_role` API always lands on a status; restoring to "no status" is
     // the cleanup scenario's job, not this round-trip's).
     client
-        .set_role(
-            user,
-            after_flip,
-            original.unwrap_or(Role::Member),
-            DryRun::LIVE,
-        )
+        .set_role(user, after_flip, original.unwrap_or(Role::Member))
         .await
         .expect("set_role restore failed");
     wait_for_status(client, user, Some(original.unwrap_or(Role::Member))).await;
@@ -246,7 +241,7 @@ async fn when_set_same_role(world: &mut DiscordWorld) {
     // Re-applying the status the member already holds must be a cheap no-op and
     // must not error.
     client
-        .set_role(user, Some(known), known, DryRun::LIVE)
+        .set_role(user, Some(known), known)
         .await
         .expect("no-op set_role returned an error");
 }
@@ -302,7 +297,7 @@ async fn then_no_role_change(world: &mut DiscordWorld) {
         && known == Role::Member
     {
         client
-            .remove_roles(user, &Role::ALL, DryRun::LIVE)
+            .remove_roles(user, &Role::ALL)
             .await
             .expect("restore remove_roles failed");
         wait_for_status(client, user, None).await;

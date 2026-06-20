@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::MemberPage;
-use crate::util::{DiscordHandle, DiscordUserId, DryRun, Email, Phone};
+use crate::util::{DiscordHandle, DiscordUserId, Email, Phone};
 
 use super::client::{SolidarityTechClient, StClearFlags};
 use super::error::SolidarityTechError;
@@ -271,17 +271,7 @@ impl SolidarityTechClient for SolidarityTechHttp {
         &self,
         member_id: &str,
         handle: &DiscordHandle,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError> {
-        if dry_run.is_dry() {
-            tracing::info!(
-                member_id,
-                handle = handle.as_str(),
-                "dry-run: solidarity tech set_discord_handle"
-            );
-            return Ok(());
-        }
-
         let url = format!("{}/users/{}", self.base_url, member_id);
         let body = UserUpdate {
             custom_user_properties: StWriteProps {
@@ -308,17 +298,7 @@ impl SolidarityTechClient for SolidarityTechHttp {
         &self,
         member_id: &str,
         alternate_email: &Email,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError> {
-        if dry_run.is_dry() {
-            tracing::info!(
-                member_id,
-                alternate_email = alternate_email.as_str(),
-                "dry-run: solidarity tech set_alternate_email"
-            );
-            return Ok(());
-        }
-
         let url = format!("{}/users/{}", self.base_url, member_id);
         let body = UserUpdate {
             custom_user_properties: StWriteProps {
@@ -346,18 +326,7 @@ impl SolidarityTechClient for SolidarityTechHttp {
         member_id: &str,
         handle: &DiscordHandle,
         id: DiscordUserId,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError> {
-        if dry_run.is_dry() {
-            tracing::info!(
-                member_id,
-                handle = handle.as_str(),
-                discord_user_id = %id,
-                "dry-run: solidarity tech set_discord_identity"
-            );
-            return Ok(());
-        }
-
         let url = format!("{}/users/{}", self.base_url, member_id);
         let body = UserUpdate {
             custom_user_properties: StWriteProps {
@@ -385,21 +354,11 @@ impl SolidarityTechClient for SolidarityTechHttp {
         &self,
         member_id: &str,
         flags: StClearFlags,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError> {
         if !flags.handle && !flags.user_id {
             tracing::debug!(
                 member_id,
                 "clear_discord_identity: nothing requested, nothing to do"
-            );
-            return Ok(());
-        }
-        if dry_run.is_dry() {
-            tracing::info!(
-                member_id,
-                clear_handle = flags.handle,
-                clear_user_id = flags.user_id,
-                "dry-run: solidarity tech clear_discord_identity"
             );
             return Ok(());
         }

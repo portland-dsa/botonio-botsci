@@ -95,11 +95,12 @@ mod tests {
     use super::*;
     use chrono::NaiveDate;
     use domain::MigsStatus;
-    use engine::backends::util::Email;
+    use engine::backends::util::{Email, StUserId};
     use engine::store::MemberRecord;
 
     fn rec(standing: Option<MigsStatus>, expires: Option<NaiveDate>) -> MemberRecord {
         MemberRecord {
+            st_user_id: StUserId("st-card".into()),
             discord_user_id: None,
             discord_handle: None,
             email: Email("a@b.test".into()),

@@ -22,7 +22,7 @@ use std::fmt;
 use cucumber::{World as _, given, then, when};
 
 use backends::solidarity_tech::{SolidarityTechClient, SolidarityTechHttp, SolidarityTechMember};
-use backends::util::{DiscordHandle, DiscordUserId, DryRun, Email};
+use backends::util::{DiscordHandle, DiscordUserId, Email};
 use secrecy::SecretString;
 
 fn require_env(key: &str) -> String {
@@ -170,7 +170,7 @@ async fn writes_identity_back(world: &mut LiveWorld) {
 
     world
         .client
-        .set_discord_identity(member.id.as_str(), &handle, user_id, DryRun(false))
+        .set_discord_identity(member.id.as_str(), &handle, user_id)
         .await
         .expect("set_discord_identity failed");
 

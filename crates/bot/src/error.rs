@@ -9,6 +9,8 @@ pub enum BotError {
     Engine(#[from] engine::Error),
     #[error("serenity error")]
     Serenity(#[from] serenity::Error),
+    #[error("discord error")]
+    Discord(#[from] engine::backends::discord::DiscordError),
     #[error("database error")]
     Db(#[from] persistence::PersistenceError),
 }
@@ -21,6 +23,7 @@ impl BotError {
         match self {
             BotError::Engine(_) => "engine",
             BotError::Serenity(_) => "serenity",
+            BotError::Discord(_) => "discord",
             BotError::Db(_) => "database",
         }
     }

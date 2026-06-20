@@ -26,8 +26,8 @@ use sqlx::postgres::PgPoolOptions;
 
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::store::{MemberRecord, MemberStore, RosterWrite};
-use engine::util::{DiscordHandle, DiscordUserId, Email};
+use engine::store::{IdentityWrite, MemberRecord, MemberStore, RosterWrite, dedup_records};
+use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 use crate::PersistenceError;
 
@@ -165,7 +165,8 @@ fn dues_from_token(t: &str) -> Option<DuesStatus> {
 /// snowflakes as `i64` (a real Discord id is well under `2^63`). The mapping back to
 /// the engine's [`MemberRecord`] is [`From<MemberCacheRow>`](MemberRecord).
 struct MemberCacheRow {
-    discord_user_id: i64,
+    st_user_id: String,
+    discord_user_id: Option<i64>,
     discord_handle: Option<String>,
     email: String,
     full_name: Option<String>,
@@ -180,7 +181,8 @@ struct MemberCacheRow {
 impl From<MemberCacheRow> for MemberRecord {
     fn from(r: MemberCacheRow) -> Self {
         MemberRecord {
-            discord_user_id: Some(DiscordUserId(r.discord_user_id as u64)),
+            st_user_id: StUserId(r.st_user_id),
+            discord_user_id: r.discord_user_id.map(|i| DiscordUserId(i as u64)),
             discord_handle: r.discord_handle.map(DiscordHandle),
             email: Email(r.email),
             full_name: r.full_name,
@@ -207,10 +209,28 @@ impl MemberStore for PgStore {
     ) -> Result<Option<MemberRecord>, PersistenceError> {
         let row = sqlx::query_as!(
             MemberCacheRow,
-            r#"SELECT discord_user_id, discord_handle, email, full_name, standing,
-                      join_date, expires, membership_type, monthly_dues, yearly_dues
+            r#"SELECT st_user_id, discord_user_id, discord_handle, email, full_name,
+                      standing, join_date, expires, membership_type, monthly_dues, yearly_dues
                FROM member_cache WHERE discord_user_id = $1"#,
             id.0 as i64
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(MemberRecord::from))
+    }
+
+    /// Look up one member by their current Discord handle - the repair fallback when an
+    /// id lookup misses. Reads the `discord_handle` index.
+    async fn by_handle(
+        &self,
+        handle: &DiscordHandle,
+    ) -> Result<Option<MemberRecord>, PersistenceError> {
+        let row = sqlx::query_as!(
+            MemberCacheRow,
+            r#"SELECT st_user_id, discord_user_id, discord_handle, email, full_name,
+                      standing, join_date, expires, membership_type, monthly_dues, yearly_dues
+               FROM member_cache WHERE discord_handle = $1"#,
+            handle.0
         )
         .fetch_optional(&self.pool)
         .await?;
@@ -230,13 +250,15 @@ impl RosterWrite for PgStore {
     /// rather than deleting it: a sweep resolving to zero members is treated as an
     /// upstream glitch, not a real membership of zero.
     ///
-    /// Records are deduplicated by `discord_user_id`, **first-wins**, exactly mirroring
-    /// the in-memory [`Index`](engine::store::Index) (`entry().or_insert`); records with
-    /// no id are dropped (they can never be looked up). This is done in Rust rather than
-    /// letting a duplicate id reach the `PRIMARY KEY` and abort the transaction: two
-    /// Solidarity Tech members sharing a Discord id must not fail the
-    /// whole roster load and restart-loop the bot - the lenient-sweep invariant. It also
-    /// keeps the two stores genuinely equivalent.
+    /// Records are deduplicated by `st_user_id`, **first-wins**, exactly mirroring the
+    /// in-memory [`Index`](engine::store::Index). Records that also carry a Discord id are
+    /// further checked: a later record claiming an id already taken by an earlier one is
+    /// dropped (first-wins on id too), keeping `by_discord_id` unambiguous. Records with
+    /// no Discord id are retained - they are exactly who a verify backfill repairs - and
+    /// are found afterwards by `by_handle`. This is done in Rust rather than letting a
+    /// duplicate id reach the index and abort the transaction: two Solidarity Tech members
+    /// sharing a Discord id must not fail the whole roster load - the lenient-sweep
+    /// invariant. It also keeps the two stores genuinely equivalent.
     ///
     /// The kept rows go in as a single `UNNEST` batch - one round-trip rather than one
     /// per member - which also keeps the write transaction (and its locks) short.
@@ -246,21 +268,18 @@ impl RosterWrite for PgStore {
     /// row-level `DELETE` lets card reads continue under MVCC during a refresh instead
     /// of blocking on the `ACCESS EXCLUSIVE` lock `TRUNCATE` would take.
     async fn replace_roster(&self, records: Vec<MemberRecord>) -> Result<(), PersistenceError> {
-        // Encode the deduplicated records into stored rows. Dedup is by discord_user_id,
-        // first-wins (mirrors Index); a record with no id is dropped (it can never be
-        // looked up). Each row's fields are encoded together in one struct literal, so the
-        // column mapping lives in one place rather than spread across parallel pushes.
-        let mut seen = std::collections::HashSet::new();
-        let mut rows: Vec<MemberCacheRow> = Vec::with_capacity(records.len());
-        for r in records {
-            let Some(id) = r.discord_user_id else {
-                continue;
-            };
-            if !seen.insert(id.0) {
-                continue; // first-wins, like Index::insert
-            }
+        // Encode the deduplicated records into stored rows. Dedup runs through
+        // [`dedup_records`] - the rule the in-memory `Index` shares - so the two stores
+        // keep the same row on a collision; records with no Discord id are retained, since
+        // they are exactly who the verify backfill repairs. Each row's fields are encoded
+        // together in one struct literal, so the column mapping lives in one place rather
+        // than spread across parallel pushes.
+        let deduped = dedup_records(records);
+        let mut rows: Vec<MemberCacheRow> = Vec::with_capacity(deduped.len());
+        for r in deduped {
             rows.push(MemberCacheRow {
-                discord_user_id: id.0 as i64,
+                st_user_id: r.st_user_id.0,
+                discord_user_id: r.discord_user_id.map(|id| id.0 as i64),
                 discord_handle: r.discord_handle.map(|h| h.0),
                 email: r.email.0,
                 full_name: r.full_name,
@@ -286,7 +305,8 @@ impl RosterWrite for PgStore {
         // UNNEST insert (sqlx binds each column as its own array). Consumes `rows` so the
         // strings move rather than clone.
         let cap = rows.len();
-        let mut ids: Vec<i64> = Vec::with_capacity(cap);
+        let mut st_ids: Vec<String> = Vec::with_capacity(cap);
+        let mut ids: Vec<Option<i64>> = Vec::with_capacity(cap);
         let mut handles: Vec<Option<String>> = Vec::with_capacity(cap);
         let mut emails: Vec<String> = Vec::with_capacity(cap);
         let mut full_names: Vec<Option<String>> = Vec::with_capacity(cap);
@@ -297,6 +317,7 @@ impl RosterWrite for PgStore {
         let mut monthly_dues: Vec<Option<String>> = Vec::with_capacity(cap);
         let mut yearly_dues: Vec<Option<String>> = Vec::with_capacity(cap);
         for row in rows {
+            st_ids.push(row.st_user_id);
             ids.push(row.discord_user_id);
             handles.push(row.discord_handle);
             emails.push(row.email);
@@ -315,12 +336,13 @@ impl RosterWrite for PgStore {
             .await?;
         sqlx::query!(
             r#"INSERT INTO member_cache
-               (discord_user_id, discord_handle, email, full_name, standing,
+               (st_user_id, discord_user_id, discord_handle, email, full_name, standing,
                 join_date, expires, membership_type, monthly_dues, yearly_dues)
                SELECT * FROM UNNEST(
-                   $1::bigint[], $2::text[], $3::text[], $4::text[], $5::text[],
-                   $6::date[], $7::date[], $8::text[], $9::text[], $10::text[])"#,
-            &ids,
+                   $1::text[], $2::bigint[], $3::text[], $4::text[], $5::text[], $6::text[],
+                   $7::date[], $8::date[], $9::text[], $10::text[], $11::text[])"#,
+            &st_ids,
+            &ids as &[Option<i64>],
             &handles as &[Option<String>],
             &emails,
             &full_names as &[Option<String>],
@@ -334,6 +356,43 @@ impl RosterWrite for PgStore {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl IdentityWrite for PgStore {
+    type Error = PersistenceError;
+
+    /// Repair one row's Discord identity in place, keyed by the Solidarity Tech id - the
+    /// only columns the runtime role may `UPDATE`. A member not in the cache updates no
+    /// rows; that stays a success (the role was already granted and the next sweep will
+    /// cache the member), but it is logged, because a zero-row repair otherwise looks
+    /// identical to a successful one - it means the roster sweep has not yet stored this
+    /// member, and the write-through silently landed nowhere.
+    async fn link_identity(
+        &self,
+        st_user_id: &StUserId,
+        discord_id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), PersistenceError> {
+        let affected = sqlx::query!(
+            r#"UPDATE member_cache
+               SET discord_user_id = $1, discord_handle = $2
+               WHERE st_user_id = $3"#,
+            discord_id.0 as i64,
+            handle.0,
+            st_user_id.0,
+        )
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if affected == 0 {
+            tracing::warn!(
+                st_user_id = %st_user_id.0,
+                "link_identity matched no cached row; the member is not yet in the cache, so the identity repair will land on the next roster sweep"
+            );
+        }
         Ok(())
     }
 }

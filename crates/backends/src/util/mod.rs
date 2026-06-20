@@ -1,15 +1,14 @@
 //! Backend-internal helpers.
 //!
 //! The shared `reqwest` client builder ([`http`]) and the serde deserialize
-//! helper ([`nonempty_string`]) live here. The id newtypes and [`DryRun`] are
-//! re-exported from `domain` so the backend modules keep referring to all of
-//! these as `crate::util::...`, unchanged from before the workspace split.
+//! helper ([`nonempty_string`]) live here. The id newtypes are re-exported from
+//! `domain` so the backend modules keep referring to them as `crate::util::...`,
+//! unchanged from before the workspace split.
 
 pub mod http;
 pub mod secret;
 pub mod serde_de;
 
-pub use domain::DryRun;
 pub use domain::ids::{
     DiscordChannelId, DiscordGuildId, DiscordHandle, DiscordUserId, Email, Phone, StUserId,
 };

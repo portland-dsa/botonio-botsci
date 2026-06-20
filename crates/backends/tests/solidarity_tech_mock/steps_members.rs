@@ -9,7 +9,7 @@ use domain::MigsStatus;
 use backends::solidarity_tech::{
     DuesStatus, MembershipType, SolidarityTechClient, SolidarityTechError, StClearFlags,
 };
-use backends::util::{DiscordHandle, DiscordUserId, DryRun, Email};
+use backends::util::{DiscordHandle, DiscordUserId, Email};
 use wiremock::matchers::{any, body_json, header, method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
@@ -358,7 +358,7 @@ async fn stamps_identity(world: &mut EspioWorld) {
     world.last = Some(Outcome::Write(
         world
             .client
-            .set_discord_identity(MEMBER_ID, &handle, DiscordUserId(987654321), DryRun(false))
+            .set_discord_identity(MEMBER_ID, &handle, DiscordUserId(987654321))
             .await,
     ));
 }
@@ -385,7 +385,6 @@ async fn clears_identity(world: &mut EspioWorld) {
                     handle: true,
                     user_id: true,
                 },
-                DryRun(false),
             )
             .await,
     ));
@@ -414,7 +413,6 @@ async fn clears_handle_only(world: &mut EspioWorld) {
                     handle: true,
                     user_id: false,
                 },
-                DryRun(false),
             )
             .await,
     ));
@@ -442,7 +440,6 @@ async fn clears_user_id_only(world: &mut EspioWorld) {
                     handle: false,
                     user_id: true,
                 },
-                DryRun(false),
             )
             .await,
     ));
@@ -466,30 +463,6 @@ async fn clears_neither(world: &mut EspioWorld) {
                     handle: false,
                     user_id: false,
                 },
-                DryRun(false),
-            )
-            .await,
-    ));
-}
-
-#[when("Espio clears a member's Discord identity as a dry run")]
-async fn clears_dry_run(world: &mut EspioWorld) {
-    Mock::given(any())
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&world.server)
-        .await;
-
-    world.last = Some(Outcome::Write(
-        world
-            .client
-            .clear_discord_identity(
-                MEMBER_ID,
-                StClearFlags {
-                    handle: true,
-                    user_id: true,
-                },
-                DryRun(true),
             )
             .await,
     ));
@@ -538,10 +511,7 @@ async fn stamps_handle_only(world: &mut EspioWorld) {
 
     let handle: DiscordHandle = "espio".parse().unwrap();
     world.last = Some(Outcome::Write(
-        world
-            .client
-            .set_discord_handle(MEMBER_ID, &handle, DryRun(false))
-            .await,
+        world.client.set_discord_handle(MEMBER_ID, &handle).await,
     ));
 }
 
@@ -564,43 +534,7 @@ async fn stamps_alternate_email(world: &mut EspioWorld) {
     world.last = Some(Outcome::Write(
         world
             .client
-            .set_alternate_email(MEMBER_ID, &alternate_email, DryRun(false))
-            .await,
-    ));
-}
-
-#[when("Espio stamps a Discord identity as a dry run")]
-async fn stamps_dry_run(world: &mut EspioWorld) {
-    // Any request at all means the dry-run guard leaked to the network.
-    Mock::given(any())
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&world.server)
-        .await;
-
-    let handle: DiscordHandle = "espio".parse().unwrap();
-    world.last = Some(Outcome::Write(
-        world
-            .client
-            .set_discord_identity(MEMBER_ID, &handle, DiscordUserId(987654321), DryRun(true))
-            .await,
-    ));
-}
-
-#[when("Espio stamps a Discord handle as a dry run")]
-async fn stamps_handle_dry_run(world: &mut EspioWorld) {
-    // Any request means the dry-run guard leaked to the network.
-    Mock::given(any())
-        .respond_with(ResponseTemplate::new(500))
-        .expect(0)
-        .mount(&world.server)
-        .await;
-
-    let handle: DiscordHandle = "espio".parse().unwrap();
-    world.last = Some(Outcome::Write(
-        world
-            .client
-            .set_discord_handle(MEMBER_ID, &handle, DryRun(true))
+            .set_alternate_email(MEMBER_ID, &alternate_email)
             .await,
     ));
 }
@@ -800,7 +734,7 @@ async fn blanks_user_id_only(world: &mut EspioWorld) {
 #[then("no Solidarity Tech request is made")]
 async fn no_request_made(world: &mut EspioWorld) {
     match world.last.as_ref().expect("no write was made") {
-        Outcome::Write(r) => r.as_ref().expect("dry-run write errored"),
+        Outcome::Write(r) => r.as_ref().expect("the no-op write should succeed"),
         _ => panic!("last call was not a write"),
     };
     // The `expect(0)` mock would panic on drop if any request had been sent;

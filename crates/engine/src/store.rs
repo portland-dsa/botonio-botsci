@@ -6,7 +6,7 @@
 //! built from persistence-friendly primitives so a future implementation can back the same
 //! [`MemberStore`] trait with a sqlx-mapped Postgres table without changing any caller.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
@@ -20,7 +20,7 @@ use crate::backends::solidarity_tech::{
 };
 use crate::paging::drain_pages;
 use crate::seam::NoProgress;
-use crate::util::{DiscordHandle, DiscordUserId, Email};
+use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 /// A member projected to the flat shape the card and the future cache share.
 /// Every field is a persistence-friendly primitive (`String`,
@@ -32,6 +32,10 @@ use crate::util::{DiscordHandle, DiscordUserId, Email};
 /// cache's encode/store/decode round-trip unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberRecord {
+    /// The Solidarity Tech user id - the stable key, and the target a self-heal
+    /// writes the Discord identity back to. Every cached record is sourced from a
+    /// Solidarity Tech member, so this is always present.
+    pub st_user_id: StUserId,
     pub discord_user_id: Option<DiscordUserId>,
     pub discord_handle: Option<DiscordHandle>,
     pub email: Email,
@@ -61,6 +65,7 @@ impl MemberRecord {
 impl From<SolidarityTechMember> for MemberRecord {
     fn from(m: SolidarityTechMember) -> Self {
         Self {
+            st_user_id: m.id,
             discord_user_id: m.discord_user_id,
             discord_handle: m.discord_handle,
             email: m.email,
@@ -80,35 +85,72 @@ impl From<SolidarityTechMember> for MemberRecord {
     }
 }
 
-/// An immutable lookup index keyed by Discord snowflake id. There is deliberately
-/// no handle-keyed map: a card is resolved by immutable id only (see
-/// [`crate::card::resolve`]), never by a mutable, recyclable username.
+/// Deduplicate projected records the way both stores must agree on: first-wins on the
+/// Solidarity Tech id, then first-wins on the Discord id (a later record claiming an id an
+/// earlier one already holds is dropped, keeping the id lookups unambiguous). Records with
+/// no Discord id are kept - they are exactly who a verify backfill repairs - and are found
+/// afterwards by handle. The kept records are returned in input order.
+///
+/// This is the single definition of the dedup rule. Both the in-memory [`Index`] and the
+/// Postgres store run their inputs through it, so the two stores can never silently diverge
+/// on which of a pair of colliding records survives.
+pub fn dedup_records(records: Vec<MemberRecord>) -> Vec<MemberRecord> {
+    let mut seen_st = HashSet::new();
+    let mut seen_id = HashSet::new();
+    let mut kept = Vec::with_capacity(records.len());
+    for rec in records {
+        if !seen_st.insert(rec.st_user_id.0.clone()) {
+            continue; // the same Solidarity Tech member was already kept
+        }
+        // A later record claiming an already-taken Discord id is dropped (first-wins).
+        if let Some(id) = rec.discord_user_id
+            && !seen_id.insert(id.0)
+        {
+            continue;
+        }
+        kept.push(rec);
+    }
+    kept
+}
+
+/// An immutable lookup index. Keyed by Discord id for the card's id-only read, and
+/// also by handle so a member known to Solidarity Tech by handle but not yet linked
+/// to a Discord id is still found - the population verification repairs. The card
+/// still reads `by_id` only (see [`crate::card::resolve`]); the handle map exists for
+/// the verify path.
 #[derive(Default)]
 pub struct Index {
     by_id: HashMap<u64, MemberRecord>,
+    by_handle: HashMap<String, MemberRecord>,
 }
 
 impl Index {
     /// Build from a Solidarity Tech sweep.
     pub fn build(st: Vec<SolidarityTechMember>) -> Self {
-        let mut idx = Index::default();
-        for m in st {
-            idx.insert(MemberRecord::from(m));
-        }
-        idx
+        Self::from_records(st.into_iter().map(MemberRecord::from).collect())
     }
 
-    /// Build an index directly from already-projected [`MemberRecord`]s (the shape
-    /// the cache stores), as opposed to [`build`](Index::build) from a raw sweep.
+    /// Build from already-projected [`MemberRecord`]s (the shape the cache stores).
+    ///
+    /// Runs the input through [`dedup_records`] - the rule the Postgres store shares - so
+    /// a record whose Solidarity Tech id or Discord id was already claimed is dropped from
+    /// both maps, keeping the two stores equivalent.
     pub fn from_records(records: Vec<MemberRecord>) -> Self {
         let mut idx = Index::default();
-        for r in records {
-            idx.insert(r);
+        for rec in dedup_records(records) {
+            idx.insert(rec);
         }
         idx
     }
 
+    /// Insert a record the caller has already deduplicated, into whichever maps its
+    /// identity supports.
     fn insert(&mut self, rec: MemberRecord) {
+        if let Some(handle) = rec.discord_handle.clone() {
+            self.by_handle
+                .entry(handle.0)
+                .or_insert_with(|| rec.clone());
+        }
         if let Some(id) = rec.discord_user_id {
             self.by_id.entry(id.0).or_insert(rec);
         }
@@ -124,11 +166,16 @@ impl Index {
         self.by_id.get(&id.0).cloned()
     }
 
+    /// Look up by Discord handle. Used only by the verify path; the card resolves by id.
+    pub fn by_handle(&self, handle: &DiscordHandle) -> Option<MemberRecord> {
+        self.by_handle.get(&handle.0).cloned()
+    }
+
     /// Whether the index holds no members (every input record was a duplicate or
-    /// lacked a Discord id). Used to refuse replacing a populated roster with an
-    /// empty sweep.
+    /// lacked a Discord id and a handle). Used to refuse replacing a populated roster
+    /// with an empty sweep.
     pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+        self.by_id.is_empty() && self.by_handle.is_empty()
     }
 }
 
@@ -143,6 +190,17 @@ pub trait MemberStore: Send + Sync {
 
     /// Look up a member by their Discord user snowflake.
     async fn by_discord_id(&self, id: DiscordUserId) -> Result<Option<MemberRecord>, Self::Error>;
+
+    /// Look up a member by their current Discord handle. The repair fallback when an
+    /// id lookup misses; the card never uses it.
+    ///
+    /// Handles are not unique in the cache - a handle can be recycled between roster
+    /// sweeps - so when several records share one, which is returned is unspecified and may
+    /// differ between implementations. That is acceptable because the immutable id is
+    /// authoritative: verify reads this only after [`by_discord_id`](Self::by_discord_id)
+    /// misses, and the conflict guard still refuses to re-link a record already bound to a
+    /// different id.
+    async fn by_handle(&self, handle: &DiscordHandle) -> Result<Option<MemberRecord>, Self::Error>;
 }
 
 /// Replace the whole cached roster in one shot - the write half of a refresh sweep.
@@ -158,6 +216,25 @@ pub trait RosterWrite: Send + Sync {
     /// no-op that preserves the current one: a sweep resolving to zero members is
     /// treated as an upstream glitch, never a real membership of zero.
     async fn replace_roster(&self, records: Vec<MemberRecord>) -> Result<(), Self::Error>;
+}
+
+/// Repair one member's stored Discord identity in place, keyed by their Solidarity
+/// Tech id. The write-through half of verification's self-heal: distinct from
+/// [`RosterWrite`], which only ever replaces the whole roster. Fallible from the
+/// start for the same reason as the other store traits.
+#[async_trait]
+pub trait IdentityWrite: Send + Sync {
+    /// How a write can fail. [`Infallible`] for the in-memory store.
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Set the Discord user id and handle on the member with `st_user_id`. A member
+    /// the store does not hold is a silent no-op (nothing to repair).
+    async fn link_identity(
+        &self,
+        st_user_id: &StUserId,
+        discord_id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), Self::Error>;
 }
 
 /// The in-memory [`MemberStore`]: a snapshot [`Index`] behind a
@@ -193,6 +270,10 @@ impl MemberStore for InMemoryStore {
     async fn by_discord_id(&self, id: DiscordUserId) -> Result<Option<MemberRecord>, Infallible> {
         Ok(self.snapshot().by_id(id))
     }
+
+    async fn by_handle(&self, handle: &DiscordHandle) -> Result<Option<MemberRecord>, Infallible> {
+        Ok(self.snapshot().by_handle(handle))
+    }
 }
 
 #[async_trait]
@@ -206,6 +287,39 @@ impl RosterWrite for InMemoryStore {
             return Ok(());
         }
         self.swap(index);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl IdentityWrite for InMemoryStore {
+    type Error = Infallible;
+
+    async fn link_identity(
+        &self,
+        st_user_id: &StUserId,
+        discord_id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), Infallible> {
+        // Rebuild from the current snapshot with the one record's identity updated,
+        // then swap - the same copy-on-write the roster refresh uses. A record mapped by
+        // both id and handle is collected from both maps; the duplicates collapse in
+        // `Index::from_records`, which is the single dedup point, so no pre-dedup is needed.
+        let mut records: Vec<MemberRecord> = {
+            let snap = self.snapshot();
+            snap.by_id
+                .values()
+                .chain(snap.by_handle.values())
+                .cloned()
+                .collect()
+        };
+        for rec in &mut records {
+            if rec.st_user_id == *st_user_id {
+                rec.discord_user_id = Some(discord_id);
+                rec.discord_handle = Some(handle.clone());
+            }
+        }
+        self.swap(Index::from_records(records));
         Ok(())
     }
 }
@@ -383,9 +497,10 @@ mod tests {
     #[tokio::test]
     async fn roster_of_only_unlinked_records_does_not_wipe() {
         let store = InMemoryStore::new(Index::build(vec![st("zoop", 42, "zoop")]));
-        // Records with no Discord id are all dropped, leaving an empty index - which must
-        // be treated the same as an empty sweep, not as a wipe.
+        // Records with neither a Discord id nor a handle are unstorable, leaving an empty
+        // index - which must be treated the same as an empty sweep, not as a wipe.
         let unlinked = MemberRecord {
+            st_user_id: StUserId("ghost-1".into()),
             discord_user_id: None,
             discord_handle: None,
             email: Email("ghost@b.test".into()),

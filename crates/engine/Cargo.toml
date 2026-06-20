@@ -20,3 +20,12 @@ async-trait = "0.1"
 backends = { path = "../backends", features = ["mock"] }
 mockall = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+cucumber = "0.21"
+
+# Behaviour suite for the verify orchestrator (`src/verify.rs`). Offline, Cucumber,
+# mocks only - no database, no gateway. Cast: Sonic (the moderator), Tails (member
+# known by handle only), Knuckles (linked, handle drifted), Shadow (unknown), Eggman
+# (handle owned by another account).
+[[test]]
+name = "verify"
+harness = false

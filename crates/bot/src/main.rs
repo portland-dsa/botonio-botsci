@@ -16,6 +16,7 @@ mod render;
 use std::sync::Arc;
 
 use engine::backends::Clients;
+use engine::backends::discord::{DiscordHttp, resolve_managed_roles};
 use engine::backends::solidarity_tech::SolidarityTechHttp;
 use engine::store::{RosterWrite, sweep_roster};
 
@@ -145,6 +146,7 @@ async fn main() -> anyhow::Result<()> {
     let watchdog_store = store.clone();
     let setup_auditor = auditor.clone();
     let setup_rate_limiter = rate_limiter.clone();
+    let setup_solidarity_tech = solidarity_tech.clone();
 
     let guild_id = cfg.guild_id;
     let token = secrecy::ExposeSecret::expose_secret(&cfg.token).to_owned();
@@ -197,9 +199,14 @@ async fn main() -> anyhow::Result<()> {
         .setup(move |ctx, ready, framework| {
             let auditor = setup_auditor;
             let rate_limiter = setup_rate_limiter;
+            let solidarity_tech = setup_solidarity_tech;
             Box::pin(async move {
                 let gid = serenity::all::GuildId::new(guild_id);
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, gid).await?;
+                // The role-write client shares the gateway's authenticated `Http`; the
+                // managed role ids are resolved once here, where that `Http` is in scope.
+                let managed = resolve_managed_roles(&ctx.http, gid).await?;
+                let discord = Arc::new(DiscordHttp::from_http(ctx.http.clone(), gid, managed));
                 tracing::info!("commands registered; bot is ready to serve");
                 // The first index build already finished before `client.start()`, so
                 // reaching this point means gateway-ready AND index-built - exactly the
@@ -210,6 +217,8 @@ async fn main() -> anyhow::Result<()> {
                     store,
                     auditor,
                     rate_limiter,
+                    discord,
+                    solidarity_tech,
                     bot_user_id: ready.user.id,
                 })
             })

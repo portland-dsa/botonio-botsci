@@ -25,7 +25,7 @@ use std::sync::Mutex;
 use cucumber::{World as _, given, then, when};
 
 use engine::store::{InMemoryStore, Index, MemberRecord};
-use engine::util::{DiscordUserId, Email};
+use engine::util::{DiscordUserId, Email, StUserId};
 
 use lookup::{LookupOutcome, RateLimiter, lookup};
 
@@ -49,6 +49,7 @@ fn id_for(name: &str) -> DiscordUserId {
 /// A minimal record for a member with the given id.
 fn record_for(id: DiscordUserId) -> MemberRecord {
     MemberRecord {
+        st_user_id: StUserId(format!("st-{}", id.0)),
         discord_user_id: Some(id),
         discord_handle: None,
         email: Email(format!("member-{}@b.test", id.0)),

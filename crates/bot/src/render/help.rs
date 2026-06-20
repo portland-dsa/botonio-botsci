@@ -58,7 +58,7 @@ pub fn help_embed(topic: Topic, accent: u32) -> CreateEmbed {
         ),
         Topic::ForModerators => (
             "📋 Help · For moderators",
-            "Moderator lookup tools are coming soon - you'll be able to pull up any current member's card from here.",
+            "**/lookup** - pull up any current member's card.\n**/verify** - match a member in our records and set their role.",
         ),
     };
     CreateEmbed::new()

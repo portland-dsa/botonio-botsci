@@ -106,11 +106,6 @@ Feature: Espio reads and writes members through the Solidarity Tech API
     When Espio stamps an alternate email onto a member
     Then the Solidarity Tech update sets only the alternate-email property
 
-  @write @dry_run
-  Scenario: A dry-run handle write makes no request
-    When Espio stamps a Discord handle as a dry run
-    Then no Solidarity Tech request is made
-
   @write
   Scenario: Clearing a Discord identity blanks the chosen properties
     When Espio clears a member's Discord handle and id
@@ -129,16 +124,6 @@ Feature: Espio reads and writes members through the Solidarity Tech API
   @write @clear
   Scenario: Clearing with neither property selected makes no request
     When Espio clears neither Discord property
-    Then no Solidarity Tech request is made
-
-  @write @clear @dry_run
-  Scenario: Clearing a Discord identity as a dry run makes no request
-    When Espio clears a member's Discord identity as a dry run
-    Then no Solidarity Tech request is made
-
-  @write @dry_run
-  Scenario: A dry-run write makes no request
-    When Espio stamps a Discord identity as a dry run
     Then no Solidarity Tech request is made
 
   @properties

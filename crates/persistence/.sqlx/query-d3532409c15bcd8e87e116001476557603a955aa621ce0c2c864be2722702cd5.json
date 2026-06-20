@@ -1,0 +1,148 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT st_user_id, discord_user_id, discord_handle, email, full_name,\n                      standing, join_date, expires, membership_type, monthly_dues, yearly_dues\n               FROM member_cache WHERE discord_handle = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "st_user_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "st_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "discord_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "discord_handle",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "discord_handle"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "email"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "full_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "full_name"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "standing",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "standing"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "join_date",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "join_date"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "expires",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "expires"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "membership_type",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "membership_type"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
+        "name": "monthly_dues",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "monthly_dues"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "yearly_dues",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "member_cache",
+            "name": "yearly_dues"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "d3532409c15bcd8e87e116001476557603a955aa621ce0c2c864be2722702cd5"
+}
