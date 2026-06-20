@@ -1,0 +1,12 @@
+# Nightly trigger for botonio-db-backup.service. Enable with:
+#   systemctl enable --now botonio-db-backup.timer
+[Unit]
+Description=Nightly encrypted off-box backup of the production membership database
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

@@ -27,12 +27,12 @@ CREATE TABLE audit_log (
     key_id       TEXT NOT NULL     -- names the hashing key, for rotation
 );
 
--- Privileges go to the cluster-wide bot_app group role (the per-environment runtime
+-- Privileges go to the cluster-wide botonio_app group role (the per-environment runtime
 -- roles are members of it; per-database CONNECT + pg_hba keep each boxed to its own
--- database). The bot_app role MUST already exist when this migration runs - it is
--- created by the operator runbook in production and by the dev/CI cluster setup.
+-- database). The botonio_app role MUST already exist when this migration runs - it is
+-- created by scripts/setup/db-bootstrap.py in production and by the dev/CI cluster setup.
 -- No UPDATE: the cache is replaced wholesale with DELETE + INSERT, never updated in place.
-GRANT SELECT, INSERT, DELETE ON member_cache TO bot_app;
-GRANT INSERT                         ON audit_log     TO bot_app;
+GRANT SELECT, INSERT, DELETE ON member_cache TO botonio_app;
+GRANT INSERT                         ON audit_log     TO botonio_app;
 -- BIGSERIAL needs sequence usage for the INSERTs a later slice will do.
-GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO bot_app;
+GRANT USAGE, SELECT ON SEQUENCE audit_log_id_seq TO botonio_app;

@@ -1,0 +1,33 @@
+# Encrypted, off-box backup of the production membership database. Triggered by
+# botonio-db-backup.timer; the work is in scripts/ops/botonio-db-backup.py. Install that script
+# at /usr/local/sbin/botonio-db-backup (root, 0700).
+[Unit]
+Description=Encrypted off-box backup of the production membership database
+After=postgresql@18-botonio.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/botonio-db-backup
+
+# The Backblaze application KEY (secret) arrives in $$CREDENTIALS_DIRECTORY, never the
+# environment or this file. Provision the .cred with systemd-creds, like the bot's other
+# credentials.
+LoadCredentialEncrypted=b2_application_key:/etc/botonio-botsci/backup/production/b2_application_key.cred
+
+# Non-secret config - fill in on the box. The keyID and bucket are not secret on their own
+# (the application key above is what authorizes writes).
+Environment=BACKUP_AGE_RECIPIENT=${box_age_pubkey}
+Environment=B2_BUCKET=${b2_bucket_name}
+Environment=B2_KEY_ID=${b2_key_id}
+
+# Modest hardening. NoNewPrivileges is intentionally NOT set: the script drops to the
+# postgres user (runuser) to run pg_dump over peer auth, which needs the setuid path.
+ProtectSystem=strict
+ReadWritePaths=/var/backups
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077

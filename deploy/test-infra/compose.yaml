@@ -4,17 +4,17 @@
 # (`.sqlx/`) is generated against, and the one its `live-db` conformance tests run
 # on. It holds NO real data and is safe to wipe at any time - the data directory is
 # an in-memory tmpfs, so every start is a clean cluster. It is NOT the production
-# database; the production cluster is provisioned by hand per
-# `docs/runbooks/postgres-setup.md` with real hardening and credentials.
+# database; the production cluster is provisioned by hand with real hardening and
+# credentials.
 #
 # Why a baked image instead of a bind-mounted init script: the repo often lives on
 # a drive the podman machine does not auto-mount (e.g. a mapped drive on Windows),
-# so the `bot_app` role is COPYd into the image at build time (see Containerfile)
+# so the `botonio_app` role is COPYd into the image at build time (see Containerfile)
 # rather than mounted at runtime.
 #
 # Usage:
 #   podman compose -f deploy/test-infra/compose.yaml up -d --build
-#   export DATABASE_URL=postgres://postgres@localhost:55432/bot_dev
+#   export DATABASE_URL=postgres://postgres@localhost:55432/botonio_dev
 #   cargo sqlx prepare -p persistence                 # regenerate the committed cache
 #   cargo test -p persistence --features live-db      # run the conformance suite
 #   podman compose -f deploy/test-infra/compose.yaml down
@@ -28,7 +28,7 @@ services:
       # Throwaway/local only - NEVER production. Lets any local connection in with
       # no password, which is what makes the cache generation and tests frictionless.
       POSTGRES_HOST_AUTH_METHOD: trust
-      POSTGRES_DB: bot_dev
+      POSTGRES_DB: botonio_dev
       POSTGRES_USER: postgres
       # Relocate the data directory out of the image's declared VOLUME
       # (/var/lib/postgresql). The tmpfs below then mounts cleanly onto its own path
@@ -43,12 +43,12 @@ services:
       - "127.0.0.1:55432:5432"
     tmpfs:
       # Ephemeral data: the cluster is rebuilt clean on every start, so the baked
-      # init scripts (the bot_app role) always run. Mounted at PGDATA (/pgdata above),
+      # init scripts (the botonio_app role) always run. Mounted at PGDATA (/pgdata above),
       # which sits outside the image's /var/lib/postgresql VOLUME so there is no
       # duplicate-mount conflict.
       - /pgdata
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d bot_dev"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d botonio_dev"]
       interval: 2s
       timeout: 3s
       retries: 30

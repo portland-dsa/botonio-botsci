@@ -1,6 +1,10 @@
 /target
 .env
 
+# botonio-deploy tool: built zipapp + its dev venv (deps are vendored at build time)
+/botonio-deploy.pyz
+scripts/botonio_deploy/.venv/
+
 .logs
 .build
 /.pipeline

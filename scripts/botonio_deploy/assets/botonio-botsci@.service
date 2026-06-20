@@ -57,7 +57,7 @@ SystemCallFilter=~@privileged ~@resources
 # never reaches "ready". AF_INET/AF_INET6 are the gateway + backend HTTPS.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
-# Egress hardening: deny the internal/private networks the bot never needs. 
+# Egress hardening: deny the internal/private networks the bot never needs.
 # Public egress (Discord, the backend APIs) and loopback (systemd-resolved
 # DNS at 127.0.0.53) stay open, so this is SSRF / lateral-movement containment. It does NOT
 # by itself divorce staging from real membership records: an IP filter can't tell the real Solidarity
