@@ -35,6 +35,7 @@ class SecretTokens(StrEnum):
     DiscordBotToken = "discord_bot_token"
     SolidarityTechToken = "solidarity_tech_token"
     DbMigrationPassword = "db_migration_password"
+    AuditHashKey = "audit_hash_key"
     B2ApplicationKey = "b2_application_key"
 
 
