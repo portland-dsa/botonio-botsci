@@ -16,7 +16,7 @@ use chrono::NaiveDate;
 
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::store::{InMemoryStore, Index, MemberRecord, MemberStore, RosterWrite};
+use engine::store::{IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, RosterWrite};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use persistence::PgStore;
 
@@ -242,4 +242,38 @@ async fn handle_only_members_are_stored_and_found_by_handle(pool: sqlx::PgPool) 
         from_pg.is_some(),
         "a handle-only member is stored, not dropped"
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn link_identity_backfills_a_discord_id(pool: sqlx::PgPool) {
+    let seed = vec![MemberRecord {
+        st_user_id: StUserId("st-rosy".into()),
+        discord_user_id: None,
+        discord_handle: Some(DiscordHandle("rosy".into())),
+        email: Email("rosy@b.test".into()),
+        full_name: None,
+        standing: None,
+        join_date: None,
+        expires: None,
+        membership_type: None,
+        monthly_dues: None,
+        yearly_dues: None,
+    }];
+    let pg = PgStore::new(pool);
+    pg.replace_roster(seed).await.unwrap();
+
+    pg.link_identity(
+        &StUserId("st-rosy".into()),
+        DiscordUserId(77),
+        &DiscordHandle("rosy".into()),
+    )
+    .await
+    .unwrap();
+
+    let found = pg
+        .by_discord_id(DiscordUserId(77))
+        .await
+        .unwrap()
+        .expect("the member is findable by the backfilled id");
+    assert_eq!(found.discord_handle, Some(DiscordHandle("rosy".into())));
 }

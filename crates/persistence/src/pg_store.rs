@@ -26,7 +26,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::store::{MemberRecord, MemberStore, RosterWrite};
+use engine::store::{IdentityWrite, MemberRecord, MemberStore, RosterWrite};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 use crate::PersistenceError;
@@ -371,6 +371,33 @@ impl RosterWrite for PgStore {
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl IdentityWrite for PgStore {
+    type Error = PersistenceError;
+
+    /// Repair one row's Discord identity in place, keyed by the Solidarity Tech id - the
+    /// only columns the runtime role may `UPDATE`. A member not in the cache updates no
+    /// rows, which is the intended silent no-op.
+    async fn link_identity(
+        &self,
+        st_user_id: &StUserId,
+        discord_id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"UPDATE member_cache
+               SET discord_user_id = $1, discord_handle = $2
+               WHERE st_user_id = $3"#,
+            discord_id.0 as i64,
+            handle.0,
+            st_user_id.0,
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
