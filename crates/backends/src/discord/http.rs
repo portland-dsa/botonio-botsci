@@ -8,7 +8,7 @@ use serenity::http::Http;
 use serenity::model::guild::Role as GuildRole;
 use serenity::model::id::{GuildId, RoleId, UserId};
 
-use crate::util::{DiscordGuildId, DiscordUserId, DryRun};
+use crate::util::{DiscordGuildId, DiscordUserId};
 
 use super::client::DiscordClient;
 use super::error::DiscordError;
@@ -180,7 +180,6 @@ impl DiscordClient for DiscordHttp {
         user: DiscordUserId,
         current: Option<Role>,
         target: Role,
-        dry_run: DryRun,
     ) -> Result<(), DiscordError> {
         let (add, remove) = match diff_status_roles(current, target) {
             StatusDiff::NoOp => {
@@ -193,16 +192,6 @@ impl DiscordClient for DiscordHttp {
             }
             StatusDiff::Apply { add, remove } => (add, remove),
         };
-
-        if dry_run.is_dry() {
-            tracing::info!(
-                user = %user,
-                ?add,
-                ?remove,
-                "dry-run: set_role"
-            );
-            return Ok(());
-        }
 
         let user_id = UserId::new(user.0);
         let add_id = *self
@@ -225,18 +214,9 @@ impl DiscordClient for DiscordHttp {
         Ok(())
     }
 
-    async fn remove_roles(
-        &self,
-        user: DiscordUserId,
-        roles: &[Role],
-        dry_run: DryRun,
-    ) -> Result<(), DiscordError> {
+    async fn remove_roles(&self, user: DiscordUserId, roles: &[Role]) -> Result<(), DiscordError> {
         if roles.is_empty() {
             tracing::debug!(user = %user, "remove_roles: nothing to remove");
-            return Ok(());
-        }
-        if dry_run.is_dry() {
-            tracing::info!(user = %user, ?roles, "dry-run: remove_roles");
             return Ok(());
         }
         let user_id = UserId::new(user.0);

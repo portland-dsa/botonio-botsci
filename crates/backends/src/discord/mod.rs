@@ -9,11 +9,8 @@
 //! three [`Role`]s; this module owns their names, env-var overrides, and priority
 //! order, and resolves the concrete role ids once at construction.
 //!
-//! Writes honor [`DryRun`] (logging instead of calling when dry), and the
-//! `live-discord` cargo feature gates the integration tests that hit a real
+//! The `live-discord` cargo feature gates the integration tests that hit a real
 //! guild so the default `cargo test` stays offline.
-//!
-//! [`DryRun`]: crate::util::DryRun
 
 mod client;
 mod error;

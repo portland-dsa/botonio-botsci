@@ -7,12 +7,10 @@
 //! client per backend so the engine can take a single `&Clients` rather than two
 //! separate arguments.
 //!
-//! This crate depends only on `domain`. The id newtypes and [`DryRun`] it speaks
-//! in come from there (re-exported through [`util`]); the status/role vocabulary
-//! lives there too, and Solidarity Tech decodes its own raw membership status
-//! into the shared `domain::MigsStatus`.
-//!
-//! [`DryRun`]: util::DryRun
+//! This crate depends only on `domain`. The id newtypes it speaks in come from
+//! there (re-exported through [`util`]); the status/role vocabulary lives there
+//! too, and Solidarity Tech decodes its own raw membership status into the shared
+//! `domain::MigsStatus`.
 
 // Tests set env vars to exercise `util::base_url`, which needs `unsafe` under
 // edition 2024 - so `deny` (overridable by a targeted `#[allow]`) under test, and

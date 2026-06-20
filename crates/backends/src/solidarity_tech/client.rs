@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::MemberPage;
-use crate::util::{DiscordHandle, DiscordUserId, DryRun, Email, Phone};
+use crate::util::{DiscordHandle, DiscordUserId, Email, Phone};
 
 use super::error::SolidarityTechError;
 use super::member::{CustomUserProperty, SolidarityTechMember};
@@ -29,11 +29,6 @@ pub struct StClearFlags {
 /// gets a `mockall` mock under `#[cfg(test)]` so callers can be unit-tested
 /// without a live API. The production implementation is
 /// [`SolidarityTechHttp`](super::SolidarityTechHttp).
-///
-/// The bot's current read-only path calls only
-/// [`members_in_list_page`](Self::members_in_list_page), to build its membership
-/// index. The lookup, write, and property-discovery methods are retained for the
-/// verification and write features still to come; each is flagged below.
 #[async_trait]
 #[cfg_attr(feature = "mock", mockall::automock)]
 pub trait SolidarityTechClient: Send + Sync {
@@ -62,7 +57,7 @@ pub trait SolidarityTechClient: Send + Sync {
     /// fetched (see `ST_PAGE_SIZE`); a unique email or phone yields 0-1 rows in
     /// practice, but if the API reports more matches than were returned the call
     /// warns rather than silently truncating. The match list is returned as-is -
-    /// de-duplication is the caller's responsibility. Not yet called by the bot.
+    /// de-duplication is the caller's responsibility.
     ///
     /// [`NoQueryCriteria`]: SolidarityTechError::NoQueryCriteria
     async fn find_members(
@@ -79,9 +74,7 @@ pub trait SolidarityTechClient: Send + Sync {
     /// page; otherwise it is the prior page's [`next`](MemberPage::next).
     ///
     /// Solidarity Tech reports `meta.total_count`, so [`total`](MemberPage::total)
-    /// is populated - a front end can size a determinate bar from it. Not yet
-    /// called by the bot, which sweeps a pre-filtered list via
-    /// [`members_in_list_page`](Self::members_in_list_page) instead.
+    /// is populated - a front end can size a determinate bar from it.
     async fn members_page(
         &self,
         cursor: Option<&str>,
@@ -105,14 +98,11 @@ pub trait SolidarityTechClient: Send + Sync {
     /// [`set_discord_identity`](Self::set_discord_identity), for a caller that has
     /// a handle but not always a Discord user id. Because the property is org-level
     /// the PUT is a safe merge - `discord-user-id` and every other property are
-    /// untouched. Honors [`DryRun`]: when dry, logs at `info` and returns `Ok(())`
-    /// without touching the network. Surfaces [`SolidarityTechError`] on a non-2xx
-    /// response. Not yet called by the bot.
+    /// untouched. Surfaces [`SolidarityTechError`] on a non-2xx response.
     async fn set_discord_handle(
         &self,
         member_id: &str,
         handle: &DiscordHandle,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError>;
 
     /// Sets only the `alternate-email` custom property on a member via
@@ -121,30 +111,24 @@ pub trait SolidarityTechClient: Send + Sync {
     /// The alternate-email counterpart to
     /// [`set_discord_handle`](Self::set_discord_handle). Because the property is
     /// org-level the PUT is a safe merge - every other property is untouched.
-    /// Honors [`DryRun`]: when dry, logs at `info` and returns `Ok(())` without
-    /// touching the network. Surfaces [`SolidarityTechError`] on a non-2xx
-    /// response. Not yet called by the bot.
+    /// Surfaces [`SolidarityTechError`] on a non-2xx response.
     async fn set_alternate_email(
         &self,
         member_id: &str,
         alternate_email: &Email,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError>;
 
     /// Sets the Discord handle and user-id custom properties on a member via
     /// `PUT /users/{id}`.
     ///
     /// Because these are org-level properties the PUT is a merge, so the
-    /// member's other properties are left untouched. Honors [`DryRun`]: when dry,
-    /// the call is logged at `info` and returns `Ok(())` without touching the
-    /// network. Surfaces [`SolidarityTechError`] on a non-2xx response. Not yet
-    /// called by the bot.
+    /// member's other properties are left untouched. Surfaces
+    /// [`SolidarityTechError`] on a non-2xx response.
     async fn set_discord_identity(
         &self,
         member_id: &str,
         handle: &DiscordHandle,
         id: DiscordUserId,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError>;
 
     /// Blanks the Discord handle and/or user-id custom properties on a member via
@@ -154,23 +138,18 @@ pub trait SolidarityTechClient: Send + Sync {
     /// property [`flags`](StClearFlags) requests is sent as an empty string.
     /// Because these are org-level properties the PUT is a merge, so unlisted
     /// properties - including the one the caller did not ask to clear - are left
-    /// untouched. With both flags `false` this is a no-op. Honors [`DryRun`]:
-    /// when dry, logs at `info` and returns `Ok(())` without touching the
-    /// network. Surfaces [`SolidarityTechError`] on a non-2xx response. Not yet
-    /// called by the bot.
+    /// untouched. With both flags `false` this is a no-op. Surfaces
+    /// [`SolidarityTechError`] on a non-2xx response.
     async fn clear_discord_identity(
         &self,
         member_id: &str,
         flags: StClearFlags,
-        dry_run: DryRun,
     ) -> Result<(), SolidarityTechError>;
 
     /// Lists the org's custom user property definitions, so the internal `key`s
     /// behind "Discord Handle" and "Discord User ID" can be discovered.
     ///
-    /// How the property keys in `StReadProps`/`StWriteProps` get verified against
-    /// the live org. Not yet called by the bot; a property-key diagnostic for
-    /// confirming a key before trusting a write.
+    /// A property-key diagnostic for confirming a key before trusting a write.
     async fn list_custom_user_properties(
         &self,
     ) -> Result<Vec<CustomUserProperty>, SolidarityTechError>;
