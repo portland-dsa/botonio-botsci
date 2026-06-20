@@ -6,7 +6,7 @@
 //! built from persistence-friendly primitives so a future implementation can back the same
 //! [`MemberStore`] trait with a sqlx-mapped Postgres table without changing any caller.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
@@ -85,6 +85,34 @@ impl From<SolidarityTechMember> for MemberRecord {
     }
 }
 
+/// Deduplicate projected records the way both stores must agree on: first-wins on the
+/// Solidarity Tech id, then first-wins on the Discord id (a later record claiming an id an
+/// earlier one already holds is dropped, keeping the id lookups unambiguous). Records with
+/// no Discord id are kept - they are exactly who a verify backfill repairs - and are found
+/// afterwards by handle. The kept records are returned in input order.
+///
+/// This is the single definition of the dedup rule. Both the in-memory [`Index`] and the
+/// Postgres store run their inputs through it, so the two stores can never silently diverge
+/// on which of a pair of colliding records survives.
+pub fn dedup_records(records: Vec<MemberRecord>) -> Vec<MemberRecord> {
+    let mut seen_st = HashSet::new();
+    let mut seen_id = HashSet::new();
+    let mut kept = Vec::with_capacity(records.len());
+    for rec in records {
+        if !seen_st.insert(rec.st_user_id.0.clone()) {
+            continue; // the same Solidarity Tech member was already kept
+        }
+        // A later record claiming an already-taken Discord id is dropped (first-wins).
+        if let Some(id) = rec.discord_user_id
+            && !seen_id.insert(id.0)
+        {
+            continue;
+        }
+        kept.push(rec);
+    }
+    kept
+}
+
 /// An immutable lookup index. Keyed by Discord id for the card's id-only read, and
 /// also by handle so a member known to Solidarity Tech by handle but not yet linked
 /// to a Discord id is still found - the population verification repairs. The card
@@ -104,23 +132,12 @@ impl Index {
 
     /// Build from already-projected [`MemberRecord`]s (the shape the cache stores).
     ///
-    /// Deduplicates first on the Solidarity Tech id, then first-wins on the Discord id,
-    /// so a record whose Discord id was already claimed is dropped from both maps -
-    /// matching the Postgres store, so the two stay equivalent.
+    /// Runs the input through [`dedup_records`] - the rule the Postgres store shares - so
+    /// a record whose Solidarity Tech id or Discord id was already claimed is dropped from
+    /// both maps, keeping the two stores equivalent.
     pub fn from_records(records: Vec<MemberRecord>) -> Self {
         let mut idx = Index::default();
-        let mut seen_st = std::collections::HashSet::new();
-        let mut seen_id = std::collections::HashSet::new();
-        for rec in records {
-            if !seen_st.insert(rec.st_user_id.0.clone()) {
-                continue; // the same Solidarity Tech member was already kept
-            }
-            // A later record claiming an already-taken Discord id is dropped (first-wins).
-            if let Some(id) = rec.discord_user_id
-                && !seen_id.insert(id.0)
-            {
-                continue;
-            }
+        for rec in dedup_records(records) {
             idx.insert(rec);
         }
         idx
@@ -176,6 +193,13 @@ pub trait MemberStore: Send + Sync {
 
     /// Look up a member by their current Discord handle. The repair fallback when an
     /// id lookup misses; the card never uses it.
+    ///
+    /// Handles are not unique in the cache - a handle can be recycled between roster
+    /// sweeps - so when several records share one, which is returned is unspecified and may
+    /// differ between implementations. That is acceptable because the immutable id is
+    /// authoritative: verify reads this only after [`by_discord_id`](Self::by_discord_id)
+    /// misses, and the conflict guard still refuses to re-link a record already bound to a
+    /// different id.
     async fn by_handle(&self, handle: &DiscordHandle) -> Result<Option<MemberRecord>, Self::Error>;
 }
 
@@ -278,7 +302,9 @@ impl IdentityWrite for InMemoryStore {
         handle: &DiscordHandle,
     ) -> Result<(), Infallible> {
         // Rebuild from the current snapshot with the one record's identity updated,
-        // then swap - the same copy-on-write the roster refresh uses.
+        // then swap - the same copy-on-write the roster refresh uses. A record mapped by
+        // both id and handle is collected from both maps; the duplicates collapse in
+        // `Index::from_records`, which is the single dedup point, so no pre-dedup is needed.
         let mut records: Vec<MemberRecord> = {
             let snap = self.snapshot();
             snap.by_id
@@ -287,8 +313,6 @@ impl IdentityWrite for InMemoryStore {
                 .cloned()
                 .collect()
         };
-        records.sort_by(|a, b| a.st_user_id.0.cmp(&b.st_user_id.0));
-        records.dedup_by(|a, b| a.st_user_id == b.st_user_id);
         for rec in &mut records {
             if rec.st_user_id == *st_user_id {
                 rec.discord_user_id = Some(discord_id);

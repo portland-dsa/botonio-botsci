@@ -26,7 +26,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::store::{IdentityWrite, MemberRecord, MemberStore, RosterWrite};
+use engine::store::{IdentityWrite, MemberRecord, MemberStore, RosterWrite, dedup_records};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 use crate::PersistenceError;
@@ -268,30 +268,15 @@ impl RosterWrite for PgStore {
     /// row-level `DELETE` lets card reads continue under MVCC during a refresh instead
     /// of blocking on the `ACCESS EXCLUSIVE` lock `TRUNCATE` would take.
     async fn replace_roster(&self, records: Vec<MemberRecord>) -> Result<(), PersistenceError> {
-        // Encode the deduplicated records into stored rows. Dedup is by st_user_id,
-        // first-wins (mirrors Index); records with no Discord id are kept - they are
-        // exactly who the verify backfill repairs - and mirror the in-memory Index dedup
-        // so the two stores stay equivalent. Each row's fields are encoded together in one
-        // struct literal, so the column mapping lives in one place rather than spread
-        // across parallel pushes.
-        let mut seen_st = std::collections::HashSet::new();
-        let mut seen_id = std::collections::HashSet::new();
-        let mut rows: Vec<MemberCacheRow> = Vec::with_capacity(records.len());
-        for r in records {
-            // Dedup on the Solidarity Tech id (drop an exact-same-member duplicate), then
-            // first-wins on the Discord id (a later record claiming an id already taken is
-            // dropped, keeping `by_discord_id` unambiguous). Records with no Discord id are
-            // kept now - they are exactly who the verify backfill repairs - and mirror the
-            // in-memory `Index::from_records` dedup so the two stores stay equivalent.
-            if !seen_st.insert(r.st_user_id.0.clone()) {
-                continue;
-            }
-            // A later record claiming an already-taken Discord id is dropped (first-wins).
-            if let Some(id) = r.discord_user_id
-                && !seen_id.insert(id.0)
-            {
-                continue;
-            }
+        // Encode the deduplicated records into stored rows. Dedup runs through
+        // [`dedup_records`] - the rule the in-memory `Index` shares - so the two stores
+        // keep the same row on a collision; records with no Discord id are retained, since
+        // they are exactly who the verify backfill repairs. Each row's fields are encoded
+        // together in one struct literal, so the column mapping lives in one place rather
+        // than spread across parallel pushes.
+        let deduped = dedup_records(records);
+        let mut rows: Vec<MemberCacheRow> = Vec::with_capacity(deduped.len());
+        for r in deduped {
             rows.push(MemberCacheRow {
                 st_user_id: r.st_user_id.0,
                 discord_user_id: r.discord_user_id.map(|id| id.0 as i64),
@@ -381,14 +366,17 @@ impl IdentityWrite for PgStore {
 
     /// Repair one row's Discord identity in place, keyed by the Solidarity Tech id - the
     /// only columns the runtime role may `UPDATE`. A member not in the cache updates no
-    /// rows, which is the intended silent no-op.
+    /// rows; that stays a success (the role was already granted and the next sweep will
+    /// cache the member), but it is logged, because a zero-row repair otherwise looks
+    /// identical to a successful one - it means the roster sweep has not yet stored this
+    /// member, and the write-through silently landed nowhere.
     async fn link_identity(
         &self,
         st_user_id: &StUserId,
         discord_id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), PersistenceError> {
-        sqlx::query!(
+        let affected = sqlx::query!(
             r#"UPDATE member_cache
                SET discord_user_id = $1, discord_handle = $2
                WHERE st_user_id = $3"#,
@@ -397,7 +385,14 @@ impl IdentityWrite for PgStore {
             st_user_id.0,
         )
         .execute(&self.pool)
-        .await?;
+        .await?
+        .rows_affected();
+        if affected == 0 {
+            tracing::warn!(
+                st_user_id = %st_user_id.0,
+                "link_identity matched no cached row; the member is not yet in the cache, so the identity repair will land on the next roster sweep"
+            );
+        }
         Ok(())
     }
 }
