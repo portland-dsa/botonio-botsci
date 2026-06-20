@@ -5,7 +5,7 @@ use std::time::Duration;
 use serenity::all::{
     ComponentInteractionCollector, CreateActionRow, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, RoleId,
+    CreateSelectMenuOption,
 };
 use serenity::futures::StreamExt as _;
 
@@ -17,7 +17,7 @@ const NAV_TIMEOUT: Duration = Duration::from_secs(180);
 
 #[poise::command(slash_command)]
 pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
-    let is_mod = invoker_is_moderator(&ctx).await;
+    let is_mod = crate::moderator::invoker_is_moderator(&ctx).await;
     let accent = ctx.data().config.accent_color;
     let topics = topics_for(is_mod);
     let current = Topic::MyMembership;
@@ -40,7 +40,7 @@ pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
     while let Some(interaction) = stream.next().await {
         // Re-derive the chosen topic AND re-check permission - never trust the id.
         let chosen = selected_topic(&interaction);
-        let allowed = topics_for(invoker_is_moderator(&ctx).await);
+        let allowed = topics_for(crate::moderator::invoker_is_moderator(&ctx).await);
         let topic = chosen
             .filter(|t| allowed.contains(t))
             .unwrap_or(Topic::MyMembership);
@@ -82,14 +82,5 @@ fn selected_topic(interaction: &serenity::all::ComponentInteraction) -> Option<T
         values.first().and_then(|v| Topic::from_id(v))
     } else {
         None
-    }
-}
-
-/// Whether the invoker holds the configured moderator role.
-async fn invoker_is_moderator(ctx: &Context<'_>) -> bool {
-    let role_id = RoleId::new(ctx.data().config.moderator_role_id);
-    match ctx.author_member().await {
-        Some(member) => member.roles.contains(&role_id),
-        None => false,
     }
 }

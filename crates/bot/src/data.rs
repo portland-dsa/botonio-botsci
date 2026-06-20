@@ -2,16 +2,19 @@
 
 use std::sync::Arc;
 
-use persistence::PgStore;
+use persistence::{Auditor, PgStore};
 use serenity::all::UserId;
 
 use crate::config::BotConfig;
 use crate::error::BotError;
+use crate::lookup::RateLimiter;
 
 /// Shared state every command receives via `Context`.
 pub struct Data {
     pub config: BotConfig,
     pub store: Arc<PgStore>,
+    pub auditor: Arc<Auditor>,
+    pub rate_limiter: Arc<RateLimiter>,
     /// The bot's own user id, captured once at `ready`. Lets the message handler
     /// detect an @-mention synchronously, without a per-message lookup of the
     /// current user (and without needing the serenity `cache` feature).

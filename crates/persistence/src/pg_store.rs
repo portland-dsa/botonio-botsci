@@ -66,6 +66,13 @@ impl PgStore {
         Ok(Self { pool })
     }
 
+    /// A clone of the underlying pool, for a sibling capability (the [`Auditor`])
+    /// that shares the one bot-owned connection pool. `PgPool` is internally an
+    /// `Arc`, so the clone is cheap.
+    pub fn pool_handle(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     /// A cheap liveness probe: confirm the runtime role can still read `member_cache`. The
     /// bot's watchdog calls this so the front-end never issues raw SQL of its own. It probes
     /// the actual table rather than a bare `SELECT 1` so the check fails closed on a grant

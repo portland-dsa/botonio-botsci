@@ -8,6 +8,7 @@ mod data;
 mod error;
 mod guild_guard;
 mod lookup;
+mod moderator;
 mod notify;
 mod ping;
 mod render;
@@ -89,6 +90,15 @@ async fn main() -> anyhow::Result<()> {
     // pool tuning (warm connections + headroom) lives in PgStore::connect.
     let store = Arc::new(PgStore::connect(&cfg.db_runtime_dsn).await?);
 
+    // The audit writer shares the runtime pool but holds the HMAC key; the limiter is
+    // pure in-memory state. Both are shared with the command handlers via `Data`.
+    let auditor = Arc::new(persistence::Auditor::new(
+        store.pool_handle(),
+        cfg.audit_hash_key.clone(),
+        cfg.audit_key_id.clone(),
+    ));
+    let rate_limiter = Arc::new(crate::lookup::RateLimiter::new(cfg.lookup_rate_per_min));
+
     // First roster load before serving. A fresh, non-empty sweep is written; a failed or
     // empty initial sweep no longer hard-fails startup - the durable cache may already hold
     // a good roster from a previous run, so serve that and let the background refresh
@@ -130,9 +140,11 @@ async fn main() -> anyhow::Result<()> {
         cfg.discord_list_id.clone(),
     );
 
-    // The framework setup closure below moves `store` into Data; clone the handle the
-    // watchdog needs before that happens.
+    // The framework setup closure below moves `store`, `auditor`, and `rate_limiter`
+    // into Data; clone the handles the watchdog needs before that happens.
     let watchdog_store = store.clone();
+    let setup_auditor = auditor.clone();
+    let setup_rate_limiter = rate_limiter.clone();
 
     let guild_id = cfg.guild_id;
     let token = secrecy::ExposeSecret::expose_secret(&cfg.token).to_owned();
@@ -183,6 +195,8 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         })
         .setup(move |ctx, ready, framework| {
+            let auditor = setup_auditor;
+            let rate_limiter = setup_rate_limiter;
             Box::pin(async move {
                 let gid = serenity::all::GuildId::new(guild_id);
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, gid).await?;
@@ -194,6 +208,8 @@ async fn main() -> anyhow::Result<()> {
                 Ok(Data {
                     config: cfg,
                     store,
+                    auditor,
+                    rate_limiter,
                     bot_user_id: ready.user.id,
                 })
             })
