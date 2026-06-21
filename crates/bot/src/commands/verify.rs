@@ -14,7 +14,10 @@ use engine::verify::{self, VerifyOutcome};
 
 use crate::data::{Context, Error};
 use crate::moderator::invoker_is_moderator;
-use crate::render::modal::{EMAIL_FIELD_ID, EMAIL_MODAL_ID, email_modal, parse_email};
+use crate::render::modal::{
+    EMAIL_FIELD_ID, EMAIL_MODAL_ID, OVERRIDE_MODAL_ID, REASON_FIELD_ID, email_modal,
+    override_modal, parse_email, parse_reason,
+};
 use crate::render::verify::{VerifyState, state_embed};
 
 /// The "Look up by email" button id and the inactivity window the collectors wait.
@@ -167,36 +170,103 @@ async fn manual_verify_flow(
         // The override button is the deliberate last resort: hand-approve a member
         // Solidarity Tech does not know, granting Member plus the Manual Override marker.
         if button.data.custom_id == OVERRIDE_BUTTON_ID {
-            // Defer first: the audit/stamp/role writes below must not blow Discord's
-            // 3-second interaction deadline (same reason the modal-submit path defers).
-            button
-                .create_response(sctx, CreateInteractionResponse::Acknowledge)
-                .await?;
             let data = ctx.data();
-            let next = if data.guild_config.load().manual_override_role.is_none() {
-                // Hand-approval grants the Manual Override marker, so it needs that role
-                // configured; refuse rather than approve without the marker it promises.
+            // Hand-approval grants the Manual Override marker, so it needs that role
+            // configured; refuse before collecting a reason rather than approve without the
+            // marker it promises.
+            if data.guild_config.load().manual_override_role.is_none() {
                 tracing::warn!("override pressed but no Manual Override role is configured");
-                VerifyState::Error
-            } else {
-                match verify::override_approve(
-                    discord,
-                    &*data.store,
-                    &*data.auditor,
-                    invoker,
-                    target_id,
-                    None,
+                button
+                    .create_response(sctx, CreateInteractionResponse::Acknowledge)
+                    .await?;
+                button
+                    .edit_response(
+                        sctx,
+                        EditInteractionResponse::new()
+                            .embed(state_embed(&display, &handle, &avatar, &VerifyState::Error))
+                            .components(vec![]),
+                    )
+                    .await?;
+                return Ok(());
+            }
+
+            // Collect an optional reason in a modal before approving.
+            let override_modal_id = format!("{OVERRIDE_MODAL_ID}:{}", message.id.get());
+            button
+                .create_response(
+                    sctx,
+                    CreateInteractionResponse::Modal(override_modal(&override_modal_id, &display)),
                 )
-                .await
-                {
-                    Ok(()) => VerifyState::Overridden,
-                    Err(e) => {
-                        tracing::error!(error = %e, "override approve failed");
-                        VerifyState::Error
-                    }
+                .await?;
+            // A dismissed modal sends no event, so also watch for a re-click of the
+            // still-visible button and reopen it.
+            let submit = loop {
+                tokio::select! {
+                    modal = async {
+                        message
+                            .await_modal_interaction(sctx)
+                            .author_id(ctx.author().id)
+                            .custom_ids(vec![override_modal_id.clone()])
+                            .timeout(IDLE)
+                            .await
+                    } => break modal,
+                    reclick = async {
+                        message
+                            .await_component_interaction(sctx)
+                            .author_id(ctx.author().id)
+                            .timeout(IDLE)
+                            .await
+                    } => match reclick {
+                        Some(rc) => {
+                            rc.create_response(
+                                sctx,
+                                CreateInteractionResponse::Modal(override_modal(
+                                    &override_modal_id,
+                                    &display,
+                                )),
+                            )
+                            .await?;
+                            continue;
+                        }
+                        None => break None,
+                    },
                 }
             };
-            button
+            let Some(submit) = submit else {
+                handle_msg
+                    .edit(
+                        ctx,
+                        reply(
+                            state_embed(&display, &handle, &avatar, &VerifyState::Expired),
+                            vec![],
+                        ),
+                    )
+                    .await?;
+                return Ok(());
+            };
+            // Acknowledge so the audit/stamp/role writes below cannot blow Discord's
+            // 3-second interaction deadline.
+            submit
+                .create_response(sctx, CreateInteractionResponse::Acknowledge)
+                .await?;
+            let reason = parse_reason(&read_input(&submit, REASON_FIELD_ID));
+            let next = match verify::override_approve(
+                discord,
+                &*data.store,
+                &*data.auditor,
+                invoker,
+                target_id,
+                reason,
+            )
+            .await
+            {
+                Ok(()) => VerifyState::Overridden,
+                Err(e) => {
+                    tracing::error!(error = %e, "override approve failed");
+                    VerifyState::Error
+                }
+            };
+            submit
                 .edit_response(
                     sctx,
                     EditInteractionResponse::new()
