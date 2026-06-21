@@ -374,25 +374,29 @@ async fn run_wizard(
         .label("Stop")
         .style(ButtonStyle::Secondary);
 
+    let mut queue_exhausted = false;
     loop {
         let Some(miss) = data.store.next_pending(guild_id).await? else {
-            // Queue exhausted.
+            // Queue exhausted: signal completion after the loop.
+            queue_exhausted = true;
             break;
         };
 
         // Liveness: has the member left or been verified by another path?
         let liveness = discord.member_roles(miss.discord_user_id).await;
         match liveness {
-            Err(e) => {
-                if is_not_found(&e) {
-                    tracing::debug!(user = %miss.discord_user_id, "bulk-verify: member left guild");
-                } else {
-                    tracing::warn!(user = %miss.discord_user_id, error = %e, "bulk-verify: member_roles error");
-                }
+            Err(e) if is_not_found(&e) => {
+                tracing::debug!(user = %miss.discord_user_id, "bulk-verify: member left guild");
                 data.store
                     .mark_miss(guild_id, miss.discord_user_id, MissState::Skipped)
                     .await?;
                 continue;
+            }
+            Err(e) => {
+                // Transient error (5xx, rate-limit, network blip): leave the miss
+                // Pending so it is retried on the next resume.
+                tracing::warn!(user = %miss.discord_user_id, %e, "bulk-verify: transient liveness error, pausing");
+                break;
             }
             Ok(roles) if !miss_still_pending(true, &roles.held) => {
                 tracing::debug!(user = %miss.discord_user_id, "bulk-verify: member already in managed role");
@@ -405,19 +409,28 @@ async fn run_wizard(
         }
 
         // Fetch the User object verify_step needs for display and identity.
-        let member_result = sctx
+        let member = match sctx
             .http
             .get_member(
                 serenity::all::GuildId::new(guild_id.0),
                 serenity::all::UserId::new(miss.discord_user_id.0),
             )
-            .await;
-        let Ok(member) = member_result else {
-            // Left between the liveness check and now.
-            data.store
-                .mark_miss(guild_id, miss.discord_user_id, MissState::Skipped)
-                .await?;
-            continue;
+            .await
+            .map_err(DiscordError::from)
+        {
+            Ok(m) => m,
+            Err(ref e) if is_not_found(e) => {
+                // Left between the liveness check and now.
+                data.store
+                    .mark_miss(guild_id, miss.discord_user_id, MissState::Skipped)
+                    .await?;
+                continue;
+            }
+            Err(e) => {
+                // Transient error: leave Pending and pause.
+                tracing::warn!(user = %miss.discord_user_id, %e, "bulk-verify: transient fetch error, pausing");
+                break;
+            }
         };
         let target = member.user;
         let display_name = target
@@ -502,6 +515,12 @@ async fn run_wizard(
                     .await?;
             }
         }
+    }
+
+    if !queue_exhausted {
+        // A transient error interrupted the wizard. The session stays InProgress
+        // so the moderator can resume with /bulk-verify.
+        return Ok(());
     }
 
     // Queue exhausted: mark complete and show summary.

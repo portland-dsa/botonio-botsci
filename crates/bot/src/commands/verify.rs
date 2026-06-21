@@ -31,7 +31,7 @@ const IDLE: Duration = Duration::from_secs(180);
 const OVERRIDE_BUTTON_ID: &str = "verify_override_approve";
 
 /// Outcome returned by `verify_step` once the exchange with the moderator ends.
-// The `Role` inside `Verified` is read by the bulk-verify command (a later task).
+// `Verified`'s inner `Role` is not read by the current callers.
 #[allow(dead_code)]
 pub(crate) enum StepOutcome {
     /// The member was found in Solidarity Tech and the role was assigned.

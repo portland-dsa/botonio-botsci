@@ -5,10 +5,6 @@
 //! Every function is network-free and takes only value types so each can be
 //! unit-tested by serialising its output to JSON.
 
-// The builders and the blurple const are called by the command module (Task 6); suppress
-// dead-code warnings while this module is ahead of its caller.
-#![allow(dead_code)]
-
 use serenity::all::CreateEmbed;
 
 use domain::Role;
