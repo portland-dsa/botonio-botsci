@@ -1,5 +1,6 @@
 pub mod card;
 pub mod help;
+pub mod setup;
 pub mod verify;
 
 use crate::data::{Data, Error};
@@ -11,6 +12,7 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         card::membership_card_menu(),
         card::lookup(),
         verify::verify(),
+        setup::setup(),
         help::help(),
     ]
 }
