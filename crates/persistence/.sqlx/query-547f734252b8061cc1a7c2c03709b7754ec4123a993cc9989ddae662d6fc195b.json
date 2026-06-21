@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO manual_override (discord_user_id, approved_by, note)\n               VALUES ($1, $2, $3) ON CONFLICT (discord_user_id) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "547f734252b8061cc1a7c2c03709b7754ec4123a993cc9989ddae662d6fc195b"
+}

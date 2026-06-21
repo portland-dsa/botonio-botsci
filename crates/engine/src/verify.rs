@@ -611,7 +611,8 @@ where
 
 /// Hand-approve `target` past Solidarity Tech, on behalf of moderator `invoker` - the
 /// escape hatch when no record can be matched. Grants `Member` and the additive Manual
-/// Override marker, and stamps the approval permanently.
+/// Override marker, and stamps the approval permanently with an optional `note` recording
+/// why (stored only on the stamp, never in the audit log).
 ///
 /// Fail-closed twice before the role grant: the audit row, then the override stamp, so the
 /// "your approval has been logged" promise holds whenever a role is granted. The stamp is
@@ -625,6 +626,7 @@ pub async fn override_approve<Dc, O, A>(
     audit: &A,
     invoker: DiscordUserId,
     target: DiscordUserId,
+    note: Option<String>,
 ) -> Result<(), VerifyError>
 where
     Dc: DiscordClient,
@@ -641,7 +643,7 @@ where
     )
     .await?;
     override_log
-        .stamp_override(target, invoker)
+        .stamp_override(target, invoker, note)
         .await
         .map_err(|e| VerifyError::Override(e.to_string()))?;
     assign_role_or_record_failure(

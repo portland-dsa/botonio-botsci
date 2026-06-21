@@ -427,12 +427,14 @@ impl OverrideLog for PgStore {
         &self,
         subject: DiscordUserId,
         approver: DiscordUserId,
+        note: Option<String>,
     ) -> Result<(), PersistenceError> {
         sqlx::query!(
-            r#"INSERT INTO manual_override (discord_user_id, approved_by)
-               VALUES ($1, $2) ON CONFLICT (discord_user_id) DO NOTHING"#,
+            r#"INSERT INTO manual_override (discord_user_id, approved_by, note)
+               VALUES ($1, $2, $3) ON CONFLICT (discord_user_id) DO NOTHING"#,
             subject.0 as i64,
             approver.0 as i64,
+            note,
         )
         .execute(&self.pool)
         .await?;
@@ -446,7 +448,7 @@ impl OverrideLog for PgStore {
         subject: DiscordUserId,
     ) -> Result<Option<OverrideRecord>, PersistenceError> {
         let row = sqlx::query!(
-            "SELECT approved_by, approved_at FROM manual_override WHERE discord_user_id = $1",
+            "SELECT approved_by, approved_at, note FROM manual_override WHERE discord_user_id = $1",
             subject.0 as i64
         )
         .fetch_optional(&self.pool)
@@ -454,6 +456,7 @@ impl OverrideLog for PgStore {
         Ok(row.map(|r| OverrideRecord {
             approved_by: DiscordUserId(r.approved_by as u64),
             approved_at: r.approved_at,
+            note: r.note,
         }))
     }
 

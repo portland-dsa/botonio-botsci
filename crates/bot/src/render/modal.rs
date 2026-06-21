@@ -15,17 +15,22 @@ pub const EMAIL_MODAL_ID: &str = "verify_email_modal";
 /// Discord's hard cap on a modal title, in characters.
 const TITLE_MAX: usize = 45;
 
-/// `"Verify {display_name}"`, truncated to Discord's 45-character modal-title cap.
+/// `"{verb} {display_name}"`, truncated to Discord's 45-character modal-title cap.
 ///
 /// A name long enough to overflow is cut and marked with a trailing `...` so the title is
 /// always accepted by the API rather than rejected for length.
-pub fn verify_title(display_name: &str) -> String {
-    let full = format!("Verify {display_name}");
+fn modal_title(verb: &str, display_name: &str) -> String {
+    let full = format!("{verb} {display_name}");
     if full.chars().count() <= TITLE_MAX {
         return full;
     }
     let kept: String = full.chars().take(TITLE_MAX - 3).collect();
     format!("{kept}...")
+}
+
+/// `"Verify {display_name}"`, truncated to Discord's modal-title cap.
+pub fn verify_title(display_name: &str) -> String {
+    modal_title("Verify", display_name)
 }
 
 /// The manual-verify modal: a single required **Member email** field, titled for the
@@ -40,6 +45,43 @@ pub fn email_modal(custom_id: &str, display_name: &str) -> CreateModal {
                 .max_length(254),
         ),
     ])
+}
+
+/// The override-reason text-input id; read back off the submission.
+pub const REASON_FIELD_ID: &str = "reason";
+
+/// The override-reason modal's own custom id; the collector filters submissions by it.
+pub const OVERRIDE_MODAL_ID: &str = "verify_override_modal";
+
+/// The longest reason the modal accepts.
+const REASON_MAX: u16 = 300;
+
+/// The override-approval modal: a single optional paragraph "Reason" field, titled for the
+/// member being approved. `custom_id` is normally [`OVERRIDE_MODAL_ID`].
+pub fn override_modal(custom_id: &str, display_name: &str) -> CreateModal {
+    CreateModal::new(custom_id, modal_title("Approve", display_name)).components(vec![
+        CreateActionRow::InputText(
+            CreateInputText::new(
+                InputTextStyle::Paragraph,
+                "Reason (optional)",
+                REASON_FIELD_ID,
+            )
+            .placeholder("Why are you approving this member? (optional)")
+            .required(false)
+            .max_length(REASON_MAX),
+        ),
+    ])
+}
+
+/// Normalize a typed override reason: trim surrounding whitespace and treat an empty
+/// string as no reason. The modal already caps the length.
+pub fn parse_reason(raw: &str) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 /// Minimal sanity-check on a typed email before it is sent to Solidarity Tech: trimmed,
@@ -78,6 +120,30 @@ mod tests {
         assert_eq!(field["style"], 1); // SHORT
         assert_eq!(field["required"], true);
         assert_eq!(field["max_length"], 254);
+    }
+
+    #[test]
+    fn override_modal_is_a_single_optional_reason_field() {
+        let v = json(override_modal(OVERRIDE_MODAL_ID, "Rosy the Rascal"));
+        assert_eq!(v["title"], "Approve Rosy the Rascal");
+        let rows = v["components"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let field = &rows[0]["components"][0];
+        assert_eq!(field["label"], "Reason (optional)");
+        assert_eq!(field["custom_id"], REASON_FIELD_ID);
+        assert_eq!(field["style"], 2); // PARAGRAPH
+        assert_eq!(field["required"], false);
+        assert_eq!(field["max_length"], 300);
+    }
+
+    #[test]
+    fn parse_reason_trims_and_optionalizes() {
+        assert_eq!(
+            parse_reason("  vouched in person "),
+            Some("vouched in person".into())
+        );
+        assert_eq!(parse_reason("   "), None);
+        assert_eq!(parse_reason(""), None);
     }
 
     #[test]

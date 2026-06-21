@@ -108,6 +108,8 @@ impl engine::audit::AuditLog for CapturingAudit {
 struct CapturingOverrides {
     /// The subject whose stamp was recorded, if any.
     stamped: Arc<Mutex<Option<DiscordUserId>>>,
+    /// The note recorded with the first stamp, if any.
+    note: Arc<Mutex<Option<String>>>,
     /// The subject whose override was deleted, if any.
     deleted: Arc<Mutex<Option<DiscordUserId>>>,
 }
@@ -120,11 +122,13 @@ impl OverrideLog for CapturingOverrides {
         &self,
         subject: DiscordUserId,
         _approver: DiscordUserId,
+        note: Option<String>,
     ) -> Result<(), std::convert::Infallible> {
-        // Insert-once: only record the first stamp.
+        // Insert-once: only record the first stamp (and its note).
         let mut guard = self.stamped.lock().unwrap();
         if guard.is_none() {
             *guard = Some(subject);
+            *self.note.lock().unwrap() = note;
         }
         Ok(())
     }
@@ -240,6 +244,7 @@ impl VerifyWorld {
             discord_fails: false,
             overrides: CapturingOverrides {
                 stamped: Arc::new(Mutex::new(None)),
+                note: Arc::new(Mutex::new(None)),
                 deleted: Arc::new(Mutex::new(None)),
             },
             override_marker_assigned: Arc::new(Mutex::new(None)),
@@ -383,7 +388,7 @@ impl VerifyWorld {
         );
     }
 
-    async fn run_override(&mut self, target: DiscordUserId) {
+    async fn run_override(&mut self, target: DiscordUserId, note: Option<String>) {
         let assigned = self.assigned_role.clone();
         let stripped_via_set = self.stripped_roles.clone();
         let stripped_via_remove = self.stripped_roles.clone();
@@ -426,6 +431,7 @@ impl VerifyWorld {
             &self.audit,
             DiscordUserId(SONIC),
             target,
+            note,
         )
         .await
         .expect("override_approve should succeed in the override scenario");
@@ -452,7 +458,7 @@ impl VerifyWorld {
 
         // Pre-stamp so the delete is observable.
         self.overrides
-            .stamp_override(target, DiscordUserId(SONIC))
+            .stamp_override(target, DiscordUserId(SONIC), None)
             .await
             .unwrap();
 
@@ -627,7 +633,21 @@ async fn email_verification_recorded(world: &mut VerifyWorld) {
 #[when(regex = r"^Sonic overrides (\w+)$")]
 async fn sonic_overrides(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
-    world.run_override(id).await;
+    world.run_override(id, None).await;
+}
+
+#[when(regex = r#"^Sonic overrides (\w+) with the reason "([^"]*)"$"#)]
+async fn sonic_overrides_with_reason(world: &mut VerifyWorld, name: String, reason: String) {
+    let (id, _) = actor(&name);
+    world.run_override(id, Some(reason)).await;
+}
+
+#[then(regex = r#"^the approval stamp records the reason "([^"]*)"$"#)]
+async fn stamp_records_reason(world: &mut VerifyWorld, reason: String) {
+    assert_eq!(
+        world.overrides.note.lock().unwrap().as_deref(),
+        Some(reason.as_str())
+    );
 }
 
 #[then(regex = r"^the override marker is assigned to (\w+)$")]
