@@ -341,6 +341,14 @@ async fn override_stamp_is_insert_once_and_deletable(pool: sqlx::PgPool) {
     .unwrap();
     assert_eq!(approver, 1, "the first approver is preserved on a re-stamp");
 
+    // The typed read returns the preserved first approver.
+    let got = store
+        .get_override(subject)
+        .await
+        .unwrap()
+        .expect("a stamp exists");
+    assert_eq!(got.approved_by, DiscordUserId(1));
+
     // delete_override needs DELETE, which the test role holds; production withholds it.
     store.delete_override(subject).await.unwrap();
     let remaining = sqlx::query_scalar!(
@@ -351,6 +359,9 @@ async fn override_stamp_is_insert_once_and_deletable(pool: sqlx::PgPool) {
     .await
     .unwrap();
     assert_eq!(remaining, Some(0), "delete_override removes the stamp");
+
+    // After delete, the typed read misses.
+    assert!(store.get_override(subject).await.unwrap().is_none());
 }
 
 #[sqlx::test(migrations = "./migrations")]

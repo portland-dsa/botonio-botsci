@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT approved_by, approved_at FROM manual_override WHERE discord_user_id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "approved_by",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "manual_override",
+            "name": "approved_by"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "approved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "manual_override",
+            "name": "approved_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "68550e07838d0b0e0157cc2fc055d00a8a1d8b0fec145be27839d123f6fbbd61"
+}

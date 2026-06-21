@@ -27,8 +27,8 @@ use sqlx::postgres::PgPoolOptions;
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::store::{
-    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, OverrideLog, RosterWrite,
-    dedup_records,
+    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, OverrideLog,
+    OverrideRecord, RosterWrite, dedup_records,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -437,6 +437,24 @@ impl OverrideLog for PgStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// The override stamp for `subject`, or `None`. Read-only `SELECT`, which the
+    /// runtime role already holds on `manual_override`.
+    async fn get_override(
+        &self,
+        subject: DiscordUserId,
+    ) -> Result<Option<OverrideRecord>, PersistenceError> {
+        let row = sqlx::query!(
+            "SELECT approved_by, approved_at FROM manual_override WHERE discord_user_id = $1",
+            subject.0 as i64
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| OverrideRecord {
+            approved_by: DiscordUserId(r.approved_by as u64),
+            approved_at: r.approved_at,
+        }))
     }
 
     async fn delete_override(&self, subject: DiscordUserId) -> Result<(), PersistenceError> {

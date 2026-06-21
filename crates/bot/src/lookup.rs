@@ -67,8 +67,8 @@ impl RateLimiter {
 }
 
 use engine::audit::AuditLog;
-use engine::card::{self, CardError};
-use engine::store::{MemberRecord, MemberStore};
+use engine::card::{self, CardView};
+use engine::store::{MemberRecord, MemberStore, OverrideLog, OverrideRecord};
 
 /// What a lookup resolved to. The poise adapters render each variant; the Cucumber
 /// suite asserts on them directly. `Debug` so the Cucumber `World` (which must be
@@ -78,8 +78,12 @@ pub enum LookupOutcome {
     /// The invoker viewing their own card - `None` when they have no record. Never
     /// gated, rate-limited, or audited.
     SelfCard(Option<MemberRecord>),
+    /// The invoker viewing their own override card (manually verified, no record).
+    SelfOverride(OverrideRecord),
     /// A moderator's successful view of another member's card.
     Card(MemberRecord),
+    /// A moderator's successful view of a manually-verified member's override card.
+    OverrideCard(OverrideRecord),
     /// A privileged lookup that found no record for the target.
     NotFound,
     /// A non-moderator tried to view someone other than themselves.
@@ -97,8 +101,9 @@ pub enum LookupOutcome {
 /// found - is written to the audit log. The audit write is fail-closed: if it
 /// cannot be recorded, no card is revealed (a [`LookupOutcome::StoreError`]), so a
 /// successful reveal always has a matching audit row.
-pub async fn lookup<S, A>(
+pub async fn lookup<S, O, A>(
     store: &S,
+    overrides: &O,
     audit: &A,
     limiter: &RateLimiter,
     invoker: DiscordUserId,
@@ -107,12 +112,17 @@ pub async fn lookup<S, A>(
 ) -> LookupOutcome
 where
     S: MemberStore,
+    O: OverrideLog,
     A: AuditLog,
 {
     // Self lookups bypass the gate, the limiter, and the audit log entirely.
     if target == invoker {
-        return match store.by_discord_id(invoker).await {
-            Ok(rec) => LookupOutcome::SelfCard(rec),
+        return match card::resolve_view(store, overrides, &card::PresentMember { id: invoker })
+            .await
+        {
+            Ok(CardView::Member(rec)) => LookupOutcome::SelfCard(Some(rec)),
+            Ok(CardView::Override(stamp)) => LookupOutcome::SelfOverride(stamp),
+            Ok(CardView::Unknown) => LookupOutcome::SelfCard(None),
             Err(e) => LookupOutcome::StoreError(e.to_string()),
         };
     }
@@ -124,15 +134,17 @@ where
     }
 
     // A moderator viewing another member: resolve, then record before revealing.
-    let record = match card::resolve(store, &card::PresentMember { id: target }).await {
-        Ok(rec) => Some(rec),
-        Err(CardError::NoRecord) => None,
-        Err(CardError::Store(e)) => return LookupOutcome::StoreError(e.to_string()),
+    let view = match card::resolve_view(store, overrides, &card::PresentMember { id: target }).await
+    {
+        Ok(v) => v,
+        Err(e) => return LookupOutcome::StoreError(e.to_string()),
     };
-    let outcome = if record.is_some() {
-        "found"
-    } else {
-        "not_found"
+    // Map the view to its audit label and the outcome to reveal in one place, so the
+    // recorded label can never disagree with the card that ends up shown.
+    let (reveal, outcome) = match view {
+        CardView::Member(rec) => (LookupOutcome::Card(rec), "found"),
+        CardView::Override(stamp) => (LookupOutcome::OverrideCard(stamp), "override"),
+        CardView::Unknown => (LookupOutcome::NotFound, "not_found"),
     };
     if let Err(e) = audit
         .record(
@@ -147,10 +159,7 @@ where
         tracing::error!(error = %e, "audit write failed; refusing the lookup");
         return LookupOutcome::StoreError(e.to_string());
     }
-    match record {
-        Some(rec) => LookupOutcome::Card(rec),
-        None => LookupOutcome::NotFound,
-    }
+    reveal
 }
 
 #[cfg(test)]
@@ -241,6 +250,7 @@ mod core_tests {
         let limiter = RateLimiter::new(10);
         let outcome = lookup(
             &store,
+            &store,
             &FailingAudit,
             &limiter,
             DiscordUserId(1),
@@ -256,6 +266,7 @@ mod core_tests {
         let store = InMemoryStore::new(Index::default());
         let limiter = RateLimiter::new(10);
         let outcome = lookup(
+            &store,
             &store,
             &NoopAudit,
             &limiter,

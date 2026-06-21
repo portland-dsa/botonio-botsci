@@ -11,7 +11,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, MigsStatus, Role};
 
@@ -284,6 +284,16 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), Self::Error>;
 }
 
+/// A standing manual-override approval: who vouched for a member, and when. Keyed,
+/// like the stamp itself, on the immutable Discord id - an overridden member has no
+/// Solidarity Tech id. Returned by [`OverrideLog::get_override`] and rendered on the
+/// card a moderator or the member sees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OverrideRecord {
+    pub approved_by: DiscordUserId,
+    pub approved_at: DateTime<Utc>,
+}
+
 /// Record and clear the permanent note that a member was hand-approved past Solidarity
 /// Tech. Keyed on the immutable Discord id - an overridden member has no Solidarity Tech
 /// id to key on. [`stamp_override`](Self::stamp_override) is insert-once: a second stamp
@@ -302,6 +312,14 @@ pub trait OverrideLog: Send + Sync {
         approver: DiscordUserId,
     ) -> Result<(), Self::Error>;
 
+    /// The override stamp for `subject`, or `None` if they were never hand-approved.
+    /// The card path reads this when Solidarity Tech has no record, to tell a
+    /// manually-verified member apart from an unknown one.
+    async fn get_override(
+        &self,
+        subject: DiscordUserId,
+    ) -> Result<Option<OverrideRecord>, Self::Error>;
+
     /// Remove `subject`'s override stamp, returning them to an un-stamped state.
     /// Reachable only through the staging-gated reset; production withholds the `DELETE`
     /// grant, so this fails closed there.
@@ -314,9 +332,9 @@ pub trait OverrideLog: Send + Sync {
 pub struct InMemoryStore {
     index: RwLock<Arc<Index>>,
     config: RwLock<GuildConfig>,
-    /// Hand-approval stamps: subject Discord id to first approver Discord id. The
+    /// Hand-approval stamps: subject Discord id to its [`OverrideRecord`]. The
     /// in-memory analogue of the `manual_override` table, insert-once just like it.
-    overrides: RwLock<HashMap<u64, u64>>,
+    overrides: RwLock<HashMap<u64, OverrideRecord>>,
 }
 
 impl InMemoryStore {
@@ -434,8 +452,23 @@ impl OverrideLog for InMemoryStore {
             .write()
             .expect("overrides lock poisoned")
             .entry(subject.0)
-            .or_insert(approver.0);
+            .or_insert(OverrideRecord {
+                approved_by: approver,
+                approved_at: Utc::now(),
+            });
         Ok(())
+    }
+
+    async fn get_override(
+        &self,
+        subject: DiscordUserId,
+    ) -> Result<Option<OverrideRecord>, Infallible> {
+        Ok(self
+            .overrides
+            .read()
+            .expect("overrides lock poisoned")
+            .get(&subject.0)
+            .cloned())
     }
 
     async fn delete_override(&self, subject: DiscordUserId) -> Result<(), Infallible> {
@@ -682,5 +715,23 @@ mod tests {
         };
         store.save_config(guild, &cfg).await.unwrap();
         assert_eq!(store.load_config(guild).await.unwrap(), cfg);
+    }
+
+    #[tokio::test]
+    async fn get_override_round_trips_stamp() {
+        let store = InMemoryStore::new(Index::default());
+        assert!(
+            store
+                .get_override(DiscordUserId(7))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        store
+            .stamp_override(DiscordUserId(7), DiscordUserId(99))
+            .await
+            .unwrap();
+        let got = store.get_override(DiscordUserId(7)).await.unwrap().unwrap();
+        assert_eq!(got.approved_by, DiscordUserId(99));
     }
 }

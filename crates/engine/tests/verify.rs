@@ -129,6 +129,13 @@ impl OverrideLog for CapturingOverrides {
         Ok(())
     }
 
+    async fn get_override(
+        &self,
+        _subject: DiscordUserId,
+    ) -> Result<Option<engine::store::OverrideRecord>, std::convert::Infallible> {
+        Ok(None)
+    }
+
     async fn delete_override(
         &self,
         subject: DiscordUserId,
