@@ -24,7 +24,7 @@ use std::sync::Mutex;
 
 use cucumber::{World as _, given, then, when};
 
-use engine::store::{InMemoryStore, Index, MemberRecord};
+use engine::store::{InMemoryStore, Index, MemberRecord, OverrideLog};
 use engine::util::{DiscordUserId, Email, StUserId};
 
 use lookup::{LookupOutcome, RateLimiter, lookup};
@@ -34,6 +34,7 @@ const SONIC: u64 = 1;
 const EGGMAN: u64 = 666;
 const TAILS: u64 = 2;
 const SHADOW: u64 = 3;
+const KNUCKLES: u64 = 4;
 
 fn id_for(name: &str) -> DiscordUserId {
     let raw = match name {
@@ -41,6 +42,7 @@ fn id_for(name: &str) -> DiscordUserId {
         "Eggman" => EGGMAN,
         "Tails" => TAILS,
         "Shadow" => SHADOW,
+        "Knuckles" => KNUCKLES,
         other => panic!("unknown actor {other}"),
     };
     DiscordUserId(raw)
@@ -92,6 +94,7 @@ impl engine::audit::AuditLog for RecordingAudit {
 struct LookupWorld {
     moderators: std::collections::HashSet<u64>,
     records: Vec<MemberRecord>,
+    overrides: Vec<(DiscordUserId, DiscordUserId)>,
     audit: RecordingAudit,
     last: Option<LookupOutcome>,
     last_actor: Option<DiscordUserId>,
@@ -103,6 +106,7 @@ impl LookupWorld {
         Self {
             moderators: std::collections::HashSet::new(),
             records: Vec::new(),
+            overrides: Vec::new(),
             audit: RecordingAudit::default(),
             last: None,
             last_actor: None,
@@ -113,11 +117,15 @@ impl LookupWorld {
     /// Run one lookup of `target` by `invoker`, remembering the outcome.
     async fn run(&mut self, invoker: DiscordUserId, target: DiscordUserId) {
         let store = InMemoryStore::new(Index::from_records(self.records.clone()));
+        for (subject, approver) in &self.overrides {
+            store.stamp_override(*subject, *approver).await.unwrap();
+        }
         let limiter = RateLimiter::new(10);
         self.last_actor = Some(invoker);
         self.last_subject = Some(target);
         self.last = Some(
             lookup(
+                &store,
                 &store,
                 &self.audit,
                 &limiter,
@@ -167,7 +175,7 @@ async fn looks_up_eleven(world: &mut LookupWorld, actor: String, target: String)
     world.last_subject = Some(t);
     let mut last = None;
     for _ in 0..11 {
-        last = Some(lookup(&store, &world.audit, &limiter, a, t, is_mod).await);
+        last = Some(lookup(&store, &store, &world.audit, &limiter, a, t, is_mod).await);
     }
     world.last = last;
 }
@@ -213,6 +221,19 @@ async fn no_audit_row(world: &mut LookupWorld) {
 #[then("ten audit rows are written")]
 async fn ten_audit_rows(world: &mut LookupWorld) {
     assert_eq!(world.audit.rows.lock().unwrap().len(), 10);
+}
+
+#[given(regex = r"^(\w+) is a manually-verified member approved by (\w+)$")]
+async fn manually_verified(world: &mut LookupWorld, name: String, mod_name: String) {
+    world.overrides.push((id_for(&name), id_for(&mod_name)));
+}
+
+#[then("the override card is shown")]
+async fn override_card_shown(world: &mut LookupWorld) {
+    assert!(matches!(
+        world.last,
+        Some(LookupOutcome::OverrideCard(_)) | Some(LookupOutcome::SelfOverride(_))
+    ));
 }
 
 #[tokio::main]

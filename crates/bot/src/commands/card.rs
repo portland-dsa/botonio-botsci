@@ -47,6 +47,7 @@ async fn show_for_target(ctx: Context<'_>, target: &User) -> Result<(), Error> {
     // `&RateLimiter` where deref coercion applies (and clippy prefers the bare `&`).
     let outcome = lookup::lookup(
         &*data.store,
+        &*data.store,
         &*data.auditor,
         &data.rate_limiter,
         invoker,
@@ -82,6 +83,12 @@ async fn render_outcome(
                  If you think this is wrong, ask a moderator.",
             ))
             .await?;
+        }
+        LookupOutcome::SelfOverride(stamp) | LookupOutcome::OverrideCard(stamp) => {
+            let display_name = target.name.clone();
+            let embed = render::card::override_card(&display_name, &stamp);
+            ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
+                .await?;
         }
         LookupOutcome::NotFound => {
             ctx.send(reply("No membership record found for that member."))
