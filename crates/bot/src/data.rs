@@ -41,10 +41,14 @@ impl Data {
     pub fn role_writer(&self) -> Option<DiscordHttp> {
         let cfg = self.guild_config.load();
         let map: HashMap<_, _> = managed_role_map(&cfg)?;
+        let override_role = cfg
+            .manual_override_role
+            .map(|r| serenity::all::RoleId::new(r.0));
         Some(DiscordHttp::from_role_map(
             self.http.clone(),
             GuildId::new(self.config.guild_id),
             map,
+            override_role,
         ))
     }
 }

@@ -18,4 +18,7 @@ pub enum DiscordError {
     /// override.
     #[error("role {0:?} not found by name on guild")]
     RoleNotFound(&'static str),
+    /// A Manual Override marker write was attempted but no override role is configured.
+    #[error("no Manual Override role is configured")]
+    OverrideRoleUnconfigured,
 }

@@ -63,4 +63,14 @@ pub trait DiscordClient: Send + Sync {
     /// by role id, so it stays correct under `DISCORD_ROLE_*_ID` name overrides,
     /// and is in [`Role::ALL`] priority order.
     async fn member_roles(&self, user: DiscordUserId) -> Result<MemberRoles, DiscordError>;
+
+    /// Add the configured Manual Override marker role to `user`, leaving their status
+    /// roles untouched. Errors with [`DiscordError::OverrideRoleUnconfigured`] when no
+    /// marker role is configured.
+    async fn assign_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError>;
+
+    /// Remove the Manual Override marker role from `user`. A no-op (still `Ok`) when the
+    /// member does not hold it. Errors with [`DiscordError::OverrideRoleUnconfigured`]
+    /// when no marker role is configured.
+    async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError>;
 }
