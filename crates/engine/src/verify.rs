@@ -12,7 +12,7 @@ use domain::Role;
 use crate::audit::AuditLog;
 use crate::backends::discord::DiscordClient;
 use crate::backends::solidarity_tech::SolidarityTechClient;
-use crate::store::{IdentityWrite, MemberRecord, MemberStore};
+use crate::store::{IdentityWrite, MemberRecord, MemberStore, OverrideLog};
 use crate::util::{DiscordHandle, DiscordUserId, Email};
 
 /// The identity repair a successful match implies.
@@ -173,6 +173,9 @@ pub enum VerifyOutcome {
     NotFound,
     /// The handle is on record for a different account; nothing was changed.
     Conflict,
+    /// A moderator hand-approved the member past Solidarity Tech; they were granted
+    /// `Member` and the additive Manual Override marker.
+    Overridden,
 }
 
 /// Why a verification could not complete. The two store/audit failures are stringified
@@ -188,17 +191,22 @@ pub enum VerifyError {
     Discord(String),
     #[error("solidarity tech read failed: {0}")]
     SolidarityTech(String),
+    #[error("override stamp write failed: {0}")]
+    Override(String),
 }
 
 /// How a verification was initiated, written to the audit row's `method` field so a query
 /// or operator can tell the automatic id/handle path ([`verify`]) from the manual email
-/// path ([`verify_by_email`]). A closed set, so a call site cannot record a typo'd value.
+/// path ([`verify_by_email`]) from the hand-approval path ([`override_approve`]). A closed
+/// set, so a call site cannot record a typo'd value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerifyMethod {
     /// The automatic match on the member's Discord id then handle.
     Discord,
     /// The moderator-supplied membership-email lookup.
     Email,
+    /// The moderator's hand approval past Solidarity Tech.
+    Override,
 }
 
 impl VerifyMethod {
@@ -207,6 +215,7 @@ impl VerifyMethod {
         match self {
             Self::Discord => "discord",
             Self::Email => "email",
+            Self::Override => "override",
         }
     }
 }
@@ -539,6 +548,68 @@ where
             Ok(VerifyOutcome::NotFound)
         }
     }
+}
+
+/// Hand-approve `target` past Solidarity Tech, on behalf of moderator `invoker` - the
+/// escape hatch when no record can be matched. Grants `Member` and the additive Manual
+/// Override marker, and stamps the approval permanently.
+///
+/// Fail-closed twice before any write: the audit row, then the override stamp, so the
+/// "your approval has been logged" promise holds whenever a role is granted. The stamp is
+/// insert-once, so a retry after a later role-write failure is idempotent. The marker is
+/// added after `Member`; the status-role logic never strips it.
+pub async fn override_approve<Dc, O, A>(
+    discord: &Dc,
+    override_log: &O,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+) -> Result<VerifyOutcome, VerifyError>
+where
+    Dc: DiscordClient,
+    O: OverrideLog,
+    A: AuditLog,
+{
+    record_outcome(
+        audit,
+        invoker,
+        target,
+        "override",
+        Some(Role::Member),
+        VerifyMethod::Override,
+    )
+    .await?;
+    override_log
+        .stamp_override(target, invoker)
+        .await
+        .map_err(|e| VerifyError::Override(e.to_string()))?;
+    assign_role_or_record_failure(
+        discord,
+        audit,
+        invoker,
+        target,
+        Role::Member,
+        VerifyMethod::Override,
+    )
+    .await?;
+    if let Err(e) = discord.assign_override_marker(target).await {
+        // The marker is the secondary half of the grant; Member is already set and the
+        // stamp already written, so a retry re-adds only the marker (idempotent).
+        if let Err(audit_err) = record_outcome(
+            audit,
+            invoker,
+            target,
+            "override_marker_failed",
+            None,
+            VerifyMethod::Override,
+        )
+        .await
+        {
+            tracing::warn!(error = %audit_err, "override: could not record the marker-failure follow-up");
+        }
+        return Err(VerifyError::Discord(e.to_string()));
+    }
+    Ok(VerifyOutcome::Overridden)
 }
 
 #[cfg(test)]

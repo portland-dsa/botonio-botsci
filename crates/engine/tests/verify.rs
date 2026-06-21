@@ -16,9 +16,9 @@ use cucumber::{World as _, given, then, when};
 
 use engine::backends::discord::{DiscordError, MemberRoles, MockDiscordClient, Role};
 use engine::backends::solidarity_tech::{MockSolidarityTechClient, SolidarityTechMember};
-use engine::store::{IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore};
+use engine::store::{IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, OverrideLog};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-use engine::verify::{VerifyError, VerifyOutcome, verify, verify_by_email};
+use engine::verify::{VerifyError, VerifyOutcome, override_approve, verify, verify_by_email};
 
 use domain::MigsStatus;
 
@@ -49,6 +49,7 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
         "Knuckles" => 3,
         "Shadow" => 4,
         "Eggman" => 5,
+        "Silver" => 6,
         other => panic!("unknown actor {other}"),
     };
     (DiscordUserId(raw), DiscordHandle(name.to_lowercase()))
@@ -91,6 +92,38 @@ impl engine::audit::AuditLog for CapturingAudit {
             return Err(AuditUnavailable);
         }
         self.rows.lock().unwrap().push(detail);
+        Ok(())
+    }
+}
+
+/// A recording override-log double that captures stamp calls and enforces insert-once.
+#[derive(Debug, Clone)]
+struct CapturingOverrides {
+    /// The subject whose stamp was recorded, if any.
+    stamped: Arc<Mutex<Option<DiscordUserId>>>,
+}
+
+#[async_trait::async_trait]
+impl OverrideLog for CapturingOverrides {
+    type Error = std::convert::Infallible;
+
+    async fn stamp_override(
+        &self,
+        subject: DiscordUserId,
+        _approver: DiscordUserId,
+    ) -> Result<(), std::convert::Infallible> {
+        // Insert-once: only record the first stamp.
+        let mut guard = self.stamped.lock().unwrap();
+        if guard.is_none() {
+            *guard = Some(subject);
+        }
+        Ok(())
+    }
+
+    async fn delete_override(
+        &self,
+        _subject: DiscordUserId,
+    ) -> Result<(), std::convert::Infallible> {
         Ok(())
     }
 }
@@ -163,6 +196,10 @@ struct VerifyWorld {
     /// When set, the Discord mock's `set_role` returns an error, to exercise the failed
     /// role-write path.
     discord_fails: bool,
+    /// The override-log double, capturing stamp calls for the override scenario.
+    overrides: CapturingOverrides,
+    /// Tracks whether `assign_override_marker` was called on the Discord mock.
+    override_marker_assigned: Arc<Mutex<Option<DiscordUserId>>>,
     last: Option<Result<VerifyOutcome, VerifyError>>,
 }
 
@@ -180,6 +217,10 @@ impl VerifyWorld {
             st_writes: Arc::new(Mutex::new(Vec::new())),
             cache_writes: Arc::new(Mutex::new(0)),
             discord_fails: false,
+            overrides: CapturingOverrides {
+                stamped: Arc::new(Mutex::new(None)),
+            },
+            override_marker_assigned: Arc::new(Mutex::new(None)),
             last: None,
         }
     }
@@ -313,6 +354,55 @@ impl VerifyWorld {
                 target,
                 handle,
                 email,
+            )
+            .await,
+        );
+    }
+
+    async fn run_override(&mut self, target: DiscordUserId) {
+        let assigned = self.assigned_role.clone();
+        let stripped_via_set = self.stripped_roles.clone();
+        let stripped_via_remove = self.stripped_roles.clone();
+        let held = self.held_roles.clone();
+        let fails = self.discord_fails;
+        let marker_assigned = self.override_marker_assigned.clone();
+        let mut discord = MockDiscordClient::new();
+        discord.expect_member_roles().returning(move |_| {
+            ready_ok(MemberRoles {
+                held: held.clone(),
+                ..Default::default()
+            })
+        });
+        discord
+            .expect_set_role()
+            .returning(move |_u, current, role| {
+                *assigned.lock().unwrap() = Some(role);
+                if let Some(removed) = current {
+                    stripped_via_set.lock().unwrap().push(removed);
+                }
+                if fails {
+                    return ready_err(DiscordError::MissingEnv("simulated role write failure"));
+                }
+                ready_ok(())
+            });
+        discord.expect_remove_roles().returning(move |_u, roles| {
+            stripped_via_remove.lock().unwrap().extend_from_slice(roles);
+            ready_ok(())
+        });
+        discord
+            .expect_assign_override_marker()
+            .returning(move |user| {
+                *marker_assigned.lock().unwrap() = Some(user);
+                ready_ok(())
+            });
+
+        self.last = Some(
+            override_approve(
+                &discord,
+                &self.overrides,
+                &self.audit,
+                DiscordUserId(SONIC),
+                target,
             )
             .await,
         );
@@ -470,6 +560,33 @@ async fn email_verification_recorded(world: &mut VerifyWorld) {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["method"], "email");
     assert_eq!(rows[0]["outcome"], "verified");
+}
+
+#[when(regex = r"^Sonic overrides (\w+)$")]
+async fn sonic_overrides(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    world.run_override(id).await;
+}
+
+#[then(regex = r"^the override marker is assigned to (\w+)$")]
+async fn override_marker_assigned(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert_eq!(*world.override_marker_assigned.lock().unwrap(), Some(id));
+}
+
+#[then("the approval stamp is recorded")]
+async fn approval_stamp_recorded(world: &mut VerifyWorld) {
+    assert!(world.overrides.stamped.lock().unwrap().is_some());
+}
+
+#[then("the override is recorded in the audit log with method override")]
+async fn override_audit_recorded(world: &mut VerifyWorld) {
+    let rows = world.audit.rows.lock().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["method"] == "override" && r["outcome"] == "override"),
+        "expected an audit row with method=override and outcome=override; rows: {rows:?}"
+    );
 }
 
 #[tokio::main]
