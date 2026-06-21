@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod data;
 mod error;
+mod guild_config;
 mod guild_guard;
 mod lookup;
 mod moderator;
@@ -15,10 +16,11 @@ mod render;
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+use domain::DiscordGuildId;
 use engine::backends::Clients;
-use engine::backends::discord::{DiscordHttp, resolve_managed_roles};
 use engine::backends::solidarity_tech::SolidarityTechHttp;
-use engine::store::{RosterWrite, sweep_roster};
+use engine::store::{ConfigStore, RosterWrite, sweep_roster};
 
 use persistence::PgStore;
 
@@ -79,8 +81,8 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = BotConfig::from_env()?;
     // The bot reads only Solidarity Tech, for the membership index; Discord is driven by
-    // the gateway token below, and the slice-2 role-write client will be built from the
-    // gateway's shared `Http` (see `DiscordHttp::from_http`), not a second token here.
+    // the gateway token below, and the role-write client is rebuilt from the gateway's
+    // shared `Http` on each write, not from a second token here.
     // Share the ST client with the refresh task via an `Arc`.
     let solidarity_tech = Arc::new(Clients::from_env().await?.solidarity_tech);
 
@@ -90,6 +92,13 @@ async fn main() -> anyhow::Result<()> {
     // ExecStartPre `migrate` phase, so the schema exists; this role holds only DML. The
     // pool tuning (warm connections + headroom) lives in PgStore::connect.
     let store = Arc::new(PgStore::connect(&cfg.db_runtime_dsn).await?);
+
+    // Load the /setup-managed guild config into a live, atomically-swappable handle.
+    // A fresh guild has no row yet, so this defaults to all-unset; the moderator gate
+    // and role writes stay closed until a moderator runs /setup.
+    let guild_config = Arc::new(ArcSwap::from_pointee(
+        store.load_config(DiscordGuildId(cfg.guild_id)).await?,
+    ));
 
     // The audit writer shares the runtime pool but holds the HMAC key; the limiter is
     // pure in-memory state. Both are shared with the command handlers via `Data`.
@@ -147,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
     let setup_auditor = auditor.clone();
     let setup_rate_limiter = rate_limiter.clone();
     let setup_solidarity_tech = solidarity_tech.clone();
+    let setup_guild_config = guild_config.clone();
 
     let guild_id = cfg.guild_id;
     let token = secrecy::ExposeSecret::expose_secret(&cfg.token).to_owned();
@@ -200,13 +210,10 @@ async fn main() -> anyhow::Result<()> {
             let auditor = setup_auditor;
             let rate_limiter = setup_rate_limiter;
             let solidarity_tech = setup_solidarity_tech;
+            let guild_config = setup_guild_config;
             Box::pin(async move {
                 let gid = serenity::all::GuildId::new(guild_id);
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, gid).await?;
-                // The role-write client shares the gateway's authenticated `Http`; the
-                // managed role ids are resolved once here, where that `Http` is in scope.
-                let managed = resolve_managed_roles(&ctx.http, gid).await?;
-                let discord = Arc::new(DiscordHttp::from_http(ctx.http.clone(), gid, managed));
                 tracing::info!("commands registered; bot is ready to serve");
                 // The first index build already finished before `client.start()`, so
                 // reaching this point means gateway-ready AND index-built - exactly the
@@ -217,7 +224,8 @@ async fn main() -> anyhow::Result<()> {
                     store,
                     auditor,
                     rate_limiter,
-                    discord,
+                    guild_config,
+                    http: ctx.http.clone(),
                     solidarity_tech,
                     bot_user_id: ready.user.id,
                 })

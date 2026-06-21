@@ -128,6 +128,24 @@ numeric_newtype! {
     DiscordChannelId
 }
 
+numeric_newtype! {
+    /// A Discord role snowflake, guaranteed to hold a valid `u64`.
+    ///
+    /// Distinct from the other snowflake newtypes for the same reason they are
+    /// distinct from each other: separate types stop a role id being passed where a
+    /// user, guild, or channel id is required. The inner field is public so a backend
+    /// decoding a role from an API response can construct one directly.
+    ///
+    /// ```
+    /// use domain::DiscordRoleId;
+    ///
+    /// let r: DiscordRoleId = "445566778899001122".parse().unwrap();
+    /// assert_eq!(r.to_string(), "445566778899001122");
+    /// assert!("not-a-role".parse::<DiscordRoleId>().is_err());
+    /// ```
+    DiscordRoleId
+}
+
 /// Defines a `String`-backed identifier newtype.
 ///
 /// Every such type rejects empty/all-whitespace input on [`FromStr`] but

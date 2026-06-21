@@ -20,8 +20,6 @@ pub struct BotConfig {
     /// The Discord guild (server) the bot serves. Commands are registered only to this
     /// guild, and every invocation is re-checked against the guild allow-list.
     pub guild_id: u64,
-    /// The role id that marks a moderator (gates the help "For moderators" topic).
-    pub moderator_role_id: u64,
     /// Embed accent colour as a 0xRRGGBB integer.
     pub accent_color: u32,
     /// How often to rebuild the member index.
@@ -62,9 +60,6 @@ impl BotConfig {
         let guild_id = read("DISCORD_GUILD_ID")?
             .parse()
             .map_err(|_| ConfigError::Invalid("DISCORD_GUILD_ID", "not a u64".into()))?;
-        let moderator_role_id = read("DISCORD_MODERATOR_ROLE_ID")?
-            .parse()
-            .map_err(|_| ConfigError::Invalid("DISCORD_MODERATOR_ROLE_ID", "not a u64".into()))?;
         let accent_color = match std::env::var("BOT_ACCENT_COLOR") {
             Ok(s) => parse_accent(&s).map_err(|e| ConfigError::Invalid("BOT_ACCENT_COLOR", e))?,
             Err(_) => 0xc8_10_2e, // placeholder DSA red
@@ -83,7 +78,6 @@ impl BotConfig {
         Ok(Self {
             token,
             guild_id,
-            moderator_role_id,
             accent_color,
             refresh_interval,
             discord_list_id,

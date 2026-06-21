@@ -24,7 +24,6 @@ class BotSecretTokens(Enum):
 class BotEnvironmentValues(StrEnum):
     """The non-secret ``Environment=`` keys rendered into a bot instance's override.conf."""
 
-    DiscordModeratorRoleId = EnvVars.DiscordModeratorRoleId
     DiscordGuildId = EnvVars.DiscordGuildId
     StUserListId = EnvVars.StUserListId
 

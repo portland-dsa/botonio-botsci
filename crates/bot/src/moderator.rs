@@ -11,7 +11,10 @@ use crate::data::Context;
 /// cannot resolve (e.g. an interaction outside a guild) is treated as a
 /// non-moderator.
 pub async fn invoker_is_moderator(ctx: &Context<'_>) -> bool {
-    let role_id = RoleId::new(ctx.data().config.moderator_role_id);
+    let Some(role) = ctx.data().guild_config.load().moderator_role else {
+        return false; // no moderator role configured yet - nobody is a moderator
+    };
+    let role_id = RoleId::new(role.0);
     match ctx.author_member().await {
         Some(member) => member.roles.contains(&role_id),
         None => false,
