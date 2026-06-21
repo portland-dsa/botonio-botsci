@@ -1,10 +1,10 @@
 //! Pure builder for the membership-card embed. No I/O; takes everything it renders.
 
 use chrono::NaiveDate;
-use serenity::all::CreateEmbed;
+use serenity::all::{CreateEmbed, CreateEmbedFooter};
 
 use domain::MigsStatus;
-use engine::store::MemberRecord;
+use engine::store::{MemberRecord, OverrideRecord};
 
 pub const COLOR_GREEN: u32 = 0x3b_a5_5d;
 pub const COLOR_AMBER: u32 = 0xfa_a6_1a;
@@ -48,6 +48,30 @@ pub fn membership_card(
     embed.footer(serenity::all::CreateEmbedFooter::new(
         "Pulled from Solidarity Tech · PDX DSA",
     ))
+}
+
+/// Build the card for a manually-verified member - one Solidarity Tech does not know,
+/// whom a moderator hand-approved. Pure: it draws only the approval stamp and the
+/// member's display name, with no Solidarity Tech fields (there are none). The
+/// approving moderator renders as a `<@id>` mention, which Discord shows as their live
+/// handle without an extra lookup and without storing a handle that could go stale.
+pub fn override_card(display_name: &str, stamp: &OverrideRecord) -> CreateEmbed {
+    let approve_date = stamp
+        .approved_at
+        .date_naive()
+        .format("%b %-d, %Y")
+        .to_string();
+    let approver = format!("<@{}>", stamp.approved_by.0);
+    CreateEmbed::new()
+        .title(display_name.to_string())
+        .colour(COLOR_GREEN)
+        .description("\u{26a0}\u{fe0f} \u{2611}\u{fe0f} Manually Verified as Member")
+        .field("Role", "Member; Manual Verify", false)
+        .field("Approve Date", approve_date, true)
+        .field("Approving Mod", approver, true)
+        .footer(CreateEmbedFooter::new(
+            "Manually verified by a moderator \u{b7} PDX DSA",
+        ))
 }
 
 fn role_label(rec: &MemberRecord) -> &'static str {
@@ -252,6 +276,58 @@ mod tests {
             !desc.contains("0 days"),
             "must not say '0 days', got: {desc}"
         );
+    }
+
+    fn stamp() -> engine::store::OverrideRecord {
+        engine::store::OverrideRecord {
+            approved_by: engine::backends::util::DiscordUserId(123),
+            approved_at: chrono::DateTime::from_naive_utc_and_offset(
+                NaiveDate::from_ymd_opt(2026, 6, 21)
+                    .unwrap()
+                    .and_hms_opt(12, 0, 0)
+                    .unwrap(),
+                chrono::Utc,
+            ),
+        }
+    }
+
+    #[test]
+    fn override_card_shows_manual_verify_role_and_mention() {
+        let e = override_card("rose", &stamp());
+        let v = json(e);
+        assert_eq!(v["color"].as_u64(), Some(COLOR_GREEN as u64));
+        assert_eq!(
+            field_value(&v, "Role").as_deref(),
+            Some("Member; Manual Verify")
+        );
+        assert_eq!(field_value(&v, "Approving Mod").as_deref(), Some("<@123>"));
+        assert_eq!(
+            field_value(&v, "Approve Date").as_deref(),
+            Some("Jun 21, 2026")
+        );
+        assert!(
+            v["description"]
+                .as_str()
+                .unwrap()
+                .contains("Manually Verified as Member")
+        );
+    }
+
+    #[test]
+    fn override_card_dates_share_an_inline_row() {
+        let e = override_card("rose", &stamp());
+        let v = json(e);
+        let inline_of = |name: &str| {
+            v["fields"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|f| f["name"] == name)
+                .map(|f| f["inline"].as_bool().unwrap_or(false))
+        };
+        assert_eq!(inline_of("Approve Date"), Some(true));
+        assert_eq!(inline_of("Approving Mod"), Some(true));
+        assert_eq!(inline_of("Role"), Some(false));
     }
 
     #[test]
