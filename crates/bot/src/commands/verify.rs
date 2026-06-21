@@ -21,6 +21,9 @@ use crate::render::verify::{VerifyState, state_embed};
 const LOOKUP_BUTTON_ID: &str = "verify_lookup_email";
 const IDLE: Duration = Duration::from_secs(180);
 
+/// The "Override and approve" button id - shown only on the not-found state.
+const OVERRIDE_BUTTON_ID: &str = "verify_override_approve";
+
 /// Verify a member and assign their standing role. Moderators only.
 ///
 /// Hidden from non-moderators via `default_member_permissions`; the in-code
@@ -89,6 +92,12 @@ pub async fn verify(
             ))
             .await?;
         }
+        Ok(VerifyOutcome::Overridden) => {
+            // `verify` does not hand-approve; the override outcome reaches the moderator
+            // through the not-found email flow's button (handled in manual_verify_flow).
+            ctx.send(plain(&format!("Hand approved {} as Member.", target.name)))
+                .await?;
+        }
         Err(e) => {
             tracing::error!(error = %e, "member verify failed");
             ctx.send(plain(
@@ -123,26 +132,18 @@ async fn manual_verify_flow(
     target_handle: DiscordHandle,
 ) -> Result<(), Error> {
     let (display, handle, avatar) = header(target);
-    let button_row = CreateActionRow::Buttons(vec![
-        CreateButton::new(LOOKUP_BUTTON_ID)
-            .label("Look up by email")
-            .style(ButtonStyle::Primary),
-    ]);
 
-    let reply = |embed: CreateEmbed, with_button: bool| {
-        let mut r = poise::CreateReply::default().embed(embed).ephemeral(true);
-        r = r.components(if with_button {
-            vec![button_row.clone()]
-        } else {
-            vec![]
-        });
-        r
+    let reply = |embed: CreateEmbed, components: Vec<CreateActionRow>| {
+        poise::CreateReply::default()
+            .embed(embed)
+            .ephemeral(true)
+            .components(components)
     };
 
     let handle_msg = ctx
         .send(reply(
             state_embed(&display, &handle, &avatar, &VerifyState::Prompt),
-            true,
+            vec![buttons_for(&VerifyState::Prompt)],
         ))
         .await?;
     let message = handle_msg.message().await?;
@@ -162,12 +163,54 @@ async fn manual_verify_flow(
                     ctx,
                     reply(
                         state_embed(&display, &handle, &avatar, &VerifyState::Expired),
-                        false,
+                        vec![],
                     ),
                 )
                 .await?;
             return Ok(());
         };
+
+        // The override button is the deliberate last resort: hand-approve a member
+        // Solidarity Tech does not know, granting Member plus the Manual Override marker.
+        if button.data.custom_id == OVERRIDE_BUTTON_ID {
+            // Defer first: the audit/stamp/role writes below must not blow Discord's
+            // 3-second interaction deadline (same reason the modal-submit path defers).
+            button
+                .create_response(sctx, CreateInteractionResponse::Acknowledge)
+                .await?;
+            let data = ctx.data();
+            let next = if data.guild_config.load().manual_override_role.is_none() {
+                // No marker role is configured, so refuse before any write rather than
+                // granting Member and then failing on the marker.
+                tracing::warn!("override pressed but no Manual Override role is configured");
+                VerifyState::Error
+            } else {
+                match verify::override_approve(
+                    discord,
+                    &*data.store,
+                    &*data.auditor,
+                    invoker,
+                    target_id,
+                )
+                .await
+                {
+                    Ok(_) => VerifyState::Overridden,
+                    Err(e) => {
+                        tracing::error!(error = %e, "override approve failed");
+                        VerifyState::Error
+                    }
+                }
+            };
+            button
+                .edit_response(
+                    sctx,
+                    EditInteractionResponse::new()
+                        .embed(state_embed(&display, &handle, &avatar, &next))
+                        .components(vec![]),
+                )
+                .await?;
+            return Ok(());
+        }
 
         // Open the modal in response to the button.
         button
@@ -215,7 +258,7 @@ async fn manual_verify_flow(
                     ctx,
                     reply(
                         state_embed(&display, &handle, &avatar, &VerifyState::Expired),
-                        false,
+                        vec![],
                     ),
                 )
                 .await?;
@@ -250,6 +293,7 @@ async fn manual_verify_flow(
                     Ok(VerifyOutcome::NotFound) => VerifyState::NotFound,
                     Ok(VerifyOutcome::Conflict) => VerifyState::Conflict,
                     Ok(VerifyOutcome::Unverified) => VerifyState::NotFound,
+                    Ok(VerifyOutcome::Overridden) => VerifyState::Overridden,
                     Err(e) => {
                         tracing::error!(error = %e, "manual verify by email failed");
                         VerifyState::Error
@@ -258,7 +302,8 @@ async fn manual_verify_flow(
             }
         };
 
-        // Retry stays open on a recoverable state; everything else is terminal.
+        // Retry stays open on a recoverable state; everything else is terminal. On a
+        // not-found, `buttons_for` also surfaces the override button as the last resort.
         let keep_button = matches!(next, VerifyState::NotFound | VerifyState::InvalidEmail);
         submit
             .edit_response(
@@ -266,7 +311,7 @@ async fn manual_verify_flow(
                 EditInteractionResponse::new()
                     .embed(state_embed(&display, &handle, &avatar, &next))
                     .components(if keep_button {
-                        vec![button_row.clone()]
+                        vec![buttons_for(&next)]
                     } else {
                         vec![]
                     }),
@@ -278,6 +323,24 @@ async fn manual_verify_flow(
         }
         // Loop: await the next button press on the same message.
     }
+}
+
+/// The button row for a given state: the lookup/retry button always, plus the red
+/// override button once a lookup has missed (the deliberate last resort).
+fn buttons_for(state: &VerifyState) -> CreateActionRow {
+    let mut buttons = vec![
+        CreateButton::new(LOOKUP_BUTTON_ID)
+            .label("Look up by email")
+            .style(ButtonStyle::Primary),
+    ];
+    if matches!(state, VerifyState::NotFound) {
+        buttons.push(
+            CreateButton::new(OVERRIDE_BUTTON_ID)
+                .label("Override and approve")
+                .style(ButtonStyle::Danger),
+        );
+    }
+    CreateActionRow::Buttons(buttons)
 }
 
 /// Read the value the moderator typed into the named modal field.
