@@ -29,3 +29,11 @@ cucumber = "0.21"
 [[test]]
 name = "verify"
 harness = false
+
+# Behaviour suite for the bulk-verify sweep + resumable session (`engine::bulk` +
+# `BulkSessionStore`). Offline, Cucumber, mocks only. Cast: Sonic (the moderator
+# running /bulk-verify), Tails (a member the cache knows, good standing), Shadow
+# (unknown - a miss), Knuckles (already holds the Member role), Silver (a second miss).
+[[test]]
+name = "bulk"
+harness = false
