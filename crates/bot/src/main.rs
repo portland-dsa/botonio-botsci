@@ -6,6 +6,7 @@ mod commands;
 mod config;
 mod data;
 mod error;
+mod guild_config;
 mod guild_guard;
 mod lookup;
 mod moderator;
