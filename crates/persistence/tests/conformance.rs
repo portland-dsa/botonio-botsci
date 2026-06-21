@@ -298,6 +298,7 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
         member_role: Some(DiscordRoleId(2)),
         dues_expired_role: Some(DiscordRoleId(3)),
         unverified_role: Some(DiscordRoleId(4)),
+        manual_override_role: Some(DiscordRoleId(8)),
         mod_approval_channel: Some(DiscordChannelId(5)),
         unverified_channel: Some(DiscordChannelId(6)),
         dues_expired_channel: Some(DiscordChannelId(7)),

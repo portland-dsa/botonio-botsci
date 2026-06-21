@@ -405,6 +405,7 @@ struct GuildConfigRow {
     member_role_id: Option<i64>,
     dues_expired_role_id: Option<i64>,
     unverified_role_id: Option<i64>,
+    manual_override_role_id: Option<i64>,
     mod_approval_channel_id: Option<i64>,
     unverified_channel_id: Option<i64>,
     dues_expired_channel_id: Option<i64>,
@@ -419,6 +420,7 @@ impl From<GuildConfigRow> for GuildConfig {
             member_role: role(r.member_role_id),
             dues_expired_role: role(r.dues_expired_role_id),
             unverified_role: role(r.unverified_role_id),
+            manual_override_role: role(r.manual_override_role_id),
             mod_approval_channel: chan(r.mod_approval_channel_id),
             unverified_channel: chan(r.unverified_channel_id),
             dues_expired_channel: chan(r.dues_expired_channel_id),
@@ -434,7 +436,7 @@ impl ConfigStore for PgStore {
         let row = sqlx::query_as!(
             GuildConfigRow,
             r#"SELECT moderator_role_id, member_role_id, dues_expired_role_id,
-                      unverified_role_id, mod_approval_channel_id,
+                      unverified_role_id, manual_override_role_id, mod_approval_channel_id,
                       unverified_channel_id, dues_expired_channel_id
                FROM guild_config WHERE guild_id = $1"#,
             guild.0 as i64
@@ -454,14 +456,15 @@ impl ConfigStore for PgStore {
         sqlx::query!(
             r#"INSERT INTO guild_config
                  (guild_id, moderator_role_id, member_role_id, dues_expired_role_id,
-                  unverified_role_id, mod_approval_channel_id, unverified_channel_id,
-                  dues_expired_channel_id, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+                  unverified_role_id, manual_override_role_id, mod_approval_channel_id,
+                  unverified_channel_id, dues_expired_channel_id, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
                ON CONFLICT (guild_id) DO UPDATE SET
                  moderator_role_id       = EXCLUDED.moderator_role_id,
                  member_role_id          = EXCLUDED.member_role_id,
                  dues_expired_role_id    = EXCLUDED.dues_expired_role_id,
                  unverified_role_id      = EXCLUDED.unverified_role_id,
+                 manual_override_role_id = EXCLUDED.manual_override_role_id,
                  mod_approval_channel_id = EXCLUDED.mod_approval_channel_id,
                  unverified_channel_id   = EXCLUDED.unverified_channel_id,
                  dues_expired_channel_id = EXCLUDED.dues_expired_channel_id,
@@ -471,6 +474,7 @@ impl ConfigStore for PgStore {
             role(config.member_role),
             role(config.dues_expired_role),
             role(config.unverified_role),
+            role(config.manual_override_role),
             chan(config.mod_approval_channel),
             chan(config.unverified_channel),
             chan(config.dues_expired_channel),

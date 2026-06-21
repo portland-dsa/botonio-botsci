@@ -180,16 +180,21 @@ impl Index {
 }
 
 /// The per-guild runtime configuration set through the bot's `/setup` command:
-/// the moderator role, the three managed status roles, and the three verification
-/// channels. Every field is optional - a freshly deployed guild has nothing set
-/// until a moderator configures it. Built from id newtypes so a store maps it to a
-/// single nullable-column row with no nesting, exactly like [`MemberRecord`].
+/// the moderator role, the three managed status roles, the additive Manual Override
+/// marker, and the three verification channels. Every field is optional - a freshly
+/// deployed guild has nothing set until a moderator configures it. Built from id
+/// newtypes so a store maps it to a single nullable-column row with no nesting, exactly
+/// like [`MemberRecord`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuildConfig {
     pub moderator_role: Option<DiscordRoleId>,
     pub member_role: Option<DiscordRoleId>,
     pub dues_expired_role: Option<DiscordRoleId>,
     pub unverified_role: Option<DiscordRoleId>,
+    /// The additive Manual Override marker role, granted alongside `Member` on a hand
+    /// approval. Optional and outside the status trichotomy: ordinary verification works
+    /// without it, and it is never stripped by the status-role logic.
+    pub manual_override_role: Option<DiscordRoleId>,
     pub mod_approval_channel: Option<DiscordChannelId>,
     pub unverified_channel: Option<DiscordChannelId>,
     pub dues_expired_channel: Option<DiscordChannelId>,
