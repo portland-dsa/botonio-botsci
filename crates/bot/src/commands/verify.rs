@@ -41,13 +41,33 @@ pub async fn verify(
         return Ok(());
     }
 
+    let plain = |content: &str| {
+        poise::CreateReply::default()
+            .content(content.to_owned())
+            .ephemeral(true)
+    };
+
     let invoker = DiscordUserId(ctx.author().id.get());
     let target_id = DiscordUserId(target.id.get());
     let target_handle = DiscordHandle(target.name.clone());
     let data = ctx.data();
+
+    let Some(discord) = data.role_writer() else {
+        tracing::warn!("verify attempted before the managed roles were configured");
+        ctx.send(
+            poise::CreateReply::default()
+                .content(
+                    "Roles are not configured yet - a server manager needs to run /setup first.",
+                )
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    };
+
     let result = verify::verify(
         &*data.solidarity_tech,
-        &*data.discord,
+        &discord,
         &*data.store,
         &*data.auditor,
         invoker,
@@ -55,12 +75,6 @@ pub async fn verify(
         target_handle.clone(),
     )
     .await;
-
-    let plain = |content: &str| {
-        poise::CreateReply::default()
-            .content(content.to_owned())
-            .ephemeral(true)
-    };
 
     match result {
         Ok(VerifyOutcome::Verified(role)) => {
@@ -88,7 +102,7 @@ pub async fn verify(
         }
         // The automatic match missed: offer the manual email path.
         Ok(VerifyOutcome::Unverified) | Ok(VerifyOutcome::NotFound) => {
-            manual_verify_flow(ctx, &target, invoker, target_id, target_handle).await?;
+            manual_verify_flow(ctx, &discord, &target, invoker, target_id, target_handle).await?;
         }
     }
     Ok(())
@@ -106,6 +120,7 @@ fn header(target: &User) -> (String, String, String) {
 /// One ephemeral message hosting the email-lookup button and every outcome edit.
 async fn manual_verify_flow(
     ctx: Context<'_>,
+    discord: &engine::backends::discord::DiscordHttp,
     target: &User,
     invoker: DiscordUserId,
     target_id: DiscordUserId,
@@ -225,7 +240,7 @@ async fn manual_verify_flow(
                 let data = ctx.data();
                 match verify::verify_by_email(
                     &*data.solidarity_tech,
-                    &*data.discord,
+                    discord,
                     &*data.store,
                     &*data.auditor,
                     invoker,
