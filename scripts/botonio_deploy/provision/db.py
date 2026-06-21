@@ -37,6 +37,20 @@ _ENSURE_GROUP_ROLE = (
     "END IF; END $$;"
 )
 
+# The /forget reset deletes a member's manual_override stamp, which needs DELETE on that table.
+# The migrations grant only SELECT and INSERT (the stamp is meant to be permanent), and they
+# can't differentiate environments since the same SQL runs against both databases - so DELETE
+# is granted here for staging alone, scoped to the staging database so the privilege never
+# reaches the production table even though the grantee group role is cluster-wide. Guarded on
+# the table existing: on a fresh database the migrate step has not created it yet, and this
+# command is meant to run before the first bot start; a later re-run applies the grant.
+_STAGING_OVERRIDE_DELETE_GRANT = (
+    "DO $$ BEGIN "
+    "IF to_regclass('public.manual_override') IS NOT NULL THEN "
+    "GRANT DELETE ON manual_override TO botonio_app; "
+    "END IF; END $$;"
+)
+
 
 @db.default
 def provision_db(
@@ -79,6 +93,11 @@ def provision_db(
         _psql("-c", f"GRANT CONNECT ON DATABASE {database} TO {app};", dbname=database)
         _psql("-c", f"GRANT USAGE  ON SCHEMA   public TO {app};", dbname=database)
         _psql("-c", f"GRANT ALL    ON SCHEMA   public TO {migrate};", dbname=database)
+
+        # Staging alone may delete override stamps, enabling the /forget reset; production
+        # withholds it so the stamp stays permanent there.
+        if target == Targets.Staging:
+            _psql("-c", _STAGING_OVERRIDE_DELETE_GRANT, dbname=database)
 
         print(f"ok: {database} (owner {migrate}, runtime {app})")
 
