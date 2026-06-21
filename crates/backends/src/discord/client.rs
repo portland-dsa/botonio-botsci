@@ -70,7 +70,7 @@ pub trait DiscordClient: Send + Sync {
     async fn assign_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError>;
 
     /// Remove the Manual Override marker role from `user`. A no-op (still `Ok`) when the
-    /// member does not hold it. Errors with [`DiscordError::OverrideRoleUnconfigured`]
-    /// when no marker role is configured.
+    /// member does not hold it, and likewise when no marker role is configured - there is
+    /// then nothing to remove.
     async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError>;
 }

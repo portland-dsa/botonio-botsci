@@ -319,9 +319,10 @@ impl DiscordClient for DiscordHttp {
     }
 
     async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {
-        let role = self
-            .override_role_id
-            .ok_or(DiscordError::OverrideRoleUnconfigured)?;
+        // No marker role configured means there is no marker to remove - nothing to do.
+        let Some(role) = self.override_role_id else {
+            return Ok(());
+        };
         self.http
             .remove_member_role(
                 self.guild_id,

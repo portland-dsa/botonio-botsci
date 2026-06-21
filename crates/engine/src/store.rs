@@ -338,6 +338,24 @@ impl InMemoryStore {
     fn snapshot(&self) -> Arc<Index> {
         self.index.read().expect("index lock poisoned").clone()
     }
+
+    /// Rebuild the index from the current snapshot with `mutate` applied to every record,
+    /// then swap it in - the copy-on-write the roster refresh uses, shared by the identity
+    /// link and unlink. A record mapped by both id and handle is collected from both maps;
+    /// the duplicates collapse in [`Index::from_records`], the single dedup point, so no
+    /// pre-dedup is needed.
+    fn rebuild_records(&self, mutate: impl FnMut(&mut MemberRecord)) {
+        let mut records: Vec<MemberRecord> = {
+            let snap = self.snapshot();
+            snap.by_id
+                .values()
+                .chain(snap.by_handle.values())
+                .cloned()
+                .collect()
+        };
+        records.iter_mut().for_each(mutate);
+        self.swap(Index::from_records(records));
+    }
 }
 
 #[async_trait]
@@ -378,49 +396,26 @@ impl IdentityWrite for InMemoryStore {
         discord_id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), Infallible> {
-        // Rebuild from the current snapshot with the one record's identity updated,
-        // then swap - the same copy-on-write the roster refresh uses. A record mapped by
-        // both id and handle is collected from both maps; the duplicates collapse in
-        // `Index::from_records`, which is the single dedup point, so no pre-dedup is needed.
-        let mut records: Vec<MemberRecord> = {
-            let snap = self.snapshot();
-            snap.by_id
-                .values()
-                .chain(snap.by_handle.values())
-                .cloned()
-                .collect()
-        };
-        for rec in &mut records {
+        // Update the one record keyed by `st_user_id` with the discovered identity.
+        self.rebuild_records(|rec| {
             if rec.st_user_id == *st_user_id {
                 rec.discord_user_id = Some(discord_id);
                 rec.discord_handle = Some(handle.clone());
             }
-        }
-        self.swap(Index::from_records(records));
+        });
         Ok(())
     }
 
-    /// Clear the Discord identity from the record holding `discord_id`, then swap - the
-    /// same copy-on-write rebuild [`link_identity`](Self::link_identity) uses, a both-mapped
-    /// record collected from each map and the duplicates collapsing in
-    /// [`Index::from_records`]. With both identity columns cleared the record falls out of
-    /// both index maps, so a later lookup misses by id and handle alike.
+    /// Clear the Discord identity from the record holding `discord_id`. With both identity
+    /// columns cleared the record falls out of both index maps, so a later lookup misses by
+    /// id and handle alike.
     async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Infallible> {
-        let mut records: Vec<MemberRecord> = {
-            let snap = self.snapshot();
-            snap.by_id
-                .values()
-                .chain(snap.by_handle.values())
-                .cloned()
-                .collect()
-        };
-        for rec in &mut records {
+        self.rebuild_records(|rec| {
             if rec.discord_user_id == Some(discord_id) {
                 rec.discord_user_id = None;
                 rec.discord_handle = None;
             }
-        }
-        self.swap(Index::from_records(records));
+        });
         Ok(())
     }
 }

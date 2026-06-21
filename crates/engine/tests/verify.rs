@@ -413,16 +413,15 @@ impl VerifyWorld {
                 ready_ok(())
             });
 
-        self.last = Some(
-            override_approve(
-                &discord,
-                &self.overrides,
-                &self.audit,
-                DiscordUserId(SONIC),
-                target,
-            )
-            .await,
-        );
+        override_approve(
+            &discord,
+            &self.overrides,
+            &self.audit,
+            DiscordUserId(SONIC),
+            target,
+        )
+        .await
+        .expect("override_approve should succeed in the override scenario");
     }
 
     async fn run_forget(&mut self, target: DiscordUserId) {

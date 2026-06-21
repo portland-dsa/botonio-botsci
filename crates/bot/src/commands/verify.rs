@@ -92,12 +92,6 @@ pub async fn verify(
             ))
             .await?;
         }
-        Ok(VerifyOutcome::Overridden) => {
-            // `verify` does not hand-approve; the override outcome reaches the moderator
-            // through the not-found email flow's button (handled in manual_verify_flow).
-            ctx.send(plain(&format!("Hand approved {} as Member.", target.name)))
-                .await?;
-        }
         Err(e) => {
             tracing::error!(error = %e, "member verify failed");
             ctx.send(plain(
@@ -180,8 +174,8 @@ async fn manual_verify_flow(
                 .await?;
             let data = ctx.data();
             let next = if data.guild_config.load().manual_override_role.is_none() {
-                // No marker role is configured, so refuse before any write rather than
-                // granting Member and then failing on the marker.
+                // Hand-approval grants the Manual Override marker, so it needs that role
+                // configured; refuse rather than approve without the marker it promises.
                 tracing::warn!("override pressed but no Manual Override role is configured");
                 VerifyState::Error
             } else {
@@ -194,7 +188,7 @@ async fn manual_verify_flow(
                 )
                 .await
                 {
-                    Ok(_) => VerifyState::Overridden,
+                    Ok(()) => VerifyState::Overridden,
                     Err(e) => {
                         tracing::error!(error = %e, "override approve failed");
                         VerifyState::Error
@@ -293,7 +287,6 @@ async fn manual_verify_flow(
                     Ok(VerifyOutcome::NotFound) => VerifyState::NotFound,
                     Ok(VerifyOutcome::Conflict) => VerifyState::Conflict,
                     Ok(VerifyOutcome::Unverified) => VerifyState::NotFound,
-                    Ok(VerifyOutcome::Overridden) => VerifyState::Overridden,
                     Err(e) => {
                         tracing::error!(error = %e, "manual verify by email failed");
                         VerifyState::Error
