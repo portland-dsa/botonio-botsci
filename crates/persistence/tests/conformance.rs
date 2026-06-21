@@ -277,3 +277,40 @@ async fn link_identity_backfills_a_discord_id(pool: sqlx::PgPool) {
         .expect("the member is findable by the backfilled id");
     assert_eq!(found.discord_handle, Some(DiscordHandle("rosy".into())));
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn guild_config_round_trips(pool: sqlx::PgPool) {
+    use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId};
+    use engine::store::{ConfigStore, GuildConfig};
+
+    let store = PgStore::new(pool);
+    let guild = DiscordGuildId(123);
+
+    // No row yet -> the default (all unset).
+    assert_eq!(
+        store.load_config(guild).await.unwrap(),
+        GuildConfig::default()
+    );
+
+    // A fully-populated config round-trips losslessly.
+    let full = GuildConfig {
+        moderator_role: Some(DiscordRoleId(1)),
+        member_role: Some(DiscordRoleId(2)),
+        dues_expired_role: Some(DiscordRoleId(3)),
+        unverified_role: Some(DiscordRoleId(4)),
+        mod_approval_channel: Some(DiscordChannelId(5)),
+        unverified_channel: Some(DiscordChannelId(6)),
+        dues_expired_channel: Some(DiscordChannelId(7)),
+    };
+    store.save_config(guild, &full).await.unwrap();
+    assert_eq!(store.load_config(guild).await.unwrap(), full);
+
+    // The upsert replaces the row wholesale: a later partial config wins, the
+    // previously-set fields it omits going back to unset.
+    let partial = GuildConfig {
+        moderator_role: Some(DiscordRoleId(9)),
+        ..Default::default()
+    };
+    store.save_config(guild, &partial).await.unwrap();
+    assert_eq!(store.load_config(guild).await.unwrap(), partial);
+}

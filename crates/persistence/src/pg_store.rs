@@ -24,9 +24,11 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-use domain::MigsStatus;
+use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::store::{IdentityWrite, MemberRecord, MemberStore, RosterWrite, dedup_records};
+use engine::store::{
+    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, RosterWrite, dedup_records,
+};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 use crate::PersistenceError;
@@ -393,6 +395,88 @@ impl IdentityWrite for PgStore {
                 "link_identity matched no cached row; the member is not yet in the cache, so the identity repair will land on the next roster sweep"
             );
         }
+        Ok(())
+    }
+}
+
+/// One `guild_config` row as `sqlx` reads it: every snowflake an `Option<i64>`.
+struct GuildConfigRow {
+    moderator_role_id: Option<i64>,
+    member_role_id: Option<i64>,
+    dues_expired_role_id: Option<i64>,
+    unverified_role_id: Option<i64>,
+    mod_approval_channel_id: Option<i64>,
+    unverified_channel_id: Option<i64>,
+    dues_expired_channel_id: Option<i64>,
+}
+
+impl From<GuildConfigRow> for GuildConfig {
+    fn from(r: GuildConfigRow) -> Self {
+        let role = |v: Option<i64>| v.map(|i| DiscordRoleId(i as u64));
+        let chan = |v: Option<i64>| v.map(|i| DiscordChannelId(i as u64));
+        GuildConfig {
+            moderator_role: role(r.moderator_role_id),
+            member_role: role(r.member_role_id),
+            dues_expired_role: role(r.dues_expired_role_id),
+            unverified_role: role(r.unverified_role_id),
+            mod_approval_channel: chan(r.mod_approval_channel_id),
+            unverified_channel: chan(r.unverified_channel_id),
+            dues_expired_channel: chan(r.dues_expired_channel_id),
+        }
+    }
+}
+
+#[async_trait]
+impl ConfigStore for PgStore {
+    type Error = PersistenceError;
+
+    async fn load_config(&self, guild: DiscordGuildId) -> Result<GuildConfig, PersistenceError> {
+        let row = sqlx::query_as!(
+            GuildConfigRow,
+            r#"SELECT moderator_role_id, member_role_id, dues_expired_role_id,
+                      unverified_role_id, mod_approval_channel_id,
+                      unverified_channel_id, dues_expired_channel_id
+               FROM guild_config WHERE guild_id = $1"#,
+            guild.0 as i64
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(GuildConfig::from).unwrap_or_default())
+    }
+
+    async fn save_config(
+        &self,
+        guild: DiscordGuildId,
+        config: &GuildConfig,
+    ) -> Result<(), PersistenceError> {
+        let role = |r: Option<DiscordRoleId>| r.map(|x| x.0 as i64);
+        let chan = |c: Option<DiscordChannelId>| c.map(|x| x.0 as i64);
+        sqlx::query!(
+            r#"INSERT INTO guild_config
+                 (guild_id, moderator_role_id, member_role_id, dues_expired_role_id,
+                  unverified_role_id, mod_approval_channel_id, unverified_channel_id,
+                  dues_expired_channel_id, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+               ON CONFLICT (guild_id) DO UPDATE SET
+                 moderator_role_id       = EXCLUDED.moderator_role_id,
+                 member_role_id          = EXCLUDED.member_role_id,
+                 dues_expired_role_id    = EXCLUDED.dues_expired_role_id,
+                 unverified_role_id      = EXCLUDED.unverified_role_id,
+                 mod_approval_channel_id = EXCLUDED.mod_approval_channel_id,
+                 unverified_channel_id   = EXCLUDED.unverified_channel_id,
+                 dues_expired_channel_id = EXCLUDED.dues_expired_channel_id,
+                 updated_at              = now()"#,
+            guild.0 as i64,
+            role(config.moderator_role),
+            role(config.member_role),
+            role(config.dues_expired_role),
+            role(config.unverified_role),
+            chan(config.mod_approval_channel),
+            chan(config.unverified_channel),
+            chan(config.dues_expired_channel),
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }
