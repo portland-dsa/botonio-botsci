@@ -7,7 +7,7 @@
 //! up, and that is enforced structurally: you cannot construct a [`PresentMember`]
 //! for someone you do not hold.
 
-use crate::store::{MemberRecord, MemberStore};
+use crate::store::{MemberRecord, MemberStore, OverrideLog, OverrideRecord};
 use crate::util::DiscordUserId;
 
 /// The identity key a card lookup needs, carried as proof that the subject is a
@@ -49,6 +49,62 @@ pub async fn resolve<S: MemberStore>(
         .await
         .map_err(CardError::Store)?
         .ok_or(CardError::NoRecord)
+}
+
+/// What a card lookup resolves to, in precedence order: a Solidarity Tech record if
+/// one exists, otherwise a standing manual-override approval, otherwise nothing. The
+/// override never becomes a synthetic [`MemberRecord`] - it is a distinct view, so the
+/// record type stays a faithful Solidarity Tech projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CardView {
+    /// A Solidarity Tech-backed record.
+    Member(MemberRecord),
+    /// No Solidarity Tech record, but a moderator hand-approved this member.
+    Override(OverrideRecord),
+    /// Neither - the subject is unknown to us.
+    Unknown,
+}
+
+/// Why [`resolve_view`] could not answer: one of its two backing reads failed. Generic
+/// over each store's own error so a Postgres read failure and an override read failure
+/// stay distinct and typed.
+#[derive(Debug, thiserror::Error)]
+pub enum ResolveError<SE, OE>
+where
+    SE: std::error::Error + Send + Sync + 'static,
+    OE: std::error::Error + Send + Sync + 'static,
+{
+    #[error(transparent)]
+    Store(SE),
+    #[error(transparent)]
+    Override(OE),
+}
+
+/// Resolve a present member to the card view to show. A Solidarity Tech record wins;
+/// with none, a manual-override stamp produces [`CardView::Override`]; with neither,
+/// [`CardView::Unknown`]. Reuses [`resolve`] for the record read, so the id-only rule
+/// (never match on handle) holds here too.
+pub async fn resolve_view<S, O>(
+    store: &S,
+    overrides: &O,
+    subject: &PresentMember,
+) -> Result<CardView, ResolveError<S::Error, O::Error>>
+where
+    S: MemberStore,
+    O: OverrideLog,
+{
+    match resolve(store, subject).await {
+        Ok(rec) => Ok(CardView::Member(rec)),
+        Err(CardError::NoRecord) => match overrides
+            .get_override(subject.id)
+            .await
+            .map_err(ResolveError::Override)?
+        {
+            Some(stamp) => Ok(CardView::Override(stamp)),
+            None => Ok(CardView::Unknown),
+        },
+        Err(CardError::Store(e)) => Err(ResolveError::Store(e)),
+    }
 }
 
 #[cfg(test)]
@@ -100,5 +156,37 @@ mod tests {
             resolve(&store, &subject(1)).await,
             Err(CardError::NoRecord)
         ));
+    }
+
+    #[tokio::test]
+    async fn view_prefers_member_record_over_override() {
+        let store = InMemoryStore::new(Index::build(vec![member("zoop", 42)]));
+        store
+            .stamp_override(DiscordUserId(42), DiscordUserId(1))
+            .await
+            .unwrap();
+        let view = resolve_view(&store, &store, &subject(42)).await.unwrap();
+        assert!(matches!(view, CardView::Member(_)));
+    }
+
+    #[tokio::test]
+    async fn view_is_override_when_no_record() {
+        let store = InMemoryStore::new(Index::default_for_test());
+        store
+            .stamp_override(DiscordUserId(7), DiscordUserId(1))
+            .await
+            .unwrap();
+        let view = resolve_view(&store, &store, &subject(7)).await.unwrap();
+        match view {
+            CardView::Override(s) => assert_eq!(s.approved_by, DiscordUserId(1)),
+            other => panic!("expected override, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn view_is_unknown_with_neither() {
+        let store = InMemoryStore::new(Index::default_for_test());
+        let view = resolve_view(&store, &store, &subject(7)).await.unwrap();
+        assert!(matches!(view, CardView::Unknown));
     }
 }
