@@ -636,6 +636,20 @@ async fn sonic_overrides(world: &mut VerifyWorld, name: String) {
     world.run_override(id, None).await;
 }
 
+#[when(regex = r#"^Sonic overrides (\w+) with the reason "([^"]*)"$"#)]
+async fn sonic_overrides_with_reason(world: &mut VerifyWorld, name: String, reason: String) {
+    let (id, _) = actor(&name);
+    world.run_override(id, Some(reason)).await;
+}
+
+#[then(regex = r#"^the approval stamp records the reason "([^"]*)"$"#)]
+async fn stamp_records_reason(world: &mut VerifyWorld, reason: String) {
+    assert_eq!(
+        world.overrides.note.lock().unwrap().as_deref(),
+        Some(reason.as_str())
+    );
+}
+
 #[then(regex = r"^the override marker is assigned to (\w+)$")]
 async fn override_marker_assigned(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
