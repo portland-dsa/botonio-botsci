@@ -139,10 +139,12 @@ where
         Ok(v) => v,
         Err(e) => return LookupOutcome::StoreError(e.to_string()),
     };
-    let outcome = match view {
-        CardView::Member(_) => "found",
-        CardView::Override(_) => "override",
-        CardView::Unknown => "not_found",
+    // Map the view to its audit label and the outcome to reveal in one place, so the
+    // recorded label can never disagree with the card that ends up shown.
+    let (reveal, outcome) = match view {
+        CardView::Member(rec) => (LookupOutcome::Card(rec), "found"),
+        CardView::Override(stamp) => (LookupOutcome::OverrideCard(stamp), "override"),
+        CardView::Unknown => (LookupOutcome::NotFound, "not_found"),
     };
     if let Err(e) = audit
         .record(
@@ -157,11 +159,7 @@ where
         tracing::error!(error = %e, "audit write failed; refusing the lookup");
         return LookupOutcome::StoreError(e.to_string());
     }
-    match view {
-        CardView::Member(rec) => LookupOutcome::Card(rec),
-        CardView::Override(stamp) => LookupOutcome::OverrideCard(stamp),
-        CardView::Unknown => LookupOutcome::NotFound,
-    }
+    reveal
 }
 
 #[cfg(test)]

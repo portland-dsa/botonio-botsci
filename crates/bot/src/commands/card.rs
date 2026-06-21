@@ -71,11 +71,7 @@ async fn render_outcome(
     };
     match outcome {
         LookupOutcome::Card(rec) | LookupOutcome::SelfCard(Some(rec)) => {
-            let display_name = target.name.clone();
-            let embed =
-                render::card::membership_card(&rec, &display_name, None, Utc::now().date_naive());
-            ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
-                .await?;
+            render_view(ctx, CardView::Member(rec), &target.name).await?;
         }
         LookupOutcome::SelfCard(None) => {
             ctx.send(reply(
@@ -85,10 +81,7 @@ async fn render_outcome(
             .await?;
         }
         LookupOutcome::SelfOverride(stamp) | LookupOutcome::OverrideCard(stamp) => {
-            let display_name = target.name.clone();
-            let embed = render::card::override_card(&display_name, &stamp);
-            ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
-                .await?;
+            render_view(ctx, CardView::Override(stamp), &target.name).await?;
         }
         LookupOutcome::NotFound => {
             ctx.send(reply("No membership record found for that member."))
@@ -117,6 +110,24 @@ async fn render_outcome(
     Ok(())
 }
 
+/// Send the card for a resolved [`CardView`] as the standard ephemeral reply. This is
+/// the one place that decides which view draws which embed, so the self-card path and
+/// the menu/lookup path stay in step. [`CardView::Unknown`] has no card; callers render
+/// that with their own "no record" text (the wording differs by context) before
+/// delegating here.
+async fn render_view(ctx: Context<'_>, view: CardView, display_name: &str) -> Result<(), Error> {
+    let embed = match view {
+        CardView::Member(rec) => {
+            render::card::membership_card(&rec, display_name, None, Utc::now().date_naive())
+        }
+        CardView::Override(stamp) => render::card::override_card(display_name, &stamp),
+        CardView::Unknown => return Ok(()),
+    };
+    ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
+        .await?;
+    Ok(())
+}
+
 async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
     let subject = PresentMember {
         id: DiscordUserId(user.id.get()),
@@ -142,6 +153,23 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
         }
     };
 
+    // The member has no linked record or override. Expected, so log at debug rather than
+    // error - but leave a trace so a systemic miss spike stays diagnosable. No
+    // identifiers: a count of these is enough to spot an outage.
+    if let CardView::Unknown = view {
+        tracing::debug!("no membership record found for card lookup");
+        ctx.send(
+            poise::CreateReply::default()
+                .content(
+                    "I couldn't find a membership record for you. \
+                     If you think this is wrong, ask a moderator.",
+                )
+                .ephemeral(true),
+        )
+        .await?;
+        return Ok(());
+    }
+
     // Nickname/display name comes from the interaction's member, not the record.
     let display_name = ctx
         .author_member()
@@ -149,30 +177,5 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
         .map(|m| m.display_name().to_string())
         .unwrap_or_else(|| user.name.clone());
 
-    let embed = match view {
-        CardView::Member(rec) => {
-            render::card::membership_card(&rec, &display_name, None, Utc::now().date_naive())
-        }
-        CardView::Override(stamp) => render::card::override_card(&display_name, &stamp),
-        // Expected outcome (the member has no linked record or override), so log at debug
-        // rather than error - but leave a trace so a systemic miss spike stays diagnosable.
-        // No identifiers: a count of these is enough to spot an outage.
-        CardView::Unknown => {
-            tracing::debug!("no membership record found for card lookup");
-            ctx.send(
-                poise::CreateReply::default()
-                    .content(
-                        "I couldn't find a membership record for you. \
-                         If you think this is wrong, ask a moderator.",
-                    )
-                    .ephemeral(true),
-            )
-            .await?;
-            return Ok(());
-        }
-    };
-
-    ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
-        .await?;
-    Ok(())
+    render_view(ctx, view, &display_name).await
 }
