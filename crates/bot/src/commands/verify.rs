@@ -54,13 +54,9 @@ pub async fn verify(
 
     let Some(discord) = data.role_writer() else {
         tracing::warn!("verify attempted before the managed roles were configured");
-        ctx.send(
-            poise::CreateReply::default()
-                .content(
-                    "Roles are not configured yet - a server manager needs to run /setup first.",
-                )
-                .ephemeral(true),
-        )
+        ctx.send(plain(
+            "Roles are not configured yet - a server manager needs to run /setup first.",
+        ))
         .await?;
         return Ok(());
     };

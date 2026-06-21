@@ -69,18 +69,30 @@ impl DiscordHttp {
     /// [`managed_roles`](DiscordClient::managed_roles) accessor; the role name is
     /// filled with the [`Role`]'s own label, since the live guild name is fetched on
     /// demand where it is actually displayed.
+    ///
+    /// The map must hold a [`RoleId`] for every [`Role`] in [`Role::ALL`]: the write
+    /// methods index `role_ids` unconditionally and panic on a missing role. The bot
+    /// upholds this by building only once all managed roles are configured.
     pub fn from_role_map(
         http: Arc<Http>,
         guild_id: GuildId,
         role_ids: HashMap<Role, RoleId>,
     ) -> Self {
-        let managed = role_ids
-            .iter()
-            .map(|(role, id)| ManagedRole {
-                role: *role,
-                id: id.get(),
-                name: role.as_str().to_owned(),
-                from_env_override: false,
+        debug_assert!(
+            Role::ALL.iter().all(|r| role_ids.contains_key(r)),
+            "from_role_map requires a RoleId for every managed Role",
+        );
+        // Build `managed` in `Role::ALL` order (the order the field documents), rather
+        // than relying on the map's iteration order; skip any role absent from the map.
+        let managed = Role::ALL
+            .into_iter()
+            .filter_map(|role| {
+                role_ids.get(&role).map(|id| ManagedRole {
+                    role,
+                    id: id.get(),
+                    name: role.as_str().to_owned(),
+                    from_env_override: false,
+                })
             })
             .collect();
         Self {

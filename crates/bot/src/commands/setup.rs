@@ -9,7 +9,8 @@ use std::time::Duration;
 use serenity::all::{
     ButtonStyle, ChannelId, ChannelType, ComponentInteraction, ComponentInteractionCollector,
     ComponentInteractionDataKind, CreateActionRow, CreateButton, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind, Permissions, RoleId,
+    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
+    EditInteractionResponse, Permissions, RoleId,
 };
 use serenity::futures::StreamExt as _;
 
@@ -110,8 +111,13 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 update_panel(&ctx, &interaction, accent, panel_buttons(), None).await;
             }
             MOD_ROLE_ID | MEMBER_ROLE_ID | DUES_ROLE_ID | UNVERIFIED_ROLE_ID => {
+                // Acknowledge first so the persist + audit below can't blow Discord's
+                // 3-second response deadline; the panel is then edited in place.
+                if !ack(&ctx, &interaction).await {
+                    continue;
+                }
                 let note = apply_selection(&ctx, &interaction, invoker).await;
-                update_panel(
+                edit_panel(
                     &ctx,
                     &interaction,
                     accent,
@@ -121,8 +127,11 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 .await;
             }
             MOD_CHAN_ID | UNVERIFIED_CHAN_ID | DUES_CHAN_ID => {
+                if !ack(&ctx, &interaction).await {
+                    continue;
+                }
                 let note = apply_selection(&ctx, &interaction, invoker).await;
-                update_panel(
+                edit_panel(
                     &ctx,
                     &interaction,
                     accent,
@@ -237,6 +246,49 @@ async fn update_panel(
     }
 }
 
+/// Acknowledge a component interaction with a deferred message update, so the database
+/// write and audit that follow cannot blow Discord's 3-second response deadline (the panel
+/// is then edited in place by [`edit_panel`]). Returns whether the acknowledgement landed;
+/// on failure the caller skips this interaction rather than acting without feedback.
+async fn ack(ctx: &Context<'_>, interaction: &ComponentInteraction) -> bool {
+    if let Err(e) = interaction
+        .create_response(
+            ctx.serenity_context(),
+            CreateInteractionResponse::Acknowledge,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "setup: failed to acknowledge the interaction; skipping");
+        return false;
+    }
+    true
+}
+
+/// Re-render the panel after a deferred [`ack`], editing the original message in place. The
+/// apply path's counterpart to [`update_panel`], which it cannot use because the interaction
+/// is already acknowledged. Logs and continues on a failed edit.
+async fn edit_panel(
+    ctx: &Context<'_>,
+    interaction: &ComponentInteraction,
+    accent: u32,
+    components: Vec<CreateActionRow>,
+    note: Option<&str>,
+) {
+    let embed = config_embed(&ctx.data().guild_config.load(), accent);
+    let mut edit = EditInteractionResponse::new()
+        .embed(embed)
+        .components(components);
+    if let Some(note) = note {
+        edit = edit.content(note);
+    }
+    if let Err(e) = interaction
+        .edit_response(ctx.serenity_context(), edit)
+        .await
+    {
+        tracing::warn!(error = %e, "setup: failed to update the panel; continuing");
+    }
+}
+
 /// Apply one role/channel selection: set the field, validate, persist, swap the live
 /// handle, audit. Returns a short note for the moderator (a confirmation, or a rejection
 /// reason), or `None` if the interaction was not a setting select we handle.
@@ -263,10 +315,10 @@ async fn apply_selection(
         _ => return None,
     };
 
-    // The three managed roles must stay distinct.
-    if !distinct_managed_roles(&cfg) {
+    // Every configured role must stay distinct (see `roles_are_distinct`).
+    if !roles_are_distinct(&cfg) {
         return Some(
-            "That role is already used for another status - pick a distinct role for each."
+            "That role is already assigned to another setting - pick a distinct role for each."
                 .to_owned(),
         );
     }
@@ -327,14 +379,21 @@ fn set_channel_field(
     Some((label, old))
 }
 
-/// The three managed roles must be distinct: assigning one Discord role to two different
-/// statuses is always a configuration mistake.
-fn distinct_managed_roles(cfg: &GuildConfig) -> bool {
+/// Every configured role must be distinct - the moderator role included. Assigning one
+/// Discord role to two settings is always a configuration mistake, and letting a managed
+/// status role double as the moderator role would hand moderator access to anyone the bot
+/// verifies as a member.
+fn roles_are_distinct(cfg: &GuildConfig) -> bool {
     let mut seen = std::collections::HashSet::new();
-    [cfg.member_role, cfg.dues_expired_role, cfg.unverified_role]
-        .into_iter()
-        .flatten()
-        .all(|r| seen.insert(r.0))
+    [
+        cfg.moderator_role,
+        cfg.member_role,
+        cfg.dues_expired_role,
+        cfg.unverified_role,
+    ]
+    .into_iter()
+    .flatten()
+    .all(|r| seen.insert(r.0))
 }
 
 #[cfg(test)]
@@ -342,16 +401,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_duplicate_managed_roles() {
+    fn rejects_duplicate_roles() {
         let mut cfg = GuildConfig {
             member_role: Some(DiscordRoleId(5)),
             dues_expired_role: Some(DiscordRoleId(5)),
             ..Default::default()
         };
-        assert!(!distinct_managed_roles(&cfg));
+        assert!(!roles_are_distinct(&cfg));
         cfg.dues_expired_role = Some(DiscordRoleId(6));
         cfg.unverified_role = Some(DiscordRoleId(7));
-        assert!(distinct_managed_roles(&cfg));
+        assert!(roles_are_distinct(&cfg));
+        // A managed status role must not double as the moderator role.
+        cfg.moderator_role = Some(DiscordRoleId(5));
+        assert!(!roles_are_distinct(&cfg));
     }
 
     #[test]
