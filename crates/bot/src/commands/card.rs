@@ -6,7 +6,7 @@ use chrono::Utc;
 use serenity::all::User;
 
 use engine::backends::util::DiscordUserId;
-use engine::card::{self, CardError, PresentMember};
+use engine::card::{self, CardView, PresentMember};
 
 use crate::data::{Context, Error};
 use crate::lookup::{self, LookupOutcome};
@@ -121,12 +121,43 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
     let subject = PresentMember {
         id: DiscordUserId(user.id.get()),
     };
-    let rec = match card::resolve(&*ctx.data().store, &subject).await {
-        Ok(rec) => rec,
-        Err(CardError::NoRecord) => {
-            // Expected outcome (the member has no linked record), so log at debug rather
-            // than error - but leave a trace so a systemic miss spike stays diagnosable.
-            // No identifiers: a count of these is enough to spot an outage.
+    // Resolve through both the member store and the override log so a manually-approved
+    // member sees their override card, not a "record not found" response.
+    let data = ctx.data();
+    let view = match card::resolve_view(&*data.store, &*data.store, &subject).await {
+        Ok(v) => v,
+        // Any store or override-log read failure lands here. Log the detail and give
+        // the member a generic, PII-free reply rather than surfacing the error. (The
+        // in-memory store used in tests is `Infallible`, so this arm only fires against
+        // the real Postgres-backed store.)
+        Err(e) => {
+            tracing::error!(error = %e, "membership card resolve failed");
+            ctx.send(
+                poise::CreateReply::default()
+                    .content("Something went wrong on my end - please try again in a moment.")
+                    .ephemeral(true),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    // Nickname/display name comes from the interaction's member, not the record.
+    let display_name = ctx
+        .author_member()
+        .await
+        .map(|m| m.display_name().to_string())
+        .unwrap_or_else(|| user.name.clone());
+
+    let embed = match view {
+        CardView::Member(rec) => {
+            render::card::membership_card(&rec, &display_name, None, Utc::now().date_naive())
+        }
+        CardView::Override(stamp) => render::card::override_card(&display_name, &stamp),
+        // Expected outcome (the member has no linked record or override), so log at debug
+        // rather than error - but leave a trace so a systemic miss spike stays diagnosable.
+        // No identifiers: a count of these is enough to spot an outage.
+        CardView::Unknown => {
             tracing::debug!("no membership record found for card lookup");
             ctx.send(
                 poise::CreateReply::default()
@@ -139,37 +170,8 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
             .await?;
             return Ok(());
         }
-        // The live database-error path: the store is Postgres-backed (`PgStore`), so any
-        // connection or query failure lands here. Log the detail and give the member a
-        // generic, PII-free reply rather than surfacing the error. (The in-memory store
-        // used in tests is `Infallible`, so this arm only fires against the real store.)
-        Err(CardError::Store(e)) => {
-            tracing::error!(error = %e, "membership card store lookup failed");
-            ctx.send(
-                poise::CreateReply::default()
-                    .content("Something went wrong on my end - please try again in a moment.")
-                    .ephemeral(true),
-            )
-            .await?;
-            return Ok(());
-        }
     };
 
-    // Nickname/display name and pronouns come from the interaction's member, not the
-    // record. (Pronouns: read if serenity exposes them; otherwise always None.)
-    let display_name = ctx
-        .author_member()
-        .await
-        .map(|m| m.display_name().to_string())
-        .unwrap_or_else(|| user.name.clone());
-    let pronouns: Option<String> = None; // not wired yet
-
-    let embed = render::card::membership_card(
-        &rec,
-        &display_name,
-        pronouns.as_deref(),
-        Utc::now().date_naive(),
-    );
     ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
         .await?;
     Ok(())
