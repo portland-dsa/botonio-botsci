@@ -8,17 +8,23 @@ use serenity::http::Http;
 use serenity::model::guild::Role as GuildRole;
 use serenity::model::id::{GuildId, RoleId, UserId};
 
-use crate::util::{DiscordGuildId, DiscordUserId};
+use crate::MemberPage;
+use crate::util::{DiscordGuildId, DiscordHandle, DiscordUserId};
 
 use super::client::DiscordClient;
 use super::error::DiscordError;
 use super::roles::{
-    ManagedRole, MemberRoles, Role, RoleExt, StatusDiff, diff_status_roles, role_names_for,
+    DiscordRosterMember, ManagedRole, MemberRoles, Role, RoleExt, StatusDiff, diff_status_roles,
+    role_names_for,
 };
 
 /// Reason attached to every role add/remove, so the change is legible in the
 /// guild's audit log.
 const AUDIT_LOG_REASON: &str = "discord-bulk-update verification";
+
+/// Discord caps the guild-members list at 1000 per page; request the max so a sweep
+/// of a few-thousand-member guild is a handful of round-trips.
+const MEMBERS_PAGE_LIMIT: u64 = 1000;
 
 /// Live [`DiscordClient`], REST-only - no gateway, no cache.
 ///
@@ -301,6 +307,51 @@ impl DiscordClient for DiscordHttp {
             .filter(|r| self.role_ids.get(r).is_some_and(|id| held_ids.contains(id)))
             .collect();
         Ok(MemberRoles { all_names, held })
+    }
+
+    async fn members_page(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<MemberPage<DiscordRosterMember>, DiscordError> {
+        // The cursor is the stringified "after" snowflake; None starts at id 0.
+        let after = cursor.and_then(|c| c.parse::<u64>().ok());
+        // serenity 0.12: get_guild_members(guild_id, limit: Option<u64>, after: Option<u64>).
+        let members = self
+            .http
+            .get_guild_members(self.guild_id, Some(MEMBERS_PAGE_LIMIT), after)
+            .await?;
+
+        let scanned = members.len() as u64;
+        // Discord returns the page sorted by ascending id; the next "after" is the
+        // last id seen. A short page (< limit) ends the sweep.
+        let next = if (scanned as usize) < MEMBERS_PAGE_LIMIT as usize {
+            None
+        } else {
+            members.last().map(|m| m.user.id.get().to_string())
+        };
+
+        let projected = members
+            .into_iter()
+            .map(|m| {
+                let held_ids: std::collections::HashSet<RoleId> = m.roles.iter().copied().collect();
+                let held = Role::ALL
+                    .into_iter()
+                    .filter(|r| self.role_ids.get(r).is_some_and(|id| held_ids.contains(id)))
+                    .collect();
+                DiscordRosterMember {
+                    id: DiscordUserId(m.user.id.get()),
+                    handle: DiscordHandle(m.user.name.clone()),
+                    held,
+                }
+            })
+            .collect();
+
+        Ok(MemberPage {
+            members: projected,
+            scanned,
+            total: None, // Discord's member-list endpoint reports no total count.
+            next,
+        })
     }
 
     async fn assign_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {

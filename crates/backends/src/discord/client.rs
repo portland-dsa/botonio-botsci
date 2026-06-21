@@ -2,10 +2,11 @@
 
 use async_trait::async_trait;
 
+use crate::MemberPage;
 use crate::util::{DiscordGuildId, DiscordUserId};
 
 use super::error::DiscordError;
-use super::roles::{ManagedRole, MemberRoles, Role};
+use super::roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
 
 /// Async, object-safe interface for the bot's guild role operations.
 ///
@@ -63,6 +64,17 @@ pub trait DiscordClient: Send + Sync {
     /// by role id, so it stays correct under `DISCORD_ROLE_*_ID` name overrides,
     /// and is in [`Role::ALL`] priority order.
     async fn member_roles(&self, user: DiscordUserId) -> Result<MemberRoles, DiscordError>;
+
+    /// One page of the guild's members, projected to [`DiscordRosterMember`].
+    ///
+    /// `cursor` is the opaque "after" snowflake from the previous page's
+    /// [`next`](crate::MemberPage::next); `None` starts at the lowest id. Drained by
+    /// the engine's `paging::drain_pages`, like Solidarity Tech's `members_page`.
+    /// Needs the `GUILD_MEMBERS` privileged intent (enforced on the REST list too).
+    async fn members_page(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<MemberPage<DiscordRosterMember>, DiscordError>;
 
     /// Add the configured Manual Override marker role to `user`, leaving their status
     /// roles untouched. Errors with [`DiscordError::OverrideRoleUnconfigured`] when no

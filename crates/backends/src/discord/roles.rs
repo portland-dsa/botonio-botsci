@@ -63,6 +63,19 @@ pub struct MemberRoles {
     pub held: Vec<Role>,
 }
 
+use crate::util::{DiscordHandle, DiscordUserId};
+
+/// One member as a roster sweep sees them: the immutable id, the current handle
+/// (display only - matching always keys on the id), and which managed status
+/// [`Role`]s they hold. `held` lets the bulk sweep filter "unmanaged" members
+/// (those holding none) and re-evaluate the whole guild from one source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscordRosterMember {
+    pub id: DiscordUserId,
+    pub handle: DiscordHandle,
+    pub held: Vec<Role>,
+}
+
 /// Decision returned by `diff_status_roles`. Kept separate so the pure logic
 /// is unit-testable without spinning up an `Http` client.
 #[derive(Debug, PartialEq, Eq)]
