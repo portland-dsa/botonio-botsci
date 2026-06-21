@@ -12,7 +12,7 @@ use domain::Role;
 use crate::audit::AuditLog;
 use crate::backends::discord::DiscordClient;
 use crate::backends::solidarity_tech::SolidarityTechClient;
-use crate::store::{IdentityWrite, MemberRecord, MemberStore};
+use crate::store::{IdentityWrite, MemberRecord, MemberStore, OverrideLog};
 use crate::util::{DiscordHandle, DiscordUserId, Email};
 
 /// The identity repair a successful match implies.
@@ -188,17 +188,22 @@ pub enum VerifyError {
     Discord(String),
     #[error("solidarity tech read failed: {0}")]
     SolidarityTech(String),
+    #[error("override stamp write failed: {0}")]
+    Override(String),
 }
 
 /// How a verification was initiated, written to the audit row's `method` field so a query
 /// or operator can tell the automatic id/handle path ([`verify`]) from the manual email
-/// path ([`verify_by_email`]). A closed set, so a call site cannot record a typo'd value.
+/// path ([`verify_by_email`]) from the hand-approval path ([`override_approve`]). A closed
+/// set, so a call site cannot record a typo'd value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerifyMethod {
     /// The automatic match on the member's Discord id then handle.
     Discord,
     /// The moderator-supplied membership-email lookup.
     Email,
+    /// The moderator's hand approval past Solidarity Tech.
+    Override,
 }
 
 impl VerifyMethod {
@@ -207,6 +212,7 @@ impl VerifyMethod {
         match self {
             Self::Discord => "discord",
             Self::Email => "email",
+            Self::Override => "override",
         }
     }
 }
@@ -338,6 +344,20 @@ async fn record_outcome<A: AuditLog>(
         .map_err(|e| VerifyError::Audit(e.to_string()))
 }
 
+/// The member's currently-held managed status roles, lifting a Discord read failure into
+/// [`VerifyError`]. Shared by [`assign_role`], which keeps one and strips the rest, and
+/// [`forget_member`], which strips them all.
+async fn held_managed_roles<Dc: DiscordClient>(
+    discord: &Dc,
+    target: DiscordUserId,
+) -> Result<Vec<Role>, VerifyError> {
+    Ok(discord
+        .member_roles(target)
+        .await
+        .map_err(|e| VerifyError::Discord(e.to_string()))?
+        .held)
+}
+
 /// Set the member's status role to exactly `role`: add it if missing and strip every
 /// *other* managed role they hold.
 ///
@@ -352,11 +372,7 @@ async fn assign_role<Dc: DiscordClient>(
     target: DiscordUserId,
     role: Role,
 ) -> Result<(), VerifyError> {
-    let held = discord
-        .member_roles(target)
-        .await
-        .map_err(|e| VerifyError::Discord(e.to_string()))?
-        .held;
+    let held = held_managed_roles(discord, target).await?;
     // Every managed role to strip is everything held except the target itself.
     let stale: Vec<Role> = held.iter().copied().filter(|&r| r != role).collect();
     // Drive set_role's single removal with one stale role so it is stripped in the same
@@ -539,6 +555,123 @@ where
             Ok(VerifyOutcome::NotFound)
         }
     }
+}
+
+/// Reset `target` to a pristine, unknown state, undoing the identity and role writes that
+/// verify and override make. Records one `member_forget` row first, then strips every held
+/// status role and the Manual Override marker, unlinks the cached identity, and deletes the
+/// override stamp. Auditing before the writes - and never making the audit log itself a
+/// forget target - keeps the erase attributable even if a later write fails.
+pub async fn forget_member<Dc, S, O, A>(
+    discord: &Dc,
+    store: &S,
+    override_log: &O,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+) -> Result<(), VerifyError>
+where
+    Dc: DiscordClient,
+    S: IdentityWrite,
+    O: OverrideLog,
+    A: AuditLog,
+{
+    let held = held_managed_roles(discord, target).await?;
+    // Audit before the destructive writes, the audit-before-write ordering verify and
+    // override use, so the erase is always attributable even if a later write fails.
+    audit
+        .record(
+            invoker,
+            target,
+            "member_forget",
+            serde_json::json!({ "roles_stripped": held.len(), "cache_unlinked": true, "stamp_deleted": true }),
+        )
+        .await
+        .map_err(|e| VerifyError::Audit(e.to_string()))?;
+    if !held.is_empty() {
+        discord
+            .remove_roles(target, &held)
+            .await
+            .map_err(|e| VerifyError::Discord(e.to_string()))?;
+    }
+    discord
+        .remove_override_marker(target)
+        .await
+        .map_err(|e| VerifyError::Discord(e.to_string()))?;
+    store
+        .unlink_by_discord_id(target)
+        .await
+        .map_err(|e| VerifyError::Store(e.to_string()))?;
+    override_log
+        .delete_override(target)
+        .await
+        .map_err(|e| VerifyError::Override(e.to_string()))?;
+    Ok(())
+}
+
+/// Hand-approve `target` past Solidarity Tech, on behalf of moderator `invoker` - the
+/// escape hatch when no record can be matched. Grants `Member` and the additive Manual
+/// Override marker, and stamps the approval permanently.
+///
+/// Fail-closed twice before the role grant: the audit row, then the override stamp, so the
+/// "your approval has been logged" promise holds whenever a role is granted. The stamp is
+/// insert-once, so a retry after a later role-write failure is idempotent. The marker is
+/// added last and is best-effort: Member is already set and the approval stamped, so a
+/// failed marker write is logged and recorded, never surfaced - the status-role logic never
+/// strips the marker, and a retry re-adds it.
+pub async fn override_approve<Dc, O, A>(
+    discord: &Dc,
+    override_log: &O,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+) -> Result<(), VerifyError>
+where
+    Dc: DiscordClient,
+    O: OverrideLog,
+    A: AuditLog,
+{
+    record_outcome(
+        audit,
+        invoker,
+        target,
+        "override",
+        Some(Role::Member),
+        VerifyMethod::Override,
+    )
+    .await?;
+    override_log
+        .stamp_override(target, invoker)
+        .await
+        .map_err(|e| VerifyError::Override(e.to_string()))?;
+    assign_role_or_record_failure(
+        discord,
+        audit,
+        invoker,
+        target,
+        Role::Member,
+        VerifyMethod::Override,
+    )
+    .await?;
+    if let Err(e) = discord.assign_override_marker(target).await {
+        // The marker is the cosmetic, additive half of the grant: Member is already set and
+        // the approval stamped, so a failed marker write is logged and recorded, not
+        // surfaced - a retry re-adds only the marker (idempotent).
+        tracing::warn!(error = %e, "override: marker role write failed; Member granted and stamped, will re-add on retry");
+        if let Err(audit_err) = record_outcome(
+            audit,
+            invoker,
+            target,
+            "override_marker_failed",
+            None,
+            VerifyMethod::Override,
+        )
+        .await
+        {
+            tracing::warn!(error = %audit_err, "override: could not record the marker-failure follow-up");
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

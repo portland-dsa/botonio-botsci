@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM manual_override WHERE discord_user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1562dec6e12bd7ec30b9324fc01758c070230e1b76ab23803b06b710d7bf5a0b"
+}

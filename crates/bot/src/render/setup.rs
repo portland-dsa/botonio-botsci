@@ -27,6 +27,11 @@ pub fn config_embed(cfg: &GuildConfig, accent: u32) -> CreateEmbed {
         .field("Dues-expired role", role_line(cfg.dues_expired_role), false)
         .field("Unverified role", role_line(cfg.unverified_role), false)
         .field(
+            "Manual Override role",
+            role_line(cfg.manual_override_role),
+            false,
+        )
+        .field(
             "Mod-approval channel",
             channel_line(cfg.mod_approval_channel),
             false,

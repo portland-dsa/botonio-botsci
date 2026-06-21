@@ -180,16 +180,21 @@ impl Index {
 }
 
 /// The per-guild runtime configuration set through the bot's `/setup` command:
-/// the moderator role, the three managed status roles, and the three verification
-/// channels. Every field is optional - a freshly deployed guild has nothing set
-/// until a moderator configures it. Built from id newtypes so a store maps it to a
-/// single nullable-column row with no nesting, exactly like [`MemberRecord`].
+/// the moderator role, the three managed status roles, the additive Manual Override
+/// marker, and the three verification channels. Every field is optional - a freshly
+/// deployed guild has nothing set until a moderator configures it. Built from id
+/// newtypes so a store maps it to a single nullable-column row with no nesting, exactly
+/// like [`MemberRecord`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuildConfig {
     pub moderator_role: Option<DiscordRoleId>,
     pub member_role: Option<DiscordRoleId>,
     pub dues_expired_role: Option<DiscordRoleId>,
     pub unverified_role: Option<DiscordRoleId>,
+    /// The additive Manual Override marker role, granted alongside `Member` on a hand
+    /// approval. Optional and outside the status trichotomy: ordinary verification works
+    /// without it, and it is never stripped by the status-role logic.
+    pub manual_override_role: Option<DiscordRoleId>,
     pub mod_approval_channel: Option<DiscordChannelId>,
     pub unverified_channel: Option<DiscordChannelId>,
     pub dues_expired_channel: Option<DiscordChannelId>,
@@ -251,6 +256,11 @@ pub trait IdentityWrite: Send + Sync {
         discord_id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), Self::Error>;
+
+    /// Clear the Discord identity (id and handle) from whichever cached row currently
+    /// holds `discord_id`, returning the member to an unlinked state so a later verify
+    /// misses by both id and handle. A `discord_id` no row holds is a silent no-op.
+    async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Self::Error>;
 }
 
 /// Read and replace one guild's [`GuildConfig`]. Fallible and async from the start
@@ -274,12 +284,39 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), Self::Error>;
 }
 
+/// Record and clear the permanent note that a member was hand-approved past Solidarity
+/// Tech. Keyed on the immutable Discord id - an overridden member has no Solidarity Tech
+/// id to key on. [`stamp_override`](Self::stamp_override) is insert-once: a second stamp
+/// for the same subject preserves the first approval. [`delete_override`](Self::delete_override)
+/// is the reset path; production withholds the `DELETE` privilege, so the call compiles
+/// but cannot succeed there.
+#[async_trait]
+pub trait OverrideLog: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Stamp that `subject` was hand-approved by `approver`. Insert-once, so a retry
+    /// after a later failure preserves the original approval rather than overwriting it.
+    async fn stamp_override(
+        &self,
+        subject: DiscordUserId,
+        approver: DiscordUserId,
+    ) -> Result<(), Self::Error>;
+
+    /// Remove `subject`'s override stamp, returning them to an un-stamped state.
+    /// Reachable only through the staging-gated reset; production withholds the `DELETE`
+    /// grant, so this fails closed there.
+    async fn delete_override(&self, subject: DiscordUserId) -> Result<(), Self::Error>;
+}
+
 /// The in-memory [`MemberStore`]: a snapshot [`Index`] behind a
 /// `RwLock<Arc<Index>>`. Reads clone out the `Arc` and never block a concurrent
 /// rebuild; the write lock is held only for the pointer swap itself.
 pub struct InMemoryStore {
     index: RwLock<Arc<Index>>,
     config: RwLock<GuildConfig>,
+    /// Hand-approval stamps: subject Discord id to first approver Discord id. The
+    /// in-memory analogue of the `manual_override` table, insert-once just like it.
+    overrides: RwLock<HashMap<u64, u64>>,
 }
 
 impl InMemoryStore {
@@ -288,6 +325,7 @@ impl InMemoryStore {
         Self {
             index: RwLock::new(Arc::new(index)),
             config: RwLock::new(GuildConfig::default()),
+            overrides: RwLock::new(HashMap::new()),
         }
     }
 
@@ -299,6 +337,24 @@ impl InMemoryStore {
 
     fn snapshot(&self) -> Arc<Index> {
         self.index.read().expect("index lock poisoned").clone()
+    }
+
+    /// Rebuild the index from the current snapshot with `mutate` applied to every record,
+    /// then swap it in - the copy-on-write the roster refresh uses, shared by the identity
+    /// link and unlink. A record mapped by both id and handle is collected from both maps;
+    /// the duplicates collapse in [`Index::from_records`], the single dedup point, so no
+    /// pre-dedup is needed.
+    fn rebuild_records(&self, mutate: impl FnMut(&mut MemberRecord)) {
+        let mut records: Vec<MemberRecord> = {
+            let snap = self.snapshot();
+            snap.by_id
+                .values()
+                .chain(snap.by_handle.values())
+                .cloned()
+                .collect()
+        };
+        records.iter_mut().for_each(mutate);
+        self.swap(Index::from_records(records));
     }
 }
 
@@ -340,25 +396,53 @@ impl IdentityWrite for InMemoryStore {
         discord_id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), Infallible> {
-        // Rebuild from the current snapshot with the one record's identity updated,
-        // then swap - the same copy-on-write the roster refresh uses. A record mapped by
-        // both id and handle is collected from both maps; the duplicates collapse in
-        // `Index::from_records`, which is the single dedup point, so no pre-dedup is needed.
-        let mut records: Vec<MemberRecord> = {
-            let snap = self.snapshot();
-            snap.by_id
-                .values()
-                .chain(snap.by_handle.values())
-                .cloned()
-                .collect()
-        };
-        for rec in &mut records {
+        // Update the one record keyed by `st_user_id` with the discovered identity.
+        self.rebuild_records(|rec| {
             if rec.st_user_id == *st_user_id {
                 rec.discord_user_id = Some(discord_id);
                 rec.discord_handle = Some(handle.clone());
             }
-        }
-        self.swap(Index::from_records(records));
+        });
+        Ok(())
+    }
+
+    /// Clear the Discord identity from the record holding `discord_id`. With both identity
+    /// columns cleared the record falls out of both index maps, so a later lookup misses by
+    /// id and handle alike.
+    async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Infallible> {
+        self.rebuild_records(|rec| {
+            if rec.discord_user_id == Some(discord_id) {
+                rec.discord_user_id = None;
+                rec.discord_handle = None;
+            }
+        });
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OverrideLog for InMemoryStore {
+    type Error = Infallible;
+
+    async fn stamp_override(
+        &self,
+        subject: DiscordUserId,
+        approver: DiscordUserId,
+    ) -> Result<(), Infallible> {
+        // Insert-once: the first approver wins, so a re-stamp preserves the original.
+        self.overrides
+            .write()
+            .expect("overrides lock poisoned")
+            .entry(subject.0)
+            .or_insert(approver.0);
+        Ok(())
+    }
+
+    async fn delete_override(&self, subject: DiscordUserId) -> Result<(), Infallible> {
+        self.overrides
+            .write()
+            .expect("overrides lock poisoned")
+            .remove(&subject.0);
         Ok(())
     }
 }

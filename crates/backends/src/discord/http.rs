@@ -37,6 +37,9 @@ pub struct DiscordHttp {
     /// provenance), kept so [`managed_roles`](DiscordClient::managed_roles) can
     /// echo them without a network round-trip. In `Role::ALL` order.
     managed: Vec<ManagedRole>,
+    /// The configured Manual Override marker role, if any. Held apart from `role_ids`
+    /// (the status trichotomy) so the marker is never resolved into the strip set.
+    override_role_id: Option<RoleId>,
 }
 
 impl DiscordHttp {
@@ -58,6 +61,7 @@ impl DiscordHttp {
             guild_id,
             role_ids,
             managed,
+            override_role_id: None,
         }
     }
 
@@ -77,6 +81,7 @@ impl DiscordHttp {
         http: Arc<Http>,
         guild_id: GuildId,
         role_ids: HashMap<Role, RoleId>,
+        override_role_id: Option<RoleId>,
     ) -> Self {
         debug_assert!(
             Role::ALL.iter().all(|r| role_ids.contains_key(r)),
@@ -100,6 +105,7 @@ impl DiscordHttp {
             guild_id,
             role_ids,
             managed,
+            override_role_id,
         }
     }
 
@@ -295,5 +301,36 @@ impl DiscordClient for DiscordHttp {
             .filter(|r| self.role_ids.get(r).is_some_and(|id| held_ids.contains(id)))
             .collect();
         Ok(MemberRoles { all_names, held })
+    }
+
+    async fn assign_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {
+        let role = self
+            .override_role_id
+            .ok_or(DiscordError::OverrideRoleUnconfigured)?;
+        self.http
+            .add_member_role(
+                self.guild_id,
+                UserId::new(user.0),
+                role,
+                Some(AUDIT_LOG_REASON),
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {
+        // No marker role configured means there is no marker to remove - nothing to do.
+        let Some(role) = self.override_role_id else {
+            return Ok(());
+        };
+        self.http
+            .remove_member_role(
+                self.guild_id,
+                UserId::new(user.0),
+                role,
+                Some(AUDIT_LOG_REASON),
+            )
+            .await?;
+        Ok(())
     }
 }

@@ -23,7 +23,8 @@ use crate::data::{Context, Error};
 use crate::render::setup::config_embed;
 
 // Navigation buttons.
-const SET_ROLES_ID: &str = "setup_set_roles";
+const SET_STATUS_ROLES_ID: &str = "setup_set_status_roles";
+const SET_MODERATOR_ID: &str = "setup_set_moderator";
 const SET_CHANNELS_ID: &str = "setup_set_channels";
 const BACK_ID: &str = "setup_back";
 
@@ -32,6 +33,7 @@ const MOD_ROLE_ID: &str = "setup_role_moderator";
 const MEMBER_ROLE_ID: &str = "setup_role_member";
 const DUES_ROLE_ID: &str = "setup_role_dues_expired";
 const UNVERIFIED_ROLE_ID: &str = "setup_role_unverified";
+const OVERRIDE_ROLE_ID: &str = "setup_role_manual_override";
 const MOD_CHAN_ID: &str = "setup_chan_mod_approval";
 const UNVERIFIED_CHAN_ID: &str = "setup_chan_unverified";
 const DUES_CHAN_ID: &str = "setup_chan_dues_expired";
@@ -87,12 +89,22 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
 
     while let Some(interaction) = stream.next().await {
         match interaction.data.custom_id.as_str() {
-            SET_ROLES_ID => {
+            SET_STATUS_ROLES_ID => {
                 update_panel(
                     &ctx,
                     &interaction,
                     accent,
-                    role_section(&data.guild_config.load()),
+                    status_section(&data.guild_config.load()),
+                    None,
+                )
+                .await;
+            }
+            SET_MODERATOR_ID => {
+                update_panel(
+                    &ctx,
+                    &interaction,
+                    accent,
+                    moderator_section(&data.guild_config.load()),
                     None,
                 )
                 .await;
@@ -110,7 +122,7 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
             BACK_ID => {
                 update_panel(&ctx, &interaction, accent, panel_buttons(), None).await;
             }
-            MOD_ROLE_ID | MEMBER_ROLE_ID | DUES_ROLE_ID | UNVERIFIED_ROLE_ID => {
+            MEMBER_ROLE_ID | DUES_ROLE_ID | UNVERIFIED_ROLE_ID | OVERRIDE_ROLE_ID => {
                 // Acknowledge first so the persist + audit below can't blow Discord's
                 // 3-second response deadline; the panel is then edited in place.
                 if !ack(&ctx, &interaction).await {
@@ -121,7 +133,21 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                     &ctx,
                     &interaction,
                     accent,
-                    role_section(&data.guild_config.load()),
+                    status_section(&data.guild_config.load()),
+                    note.as_deref(),
+                )
+                .await;
+            }
+            MOD_ROLE_ID => {
+                if !ack(&ctx, &interaction).await {
+                    continue;
+                }
+                let note = apply_selection(&ctx, &interaction, invoker).await;
+                edit_panel(
+                    &ctx,
+                    &interaction,
+                    accent,
+                    moderator_section(&data.guild_config.load()),
                     note.as_deref(),
                 )
                 .await;
@@ -149,22 +175,38 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
 /// The summary view's buttons.
 fn panel_buttons() -> Vec<CreateActionRow> {
     vec![CreateActionRow::Buttons(vec![
-        CreateButton::new(SET_ROLES_ID)
-            .label("Set roles")
+        CreateButton::new(SET_STATUS_ROLES_ID)
+            .label("Status & override roles")
             .style(ButtonStyle::Primary),
+        CreateButton::new(SET_MODERATOR_ID)
+            .label("Moderator role")
+            .style(ButtonStyle::Secondary),
         CreateButton::new(SET_CHANNELS_ID)
             .label("Set channels")
             .style(ButtonStyle::Secondary),
     ])]
 }
 
-/// The four role select menus plus a back button (five rows, at Discord's cap).
-fn role_section(cfg: &GuildConfig) -> Vec<CreateActionRow> {
+/// The membership-facing roles: the three status roles plus the additive Manual Override
+/// marker, four selects and a back button (five rows, at Discord's cap).
+fn status_section(cfg: &GuildConfig) -> Vec<CreateActionRow> {
     vec![
-        role_select(MOD_ROLE_ID, "Moderator role", cfg.moderator_role),
         role_select(MEMBER_ROLE_ID, "Member role", cfg.member_role),
         role_select(DUES_ROLE_ID, "Dues-expired role", cfg.dues_expired_role),
         role_select(UNVERIFIED_ROLE_ID, "Unverified role", cfg.unverified_role),
+        role_select(
+            OVERRIDE_ROLE_ID,
+            "Manual Override role",
+            cfg.manual_override_role,
+        ),
+        back_row(),
+    ]
+}
+
+/// The moderator role, on its own page.
+fn moderator_section(cfg: &GuildConfig) -> Vec<CreateActionRow> {
+    vec![
+        role_select(MOD_ROLE_ID, "Moderator role", cfg.moderator_role),
         back_row(),
     ]
 }
@@ -355,6 +397,7 @@ fn set_role_field(
         MEMBER_ROLE_ID => ("member role", &mut cfg.member_role),
         DUES_ROLE_ID => ("dues-expired role", &mut cfg.dues_expired_role),
         UNVERIFIED_ROLE_ID => ("unverified role", &mut cfg.unverified_role),
+        OVERRIDE_ROLE_ID => ("manual override role", &mut cfg.manual_override_role),
         _ => return None,
     };
     let old = slot.map(|r| r.0);
@@ -390,6 +433,7 @@ fn roles_are_distinct(cfg: &GuildConfig) -> bool {
         cfg.member_role,
         cfg.dues_expired_role,
         cfg.unverified_role,
+        cfg.manual_override_role,
     ]
     .into_iter()
     .flatten()
@@ -425,5 +469,26 @@ mod tests {
         assert_eq!(cfg.member_role, Some(DiscordRoleId(9)));
         let (_, old2) = set_role_field(&mut cfg, MEMBER_ROLE_ID, DiscordRoleId(10)).unwrap();
         assert_eq!(old2, Some(9));
+    }
+
+    #[test]
+    fn set_role_field_handles_the_override_role() {
+        let mut cfg = GuildConfig::default();
+        let (label, old) = set_role_field(&mut cfg, OVERRIDE_ROLE_ID, DiscordRoleId(12)).unwrap();
+        assert_eq!(label, "manual override role");
+        assert_eq!(old, None);
+        assert_eq!(cfg.manual_override_role, Some(DiscordRoleId(12)));
+    }
+
+    #[test]
+    fn override_role_must_be_distinct() {
+        let cfg = GuildConfig {
+            member_role: Some(DiscordRoleId(5)),
+            dues_expired_role: Some(DiscordRoleId(6)),
+            unverified_role: Some(DiscordRoleId(7)),
+            manual_override_role: Some(DiscordRoleId(5)), // clashes with Member
+            ..Default::default()
+        };
+        assert!(!roles_are_distinct(&cfg));
     }
 }

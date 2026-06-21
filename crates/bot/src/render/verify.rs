@@ -11,6 +11,9 @@ use crate::render::card::{COLOR_AMBER, COLOR_GREEN, COLOR_RED};
 /// A neutral action-prompt colour (Discord blurple) for the pre-lookup state.
 const COLOR_BLURPLE: u32 = 0x58_65_f2;
 
+/// The Manual Override accent (violet): approved by hand, not matched in Solidarity Tech.
+const COLOR_VIOLET: u32 = 0x92_56_e0;
+
 /// Which state of the manual-verify exchange an embed renders.
 pub enum VerifyState {
     /// Automatic match missed; invite the moderator to look up by email.
@@ -25,6 +28,8 @@ pub enum VerifyState {
     InvalidEmail,
     /// The interaction sat idle past the collector timeout.
     Expired,
+    /// Hand-approved past Solidarity Tech: granted `Member` plus the Manual Override marker.
+    Overridden,
     /// An unexpected backend failure.
     Error,
 }
@@ -72,6 +77,12 @@ pub fn state_embed(
         VerifyState::Expired => (
             COLOR_BLURPLE,
             "This timed out. Run /verify again when you're ready.".to_string(),
+        ),
+        VerifyState::Overridden => (
+            COLOR_VIOLET,
+            "\u{2705} Hand approved, not matched with any Solidarity Tech member record.\n\n\
+             Your approval has been logged, along with the time of approval for future review"
+                .to_string(),
         ),
         VerifyState::Error => (
             COLOR_RED,
@@ -142,9 +153,18 @@ mod tests {
             VerifyState::Conflict,
             VerifyState::InvalidEmail,
             VerifyState::Expired,
+            VerifyState::Overridden,
             VerifyState::Error,
         ] {
             assert!(desc(&json(state)).contains("@rosytherascal"));
         }
+    }
+
+    #[test]
+    fn overridden_is_violet_and_carries_the_copy() {
+        let v = json(VerifyState::Overridden);
+        assert_eq!(color(&v), COLOR_VIOLET as u64);
+        assert!(desc(&v).contains("Hand approved"));
+        assert!(desc(&v).contains("logged"));
     }
 }
