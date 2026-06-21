@@ -233,14 +233,13 @@ async fn main() -> anyhow::Result<()> {
         })
         .build();
 
-    // GUILD_MESSAGES is needed to receive messages (to spot @-mentions); it is not a
-    // privileged intent, and MESSAGE_CONTENT stays off - we read only mention metadata.
-    // GUILD_MEMBERS (privileged) is deliberately NOT requested yet: member data
-    // comes from the interaction payload and the index is built from Solidarity Tech,
-    // not the gateway roster. The future implementation that caches the roster / handles
-    // guild_member_add re-adds it.
-    let intents =
-        serenity::all::GatewayIntents::GUILDS | serenity::all::GatewayIntents::GUILD_MESSAGES;
+    // GUILD_MESSAGES: receive messages to spot @-mentions (not privileged).
+    // GUILD_MEMBERS (privileged): enumerate the roster for /bulk-verify; enforced by
+    // Discord on the REST member-list endpoint too. Enable it in the developer portal.
+    // MESSAGE_CONTENT stays off - we read only mention metadata.
+    let intents = serenity::all::GatewayIntents::GUILDS
+        | serenity::all::GatewayIntents::GUILD_MESSAGES
+        | serenity::all::GatewayIntents::GUILD_MEMBERS;
     let mut client = serenity::all::ClientBuilder::new(token, intents)
         .framework(framework)
         .await?;
