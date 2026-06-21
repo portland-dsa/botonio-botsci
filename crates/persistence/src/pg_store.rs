@@ -27,8 +27,9 @@ use sqlx::postgres::PgPoolOptions;
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::store::{
-    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, OverrideLog,
-    OverrideRecord, RosterWrite, dedup_records,
+    BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, ConfigStore, GuildConfig,
+    IdentityWrite, MemberRecord, MemberStore, MissCounts, MissState, OverrideLog, OverrideRecord,
+    RosterWrite, dedup_records,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -550,6 +551,185 @@ impl ConfigStore for PgStore {
             chan(config.mod_approval_channel),
             chan(config.unverified_channel),
             chan(config.dues_expired_channel),
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BulkSessionStore for PgStore {
+    type Error = PersistenceError;
+
+    async fn load_session(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<BulkSession>, PersistenceError> {
+        let row = sqlx::query!(
+            r#"SELECT scope, status, started_by, created_at, updated_at
+               FROM bulk_verify_session WHERE guild_id = $1"#,
+            guild.0 as i64
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        let scope = BulkScope::from_token(&r.scope)
+            .ok_or_else(|| PersistenceError::BadToken(format!("bulk scope {:?}", r.scope)))?;
+        let status = BulkStatus::from_token(&r.status)
+            .ok_or_else(|| PersistenceError::BadToken(format!("bulk status {:?}", r.status)))?;
+        Ok(Some(BulkSession {
+            guild,
+            scope,
+            status,
+            started_by: DiscordUserId(r.started_by as u64),
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }))
+    }
+
+    async fn start_session(
+        &self,
+        session: &BulkSession,
+        misses: &[BulkMiss],
+    ) -> Result<(), PersistenceError> {
+        let mut tx = self.pool.begin().await?;
+        // Wholesale replace: the CASCADE clears any prior queue with the session row.
+        sqlx::query!(
+            "DELETE FROM bulk_verify_session WHERE guild_id = $1",
+            session.guild.0 as i64
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            r#"INSERT INTO bulk_verify_session (guild_id, scope, status, started_by)
+               VALUES ($1, $2, $3, $4)"#,
+            session.guild.0 as i64,
+            session.scope.as_token(),
+            session.status.as_token(),
+            session.started_by.0 as i64,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        if !misses.is_empty() {
+            // One UNNEST batch insert, mirroring replace_roster's single round-trip.
+            let cap = misses.len();
+            let mut ids: Vec<i64> = Vec::with_capacity(cap);
+            let mut handles: Vec<Option<String>> = Vec::with_capacity(cap);
+            let mut positions: Vec<i32> = Vec::with_capacity(cap);
+            let mut states: Vec<String> = Vec::with_capacity(cap);
+            for m in misses {
+                ids.push(m.discord_user_id.0 as i64);
+                handles.push(m.handle.as_ref().map(|h| h.0.clone()));
+                positions.push(m.position);
+                states.push(m.state.as_token().to_owned());
+            }
+            sqlx::query!(
+                r#"INSERT INTO bulk_verify_miss (guild_id, discord_user_id, handle, position, state)
+                   SELECT $1, * FROM UNNEST($2::bigint[], $3::text[], $4::int[], $5::text[])"#,
+                session.guild.0 as i64,
+                &ids,
+                &handles as &[Option<String>],
+                &positions,
+                &states,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn next_pending(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<BulkMiss>, PersistenceError> {
+        let row = sqlx::query!(
+            r#"SELECT discord_user_id, handle, position, state
+               FROM bulk_verify_miss
+               WHERE guild_id = $1 AND state = 'pending'
+               ORDER BY position ASC LIMIT 1"#,
+            guild.0 as i64
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        let state = MissState::from_token(&r.state)
+            .ok_or_else(|| PersistenceError::BadToken(format!("miss state {:?}", r.state)))?;
+        Ok(Some(BulkMiss {
+            discord_user_id: DiscordUserId(r.discord_user_id as u64),
+            handle: r.handle.map(DiscordHandle),
+            position: r.position,
+            state,
+        }))
+    }
+
+    async fn mark_miss(
+        &self,
+        guild: DiscordGuildId,
+        member: DiscordUserId,
+        state: MissState,
+    ) -> Result<(), PersistenceError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!(
+            r#"UPDATE bulk_verify_miss SET state = $3
+               WHERE guild_id = $1 AND discord_user_id = $2"#,
+            guild.0 as i64,
+            member.0 as i64,
+            state.as_token(),
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "UPDATE bulk_verify_session SET updated_at = now() WHERE guild_id = $1",
+            guild.0 as i64
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn counts(&self, guild: DiscordGuildId) -> Result<MissCounts, PersistenceError> {
+        let rows = sqlx::query!(
+            r#"SELECT state, COUNT(*) AS "n!" FROM bulk_verify_miss
+               WHERE guild_id = $1 GROUP BY state"#,
+            guild.0 as i64
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut counts = MissCounts::default();
+        for r in rows {
+            match MissState::from_token(&r.state) {
+                Some(MissState::Pending) => counts.pending = r.n as usize,
+                Some(MissState::Verified) => counts.verified = r.n as usize,
+                Some(MissState::Skipped) => counts.skipped = r.n as usize,
+                None => {
+                    return Err(PersistenceError::BadToken(format!(
+                        "miss state {:?}",
+                        r.state
+                    )));
+                }
+            }
+        }
+        Ok(counts)
+    }
+
+    async fn complete_session(&self, guild: DiscordGuildId) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            "UPDATE bulk_verify_session SET status = 'complete', updated_at = now() WHERE guild_id = $1",
+            guild.0 as i64
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn abandon_session(&self, guild: DiscordGuildId) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            "UPDATE bulk_verify_session SET status = 'abandoned', updated_at = now() WHERE guild_id = $1",
+            guild.0 as i64
         )
         .execute(&self.pool)
         .await?;

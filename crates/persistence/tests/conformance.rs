@@ -17,7 +17,8 @@ use chrono::NaiveDate;
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::store::{
-    IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, OverrideLog, RosterWrite,
+    BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, IdentityWrite, InMemoryStore,
+    Index, MemberRecord, MemberStore, MissState, OverrideLog, RosterWrite,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use persistence::PgStore;
@@ -445,4 +446,71 @@ async fn unlink_clears_the_cached_identity(pool: sqlx::PgPool) {
             .is_none(),
         "the handle column is cleared too, so the member is no longer found by handle"
     );
+}
+
+fn session(guild: u64) -> BulkSession {
+    BulkSession {
+        guild: domain::DiscordGuildId(guild),
+        scope: BulkScope::UnmanagedOnly,
+        status: BulkStatus::InProgress,
+        started_by: DiscordUserId(1),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+fn miss(id: u64, pos: i32) -> BulkMiss {
+    BulkMiss {
+        discord_user_id: DiscordUserId(id),
+        handle: Some(DiscordHandle(format!("u{id}"))),
+        position: pos,
+        state: MissState::Pending,
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn bulk_session_round_trips_and_resumes(pool: sqlx::PgPool) {
+    let pg = PgStore::new(pool);
+    let g = domain::DiscordGuildId(7);
+    pg.start_session(&session(7), &[miss(10, 0), miss(11, 1)])
+        .await
+        .unwrap();
+
+    // Resume picks the lowest-position pending member.
+    let next = pg.next_pending(g).await.unwrap().unwrap();
+    assert_eq!(next.discord_user_id, DiscordUserId(10));
+
+    // Marking it verified advances the queue and the counts.
+    pg.mark_miss(g, DiscordUserId(10), MissState::Verified)
+        .await
+        .unwrap();
+    let next = pg.next_pending(g).await.unwrap().unwrap();
+    assert_eq!(next.discord_user_id, DiscordUserId(11));
+    let counts = pg.counts(g).await.unwrap();
+    assert_eq!((counts.pending, counts.verified), (1, 1));
+
+    // Skip the last, complete, and confirm the queue is exhausted.
+    pg.mark_miss(g, DiscordUserId(11), MissState::Skipped)
+        .await
+        .unwrap();
+    assert!(pg.next_pending(g).await.unwrap().is_none());
+    pg.complete_session(g).await.unwrap();
+    assert_eq!(
+        pg.load_session(g).await.unwrap().unwrap().status,
+        BulkStatus::Complete
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn start_over_replaces_the_queue(pool: sqlx::PgPool) {
+    let pg = PgStore::new(pool);
+    let g = domain::DiscordGuildId(7);
+    pg.start_session(&session(7), &[miss(10, 0), miss(11, 1)])
+        .await
+        .unwrap();
+    // A fresh start wholesale-replaces the prior queue (CASCADE clears the old rows).
+    pg.start_session(&session(7), &[miss(20, 0)]).await.unwrap();
+    let next = pg.next_pending(g).await.unwrap().unwrap();
+    assert_eq!(next.discord_user_id, DiscordUserId(20));
+    assert_eq!(pg.counts(g).await.unwrap().pending, 1);
 }

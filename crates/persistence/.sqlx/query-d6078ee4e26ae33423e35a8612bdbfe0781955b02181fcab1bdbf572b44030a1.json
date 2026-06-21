@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bulk_verify_miss SET state = $3\n               WHERE guild_id = $1 AND discord_user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d6078ee4e26ae33423e35a8612bdbfe0781955b02181fcab1bdbf572b44030a1"
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO bulk_verify_miss (guild_id, discord_user_id, handle, position, state)\n                   SELECT $1, * FROM UNNEST($2::bigint[], $3::text[], $4::int[], $5::text[])",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8Array",
+        "TextArray",
+        "Int4Array",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c3bc49d92f51deb192ee344145678a66bd91cf87089db4a28ae7c1f783b2f373"
+}
