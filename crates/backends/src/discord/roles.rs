@@ -66,14 +66,18 @@ pub struct MemberRoles {
 use crate::util::{DiscordHandle, DiscordUserId};
 
 /// One member as a roster sweep sees them: the immutable id, the current handle
-/// (display only - matching always keys on the id), and which managed status
-/// [`Role`]s they hold. `held` lets the bulk sweep filter "unmanaged" members
-/// (those holding none) and re-evaluate the whole guild from one source.
+/// (display only - matching always keys on the id), which managed status [`Role`]s
+/// they hold, and whether the account is a bot. `held` lets the bulk sweep filter
+/// "unmanaged" members (those holding none) and re-evaluate the whole guild from one
+/// source; `bot` lets it drop automated accounts, which are never members.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscordRosterMember {
     pub id: DiscordUserId,
     pub handle: DiscordHandle,
     pub held: Vec<Role>,
+    /// Whether this account is a bot or other integration. Bots are never DSA
+    /// members, so the sweep excludes them from every scope.
+    pub bot: bool,
 }
 
 /// Decision returned by `diff_status_roles`. Kept separate so the pure logic

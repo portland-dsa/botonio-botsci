@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use serenity::all::{
     ButtonStyle, CreateActionRow, CreateButton, CreateInteractionResponse, EditInteractionResponse,
-    EditMessage,
 };
 
 use chrono::Utc;
@@ -118,9 +117,10 @@ pub async fn bulk_verify(
 
     // --- Resume check ---
     let existing = data.store.load_session(guild_id).await?;
-    if let Some(ref session) = existing
-        && session.status == BulkStatus::InProgress
-    {
+    // On "Start over" the resume prompt's message is reused as the sweep host, so the
+    // whole flow stays in a single ephemeral message.
+    let mut reused_handle: Option<poise::ReplyHandle<'_>> = None;
+    if let Some(session) = existing.filter(|s| s.status == BulkStatus::InProgress) {
         if bulk::is_session_stale(session.updated_at, Utc::now()) {
             // Stale: abandon and fall through to a fresh sweep.
             data.store.abandon_session(guild_id).await?;
@@ -147,15 +147,20 @@ pub async fn bulk_verify(
                     ])],
                 ))
                 .await?;
-            let message = resume_handle.message().await?;
-            let Some(press) = message
-                .await_component_interaction(sctx)
-                .author_id(ctx.author().id)
-                .timeout(Duration::from_secs(180))
-                .await
-            else {
-                // Timed out - leave the session as is and exit silently.
-                return Ok(());
+            // Collect the press in its own scope so the message borrow ends before the
+            // handle may be moved into `reused_handle`.
+            let press = {
+                let message = resume_handle.message().await?;
+                match message
+                    .await_component_interaction(sctx)
+                    .author_id(ctx.author().id)
+                    .timeout(Duration::from_secs(180))
+                    .await
+                {
+                    Some(press) => press,
+                    // Timed out - leave the session as is and exit silently.
+                    None => return Ok(()),
+                }
             };
             press
                 .create_response(sctx, CreateInteractionResponse::Acknowledge)
@@ -174,7 +179,10 @@ pub async fn bulk_verify(
                     return Ok(());
                 }
                 START_OVER_BUTTON_ID => {
-                    // Fall through to a fresh sweep.
+                    // Discard the prior session now, so a cancelled or empty re-sweep
+                    // cannot leave it dangling for the next /bulk-verify to offer as
+                    // resumable. The fresh sweep below builds and stores a new one.
+                    data.store.abandon_session(guild_id).await?;
                     press
                         .edit_response(
                             sctx,
@@ -183,6 +191,7 @@ pub async fn bulk_verify(
                                 .components(vec![]),
                         )
                         .await?;
+                    reused_handle = Some(resume_handle);
                 }
                 _ => {
                     // RESUME_BUTTON_ID: jump straight to the wizard.
@@ -194,8 +203,7 @@ pub async fn bulk_verify(
                                 .components(vec![]),
                         )
                         .await?;
-                    let msg = resume_handle.message().await?;
-                    run_wizard(ctx, &discord, invoker, guild_id, &msg, vec![]).await?;
+                    run_wizard(ctx, &resume_handle, &discord, invoker, guild_id, vec![]).await?;
                     return Ok(());
                 }
             }
@@ -203,9 +211,13 @@ pub async fn bulk_verify(
     }
 
     // --- Sweep ---
-    let sweep_handle = ctx
-        .send(embed_reply(embeds::progress_embed(0, 0), vec![]))
-        .await?;
+    let sweep_handle = match reused_handle {
+        Some(handle) => handle,
+        None => {
+            ctx.send(embed_reply(embeds::progress_embed(0, 0), vec![]))
+                .await?
+        }
+    };
     let sweep_msg = sweep_handle.message().await?;
 
     let members = match bulk::enumerate(&discord, scope).await {
@@ -343,8 +355,7 @@ pub async fn bulk_verify(
     data.store.start_session(&session, &queue).await?;
 
     // --- Wizard loop ---
-    let msg = sweep_handle.message().await?;
-    run_wizard(ctx, &discord, invoker, guild_id, &msg, role_tally).await?;
+    run_wizard(ctx, &sweep_handle, &discord, invoker, guild_id, role_tally).await?;
 
     Ok(())
 }
@@ -354,14 +365,26 @@ pub async fn bulk_verify(
 /// misses remain, completes the session and shows the summary.
 async fn run_wizard(
     ctx: Context<'_>,
+    handle: &poise::ReplyHandle<'_>,
     discord: &engine::backends::discord::DiscordHttp,
     invoker: DiscordUserId,
     guild_id: DiscordGuildId,
-    msg: &serenity::all::Message,
     role_tally: Vec<(Role, usize)>,
 ) -> Result<(), Error> {
     let data = ctx.data();
     let sctx = ctx.serenity_context();
+
+    // The host message id is stable across handle edits; capture it once for the
+    // collector verify_step drives. Every visible update goes through `handle.edit`
+    // (the interaction token) - the only way to edit an ephemeral message. A plain
+    // Message::edit silently fails on ephemerals, which would leave the wizard invisible.
+    let message = handle.message().await?.into_owned();
+    let reply = |embed, components: Vec<CreateActionRow>| {
+        poise::CreateReply::default()
+            .embed(embed)
+            .ephemeral(true)
+            .components(components)
+    };
 
     // Capture total queue depth once at wizard entry for the position display.
     let counts_at_entry = data.store.counts(guild_id).await?;
@@ -442,34 +465,35 @@ async fn run_wizard(
         let position = (miss.position as usize) + 1;
 
         // Render the initial wizard state onto the host message before calling
-        // verify_step, mirroring the pattern in manual_verify_flow: the caller sets
-        // the initial embed and buttons, then hands the message to verify_step which
-        // drives the collector from there.
-        let _ = msg
-            .clone()
+        // verify_step, mirroring manual_verify_flow: the caller sets the initial embed
+        // and buttons, then hands the message to verify_step which drives the collector
+        // from there. The edit goes through the interaction token (handle.edit), never
+        // Message::edit, because the host message is ephemeral.
+        handle
             .edit(
-                sctx,
-                EditMessage::new()
-                    .embed(embeds::wizard_embed(
+                ctx,
+                reply(
+                    embeds::wizard_embed(
                         &display_name,
                         &target.name,
                         &avatar,
                         position,
                         total_queue,
-                    ))
-                    .components(vec![CreateActionRow::Buttons(vec![
+                    ),
+                    vec![CreateActionRow::Buttons(vec![
                         CreateButton::new(LOOKUP_BUTTON_ID)
                             .label("Look up by email")
                             .style(ButtonStyle::Primary),
                         skip_btn.clone(),
                         stop_btn.clone(),
-                    ])]),
+                    ])],
+                ),
             )
-            .await;
+            .await?;
 
         let (outcome, extra_press) = verify_step(
             ctx,
-            msg,
+            &message,
             discord,
             &target,
             invoker,
@@ -526,13 +550,10 @@ async fn run_wizard(
     // Queue exhausted: mark complete and show summary.
     data.store.complete_session(guild_id).await?;
     let counts = data.store.counts(guild_id).await?;
-    let _ = msg
-        .clone()
+    let _ = handle
         .edit(
-            sctx,
-            EditMessage::new()
-                .embed(embeds::summary_embed(&role_tally, counts))
-                .components(vec![]),
+            ctx,
+            reply(embeds::summary_embed(&role_tally, counts), vec![]),
         )
         .await;
 

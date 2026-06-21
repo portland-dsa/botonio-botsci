@@ -31,7 +31,9 @@ pub fn in_scope(member: &DiscordRosterMember, scope: BulkScope) -> bool {
 
 /// Drain the whole guild roster (via [`DiscordClient::members_page`]) and keep the
 /// members in `scope`. Owns the page loop through `drain_pages` with a no-op progress
-/// sink, exactly like `store::sweep_roster` does for Solidarity Tech.
+/// sink, exactly like `store::sweep_roster` does for Solidarity Tech. Bot accounts are
+/// dropped before the scope filter - they are never members, so neither sweep population
+/// should ever try to verify one (including the bot itself).
 pub async fn enumerate<Dc: DiscordClient>(
     discord: &Dc,
     scope: BulkScope,
@@ -40,7 +42,10 @@ pub async fn enumerate<Dc: DiscordClient>(
         discord.members_page(cursor.as_deref()).await
     })
     .await?;
-    Ok(all.into_iter().filter(|m| in_scope(m, scope)).collect())
+    Ok(all
+        .into_iter()
+        .filter(|m| !m.bot && in_scope(m, scope))
+        .collect())
 }
 
 /// The read-only preview tally: matched counts broken down by role, plus the miss and
@@ -121,6 +126,7 @@ mod tests {
             id: DiscordUserId(id),
             handle: DiscordHandle(handle.into()),
             held,
+            bot: false,
         }
     }
 

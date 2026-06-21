@@ -15,6 +15,12 @@ Feature: Bulk verify sweep and resumable miss queue
     When Sonic previews a whole-server sweep
     Then the sweep scans 2 members
 
+  Scenario: A bot account is never swept, even in a whole-server sweep
+    Given Tails is in the roster holding no managed role, known to us as a Member
+    And Metal is a bot in the roster
+    When Sonic previews a whole-server sweep
+    Then the sweep scans 1 member
+
   Scenario: Sonic walks the miss queue and finishes it
     Given a started session whose queue is Shadow then Silver
     When Sonic resumes the session

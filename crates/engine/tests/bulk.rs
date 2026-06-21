@@ -38,6 +38,7 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
         "Tails" => 2,
         "Knuckles" => 3,
         "Shadow" => 4,
+        "Metal" => 5,
         "Silver" => 6,
         other => panic!("unknown actor {other}"),
     };
@@ -65,7 +66,23 @@ fn known_record(name: &str) -> MemberRecord {
 /// Build a `DiscordRosterMember` for `name` with `held` roles.
 fn roster_member(name: &str, held: Vec<Role>) -> DiscordRosterMember {
     let (id, handle) = actor(name);
-    DiscordRosterMember { id, handle, held }
+    DiscordRosterMember {
+        id,
+        handle,
+        held,
+        bot: false,
+    }
+}
+
+/// Build a bot `DiscordRosterMember` for `name` (Metal Sonic is our robot).
+fn bot_member(name: &str) -> DiscordRosterMember {
+    let (id, handle) = actor(name);
+    DiscordRosterMember {
+        id,
+        handle,
+        held: vec![],
+        bot: true,
+    }
 }
 
 /// Build a `BulkMiss` at `position` for `name`, all Pending.
@@ -148,6 +165,11 @@ async fn roster_unknown_member(world: &mut BulkWorld, name: String) {
 #[given(regex = r"^(\w+) is in the roster already holding the Member role$")]
 async fn roster_already_member(world: &mut BulkWorld, name: String) {
     world.roster.push(roster_member(&name, vec![Role::Member]));
+}
+
+#[given(regex = r"^(\w+) is a bot in the roster$")]
+async fn roster_bot(world: &mut BulkWorld, name: String) {
+    world.roster.push(bot_member(&name));
 }
 
 #[given("a started session whose queue is Shadow then Silver")]

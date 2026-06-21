@@ -342,6 +342,7 @@ impl DiscordClient for DiscordHttp {
                     id: DiscordUserId(m.user.id.get()),
                     handle: DiscordHandle(m.user.name.clone()),
                     held,
+                    bot: m.user.bot,
                 }
             })
             .collect();
