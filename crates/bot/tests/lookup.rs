@@ -19,6 +19,10 @@
 #[path = "../src/lookup.rs"]
 mod lookup;
 
+// Pull the pure card render in too, so the suite can assert what a viewer actually sees.
+#[path = "../src/render/card.rs"]
+mod render_card;
+
 use std::convert::Infallible;
 use std::sync::Mutex;
 
@@ -94,11 +98,23 @@ impl engine::audit::AuditLog for RecordingAudit {
 struct LookupWorld {
     moderators: std::collections::HashSet<u64>,
     records: Vec<MemberRecord>,
-    overrides: Vec<(DiscordUserId, DiscordUserId)>,
+    overrides: Vec<(DiscordUserId, DiscordUserId, Option<String>)>,
     audit: RecordingAudit,
     last: Option<LookupOutcome>,
     last_actor: Option<DiscordUserId>,
     last_subject: Option<DiscordUserId>,
+    /// The "Reason" field of the rendered override card, if one was drawn.
+    rendered_reason: Option<String>,
+}
+
+/// Pull the "Reason" field value out of a rendered override embed, if present.
+fn reason_field(embed: &serenity::all::CreateEmbed) -> Option<String> {
+    let v = serde_json::to_value(embed).ok()?;
+    v["fields"]
+        .as_array()?
+        .iter()
+        .find(|f| f["name"] == "Reason")
+        .map(|f| f["value"].as_str().unwrap().to_string())
 }
 
 impl LookupWorld {
@@ -111,33 +127,45 @@ impl LookupWorld {
             last: None,
             last_actor: None,
             last_subject: None,
+            rendered_reason: None,
         }
     }
 
     /// Run one lookup of `target` by `invoker`, remembering the outcome.
     async fn run(&mut self, invoker: DiscordUserId, target: DiscordUserId) {
         let store = InMemoryStore::new(Index::from_records(self.records.clone()));
-        for (subject, approver) in &self.overrides {
+        for (subject, approver, note) in &self.overrides {
             store
-                .stamp_override(*subject, *approver, None)
+                .stamp_override(*subject, *approver, note.clone())
                 .await
                 .unwrap();
         }
         let limiter = RateLimiter::new(10);
         self.last_actor = Some(invoker);
         self.last_subject = Some(target);
-        self.last = Some(
-            lookup(
-                &store,
-                &store,
-                &self.audit,
-                &limiter,
-                invoker,
-                target,
-                self.moderators.contains(&invoker.0),
-            )
-            .await,
-        );
+        let outcome = lookup(
+            &store,
+            &store,
+            &self.audit,
+            &limiter,
+            invoker,
+            target,
+            self.moderators.contains(&invoker.0),
+        )
+        .await;
+        // Render the override card the way the command layer does, then read back the
+        // reason it drew: a moderator's lookup of another member shows it (`OverrideCard`),
+        // a self view hides it (`SelfOverride`).
+        self.rendered_reason = match &outcome {
+            LookupOutcome::OverrideCard(stamp) => {
+                reason_field(&render_card::override_card("Knuckles", stamp, true))
+            }
+            LookupOutcome::SelfOverride(stamp) => {
+                reason_field(&render_card::override_card("Knuckles", stamp, false))
+            }
+            _ => None,
+        };
+        self.last = Some(outcome);
     }
 }
 
@@ -228,7 +256,33 @@ async fn ten_audit_rows(world: &mut LookupWorld) {
 
 #[given(regex = r"^(\w+) is a manually-verified member approved by (\w+)$")]
 async fn manually_verified(world: &mut LookupWorld, name: String, mod_name: String) {
-    world.overrides.push((id_for(&name), id_for(&mod_name)));
+    world
+        .overrides
+        .push((id_for(&name), id_for(&mod_name), None));
+}
+
+#[given(
+    regex = r#"^(\w+) is a manually-verified member approved by (\w+) with the reason "([^"]*)"$"#
+)]
+async fn manually_verified_with_reason(
+    world: &mut LookupWorld,
+    name: String,
+    mod_name: String,
+    reason: String,
+) {
+    world
+        .overrides
+        .push((id_for(&name), id_for(&mod_name), Some(reason)));
+}
+
+#[then(regex = r#"^the override card shows the reason "([^"]*)"$"#)]
+async fn card_shows_reason(world: &mut LookupWorld, reason: String) {
+    assert_eq!(world.rendered_reason.as_deref(), Some(reason.as_str()));
+}
+
+#[then("the override card hides the reason")]
+async fn card_hides_reason(world: &mut LookupWorld) {
+    assert_eq!(world.rendered_reason, None);
 }
 
 #[then("the override card is shown")]
