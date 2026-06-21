@@ -550,6 +550,60 @@ where
     }
 }
 
+/// Reset `target` to a pristine, unknown state, undoing the identity and role writes
+/// that verify and override make. Strips every held status role and the Manual Override
+/// marker, unlinks the cached identity, and deletes the override stamp, then records
+/// one `member_forget` row. The audit log is never a forget target: the erase stays
+/// attributable.
+pub async fn forget_member<Dc, S, O, A>(
+    discord: &Dc,
+    store: &S,
+    override_log: &O,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+) -> Result<(), VerifyError>
+where
+    Dc: DiscordClient,
+    S: IdentityWrite,
+    O: OverrideLog,
+    A: AuditLog,
+{
+    let held = discord
+        .member_roles(target)
+        .await
+        .map_err(|e| VerifyError::Discord(e.to_string()))?
+        .held;
+    if !held.is_empty() {
+        discord
+            .remove_roles(target, &held)
+            .await
+            .map_err(|e| VerifyError::Discord(e.to_string()))?;
+    }
+    discord
+        .remove_override_marker(target)
+        .await
+        .map_err(|e| VerifyError::Discord(e.to_string()))?;
+    store
+        .unlink_by_discord_id(target)
+        .await
+        .map_err(|e| VerifyError::Store(e.to_string()))?;
+    override_log
+        .delete_override(target)
+        .await
+        .map_err(|e| VerifyError::Override(e.to_string()))?;
+    audit
+        .record(
+            invoker,
+            target,
+            "member_forget",
+            serde_json::json!({ "roles_stripped": held.len(), "cache_unlinked": true, "stamp_deleted": true }),
+        )
+        .await
+        .map_err(|e| VerifyError::Audit(e.to_string()))?;
+    Ok(())
+}
+
 /// Hand-approve `target` past Solidarity Tech, on behalf of moderator `invoker` - the
 /// escape hatch when no record can be matched. Grants `Member` and the additive Manual
 /// Override marker, and stamps the approval permanently.

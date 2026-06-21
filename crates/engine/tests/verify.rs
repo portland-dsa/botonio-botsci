@@ -18,7 +18,9 @@ use engine::backends::discord::{DiscordError, MemberRoles, MockDiscordClient, Ro
 use engine::backends::solidarity_tech::{MockSolidarityTechClient, SolidarityTechMember};
 use engine::store::{IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, OverrideLog};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-use engine::verify::{VerifyError, VerifyOutcome, override_approve, verify, verify_by_email};
+use engine::verify::{
+    VerifyError, VerifyOutcome, forget_member, override_approve, verify, verify_by_email,
+};
 
 use domain::MigsStatus;
 
@@ -85,22 +87,29 @@ impl engine::audit::AuditLog for CapturingAudit {
         &self,
         _actor: DiscordUserId,
         _subject: DiscordUserId,
-        _action: &str,
+        action: &str,
         detail: serde_json::Value,
     ) -> Result<(), AuditUnavailable> {
         if !self.available {
             return Err(AuditUnavailable);
         }
-        self.rows.lock().unwrap().push(detail);
+        let mut row = detail;
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("action".to_string(), serde_json::json!(action));
+        }
+        self.rows.lock().unwrap().push(row);
         Ok(())
     }
 }
 
-/// A recording override-log double that captures stamp calls and enforces insert-once.
+/// A recording override-log double that captures stamp calls and enforces insert-once,
+/// and captures delete calls.
 #[derive(Debug, Clone)]
 struct CapturingOverrides {
     /// The subject whose stamp was recorded, if any.
     stamped: Arc<Mutex<Option<DiscordUserId>>>,
+    /// The subject whose override was deleted, if any.
+    deleted: Arc<Mutex<Option<DiscordUserId>>>,
 }
 
 #[async_trait::async_trait]
@@ -122,8 +131,9 @@ impl OverrideLog for CapturingOverrides {
 
     async fn delete_override(
         &self,
-        _subject: DiscordUserId,
+        subject: DiscordUserId,
     ) -> Result<(), std::convert::Infallible> {
+        *self.deleted.lock().unwrap() = Some(subject);
         Ok(())
     }
 }
@@ -201,6 +211,10 @@ struct VerifyWorld {
     /// Tracks whether `assign_override_marker` was called on the Discord mock.
     override_marker_assigned: Arc<Mutex<Option<DiscordUserId>>>,
     last: Option<Result<VerifyOutcome, VerifyError>>,
+    /// The result of `forget_member` (returns `()`, not a `VerifyOutcome`).
+    forget_result: Option<Result<(), VerifyError>>,
+    /// Whether the cache link was cleared (the member is no longer found by id).
+    unlink_cleared: bool,
 }
 
 impl VerifyWorld {
@@ -219,9 +233,12 @@ impl VerifyWorld {
             discord_fails: false,
             overrides: CapturingOverrides {
                 stamped: Arc::new(Mutex::new(None)),
+                deleted: Arc::new(Mutex::new(None)),
             },
             override_marker_assigned: Arc::new(Mutex::new(None)),
             last: None,
+            forget_result: None,
+            unlink_cleared: false,
         }
     }
 
@@ -407,6 +424,45 @@ impl VerifyWorld {
             .await,
         );
     }
+
+    async fn run_forget(&mut self, target: DiscordUserId) {
+        let store = InMemoryStore::new(Index::build(self.members.clone()));
+        let stripped_via_remove = self.stripped_roles.clone();
+        let held = self.held_roles.clone();
+        let mut discord = MockDiscordClient::new();
+        discord.expect_member_roles().returning(move |_| {
+            ready_ok(MemberRoles {
+                held: held.clone(),
+                ..Default::default()
+            })
+        });
+        discord.expect_remove_roles().returning(move |_u, roles| {
+            stripped_via_remove.lock().unwrap().extend_from_slice(roles);
+            ready_ok(())
+        });
+        discord
+            .expect_remove_override_marker()
+            .returning(|_| ready_ok(()));
+
+        // Pre-stamp so the delete is observable.
+        self.overrides
+            .stamp_override(target, DiscordUserId(SONIC))
+            .await
+            .unwrap();
+
+        self.forget_result = Some(
+            forget_member(
+                &discord,
+                &store,
+                &self.overrides,
+                &self.audit,
+                DiscordUserId(SONIC),
+                target,
+            )
+            .await,
+        );
+        self.unlink_cleared = store.by_discord_id(target).await.unwrap().is_none();
+    }
 }
 
 #[given(regex = r"^(\w+) is in our records by handle with no Discord id$")]
@@ -586,6 +642,45 @@ async fn override_audit_recorded(world: &mut VerifyWorld) {
         rows.iter()
             .any(|r| r["method"] == "override" && r["outcome"] == "override"),
         "expected an audit row with method=override and outcome=override; rows: {rows:?}"
+    );
+}
+
+#[given(regex = r"^(\w+) was hand-approved by override$")]
+async fn was_overridden(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    world.members.push(member(&name, handle, Some(id)));
+    world.held_roles.push(Role::Member);
+}
+
+#[when(regex = r"^Sonic forgets (\w+)$")]
+async fn sonic_forgets(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    world.run_forget(id).await;
+    assert!(matches!(world.forget_result, Some(Ok(()))));
+}
+
+#[then(regex = r"^(\w+)'s managed roles are stripped$")]
+async fn forget_roles_stripped(world: &mut VerifyWorld, _name: String) {
+    assert!(world.stripped_roles.lock().unwrap().contains(&Role::Member));
+}
+
+#[then(regex = r"^(\w+)'s cache link is cleared$")]
+async fn cache_cleared(world: &mut VerifyWorld, _name: String) {
+    assert!(world.unlink_cleared);
+}
+
+#[then(regex = r"^(\w+)'s override stamp is deleted$")]
+async fn stamp_deleted(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert_eq!(*world.overrides.deleted.lock().unwrap(), Some(id));
+}
+
+#[then("the reset is recorded in the audit log")]
+async fn forget_recorded(world: &mut VerifyWorld) {
+    let rows = world.audit.rows.lock().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["action"] == "member_forget" && r["cache_unlinked"] == true)
     );
 }
 
