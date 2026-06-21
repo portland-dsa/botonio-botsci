@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::NaiveDate;
 
-use domain::{MembershipStatus, MigsStatus, Role};
+use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, MigsStatus, Role};
 
 use crate::backends::solidarity_tech::{
     DuesStatus, MembershipType, SolidarityTechClient, SolidarityTechMember,
@@ -179,6 +179,22 @@ impl Index {
     }
 }
 
+/// The per-guild runtime configuration set through the bot's `/setup` command:
+/// the moderator role, the three managed status roles, and the three verification
+/// channels. Every field is optional - a freshly deployed guild has nothing set
+/// until a moderator configures it. Built from id newtypes so a store maps it to a
+/// single nullable-column row with no nesting, exactly like [`MemberRecord`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuildConfig {
+    pub moderator_role: Option<DiscordRoleId>,
+    pub member_role: Option<DiscordRoleId>,
+    pub dues_expired_role: Option<DiscordRoleId>,
+    pub unverified_role: Option<DiscordRoleId>,
+    pub mod_approval_channel: Option<DiscordChannelId>,
+    pub unverified_channel: Option<DiscordChannelId>,
+    pub dues_expired_channel: Option<DiscordChannelId>,
+}
+
 /// Reverse lookup from a Discord id to a [`MemberRecord`]. Async and fallible from
 /// the start so a later Postgres-backed implementation drops in without a signature
 /// change; the in-memory impl's [`Error`](MemberStore::Error) is [`Infallible`].
@@ -237,11 +253,33 @@ pub trait IdentityWrite: Send + Sync {
     ) -> Result<(), Self::Error>;
 }
 
+/// Read and replace one guild's [`GuildConfig`]. Fallible and async from the start
+/// for the same reason as the other store traits: the in-memory impl's
+/// [`Error`](ConfigStore::Error) is [`Infallible`], a Postgres-backed one's is a
+/// database error. `save_config` replaces the whole row (last-writer-wins); config
+/// is admin-only and low-frequency, so no per-field write path is needed.
+#[async_trait]
+pub trait ConfigStore: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Load the config for `guild`, returning the default (all-unset) when the guild
+    /// has no stored row yet.
+    async fn load_config(&self, guild: DiscordGuildId) -> Result<GuildConfig, Self::Error>;
+
+    /// Replace `guild`'s stored config wholesale.
+    async fn save_config(
+        &self,
+        guild: DiscordGuildId,
+        config: &GuildConfig,
+    ) -> Result<(), Self::Error>;
+}
+
 /// The in-memory [`MemberStore`]: a snapshot [`Index`] behind a
 /// `RwLock<Arc<Index>>`. Reads clone out the `Arc` and never block a concurrent
 /// rebuild; the write lock is held only for the pointer swap itself.
 pub struct InMemoryStore {
     index: RwLock<Arc<Index>>,
+    config: RwLock<GuildConfig>,
 }
 
 impl InMemoryStore {
@@ -249,6 +287,7 @@ impl InMemoryStore {
     pub fn new(index: Index) -> Self {
         Self {
             index: RwLock::new(Arc::new(index)),
+            config: RwLock::new(GuildConfig::default()),
         }
     }
 
@@ -320,6 +359,24 @@ impl IdentityWrite for InMemoryStore {
             }
         }
         self.swap(Index::from_records(records));
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ConfigStore for InMemoryStore {
+    type Error = Infallible;
+
+    async fn load_config(&self, _guild: DiscordGuildId) -> Result<GuildConfig, Infallible> {
+        Ok(self.config.read().expect("config lock poisoned").clone())
+    }
+
+    async fn save_config(
+        &self,
+        _guild: DiscordGuildId,
+        config: &GuildConfig,
+    ) -> Result<(), Infallible> {
+        *self.config.write().expect("config lock poisoned") = config.clone();
         Ok(())
     }
 }
@@ -521,5 +578,25 @@ mod tests {
                 .is_some(),
             "a roster with no linkable members must preserve the existing roster"
         );
+    }
+
+    #[tokio::test]
+    async fn config_round_trips_through_in_memory_store() {
+        use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId};
+        let store = InMemoryStore::new(Index::default_for_test());
+        let guild = DiscordGuildId(7);
+        // Default is all-unset.
+        assert_eq!(
+            store.load_config(guild).await.unwrap(),
+            GuildConfig::default()
+        );
+        let cfg = GuildConfig {
+            moderator_role: Some(DiscordRoleId(10)),
+            member_role: Some(DiscordRoleId(11)),
+            mod_approval_channel: Some(DiscordChannelId(20)),
+            ..Default::default()
+        };
+        store.save_config(guild, &cfg).await.unwrap();
+        assert_eq!(store.load_config(guild).await.unwrap(), cfg);
     }
 }
