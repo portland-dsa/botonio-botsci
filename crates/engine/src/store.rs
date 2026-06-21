@@ -292,6 +292,9 @@ pub trait ConfigStore: Send + Sync {
 pub struct OverrideRecord {
     pub approved_by: DiscordUserId,
     pub approved_at: DateTime<Utc>,
+    /// The optional moderator-supplied reason for the hand approval. Shown to moderators
+    /// on a lookup; never copied into the audit log.
+    pub note: Option<String>,
 }
 
 /// Record and clear the permanent note that a member was hand-approved past Solidarity
@@ -304,12 +307,14 @@ pub struct OverrideRecord {
 pub trait OverrideLog: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
-    /// Stamp that `subject` was hand-approved by `approver`. Insert-once, so a retry
-    /// after a later failure preserves the original approval rather than overwriting it.
+    /// Stamp that `subject` was hand-approved by `approver`, with an optional `note`
+    /// recording why. Insert-once, so a retry after a later failure preserves the
+    /// original approval and its note rather than overwriting them.
     async fn stamp_override(
         &self,
         subject: DiscordUserId,
         approver: DiscordUserId,
+        note: Option<String>,
     ) -> Result<(), Self::Error>;
 
     /// The override stamp for `subject`, or `None` if they were never hand-approved.
@@ -446,8 +451,10 @@ impl OverrideLog for InMemoryStore {
         &self,
         subject: DiscordUserId,
         approver: DiscordUserId,
+        note: Option<String>,
     ) -> Result<(), Infallible> {
-        // Insert-once: the first approver wins, so a re-stamp preserves the original.
+        // Insert-once: the first approver and their note win, so a re-stamp preserves the
+        // original.
         self.overrides
             .write()
             .expect("overrides lock poisoned")
@@ -455,6 +462,7 @@ impl OverrideLog for InMemoryStore {
             .or_insert(OverrideRecord {
                 approved_by: approver,
                 approved_at: Utc::now(),
+                note,
             });
         Ok(())
     }
@@ -728,10 +736,35 @@ mod tests {
                 .is_none()
         );
         store
-            .stamp_override(DiscordUserId(7), DiscordUserId(99))
+            .stamp_override(DiscordUserId(7), DiscordUserId(99), None)
             .await
             .unwrap();
         let got = store.get_override(DiscordUserId(7)).await.unwrap().unwrap();
         assert_eq!(got.approved_by, DiscordUserId(99));
+    }
+
+    #[tokio::test]
+    async fn stamp_override_records_and_preserves_the_note() {
+        let store = InMemoryStore::new(Index::default());
+        store
+            .stamp_override(
+                DiscordUserId(7),
+                DiscordUserId(99),
+                Some("vouched in person".into()),
+            )
+            .await
+            .unwrap();
+        // Insert-once preserves the first note even if a later stamp carries another.
+        store
+            .stamp_override(
+                DiscordUserId(7),
+                DiscordUserId(1),
+                Some("a later note".into()),
+            )
+            .await
+            .unwrap();
+        let got = store.get_override(DiscordUserId(7)).await.unwrap().unwrap();
+        assert_eq!(got.approved_by, DiscordUserId(99));
+        assert_eq!(got.note.as_deref(), Some("vouched in person"));
     }
 }

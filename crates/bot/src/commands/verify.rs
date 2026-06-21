@@ -185,6 +185,7 @@ async fn manual_verify_flow(
                     &*data.auditor,
                     invoker,
                     target_id,
+                    None,
                 )
                 .await
                 {

@@ -324,12 +324,12 @@ async fn override_stamp_is_insert_once_and_deletable(pool: sqlx::PgPool) {
     let subject = DiscordUserId(4242);
 
     store
-        .stamp_override(subject, DiscordUserId(1))
+        .stamp_override(subject, DiscordUserId(1), None)
         .await
         .unwrap();
     // Insert-once: a second stamp with a different approver neither overwrites nor errors.
     store
-        .stamp_override(subject, DiscordUserId(2))
+        .stamp_override(subject, DiscordUserId(2), None)
         .await
         .unwrap();
     let approver = sqlx::query_scalar!(
@@ -362,6 +362,41 @@ async fn override_stamp_is_insert_once_and_deletable(pool: sqlx::PgPool) {
 
     // After delete, the typed read misses.
     assert!(store.get_override(subject).await.unwrap().is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn override_note_is_stored_and_preserved(pool: sqlx::PgPool) {
+    let store = PgStore::new(pool);
+    let subject = DiscordUserId(7777);
+
+    // A stamp with no note reads back None.
+    store
+        .stamp_override(subject, DiscordUserId(1), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.get_override(subject).await.unwrap().unwrap().note,
+        None
+    );
+    store.delete_override(subject).await.unwrap();
+
+    // A stamp with a note reads it back; insert-once preserves the first note even when a
+    // later stamp carries a different one.
+    store
+        .stamp_override(
+            subject,
+            DiscordUserId(1),
+            Some("vouched at the branch meeting".into()),
+        )
+        .await
+        .unwrap();
+    store
+        .stamp_override(subject, DiscordUserId(2), Some("a later note".into()))
+        .await
+        .unwrap();
+    let got = store.get_override(subject).await.unwrap().unwrap();
+    assert_eq!(got.approved_by, DiscordUserId(1));
+    assert_eq!(got.note.as_deref(), Some("vouched at the branch meeting"));
 }
 
 #[sqlx::test(migrations = "./migrations")]

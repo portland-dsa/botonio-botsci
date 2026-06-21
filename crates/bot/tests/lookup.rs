@@ -118,7 +118,10 @@ impl LookupWorld {
     async fn run(&mut self, invoker: DiscordUserId, target: DiscordUserId) {
         let store = InMemoryStore::new(Index::from_records(self.records.clone()));
         for (subject, approver) in &self.overrides {
-            store.stamp_override(*subject, *approver).await.unwrap();
+            store
+                .stamp_override(*subject, *approver, None)
+                .await
+                .unwrap();
         }
         let limiter = RateLimiter::new(10);
         self.last_actor = Some(invoker);

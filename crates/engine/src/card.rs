@@ -162,7 +162,7 @@ mod tests {
     async fn view_prefers_member_record_over_override() {
         let store = InMemoryStore::new(Index::build(vec![member("zoop", 42)]));
         store
-            .stamp_override(DiscordUserId(42), DiscordUserId(1))
+            .stamp_override(DiscordUserId(42), DiscordUserId(1), None)
             .await
             .unwrap();
         let view = resolve_view(&store, &store, &subject(42)).await.unwrap();
@@ -173,7 +173,7 @@ mod tests {
     async fn view_is_override_when_no_record() {
         let store = InMemoryStore::new(Index::default_for_test());
         store
-            .stamp_override(DiscordUserId(7), DiscordUserId(1))
+            .stamp_override(DiscordUserId(7), DiscordUserId(1), None)
             .await
             .unwrap();
         let view = resolve_view(&store, &store, &subject(7)).await.unwrap();
