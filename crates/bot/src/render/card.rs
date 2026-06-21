@@ -55,18 +55,30 @@ pub fn membership_card(
 /// member's display name, with no Solidarity Tech fields (there are none). The
 /// approving moderator renders as a `<@id>` mention, which Discord shows as their live
 /// handle without an extra lookup and without storing a handle that could go stale.
-pub fn override_card(display_name: &str, stamp: &OverrideRecord) -> CreateEmbed {
+///
+/// `show_note` gates the optional moderator-supplied reason: it is drawn only on a
+/// moderator-facing view (a lookup of another member), never on the member's own card.
+pub fn override_card(display_name: &str, stamp: &OverrideRecord, show_note: bool) -> CreateEmbed {
     let approve_date = stamp
         .approved_at
         .date_naive()
         .format("%b %-d, %Y")
         .to_string();
     let approver = format!("<@{}>", stamp.approved_by.0);
-    CreateEmbed::new()
+    let mut embed = CreateEmbed::new()
         .title(display_name.to_string())
         .colour(COLOR_GREEN)
         .description("\u{26a0}\u{fe0f} \u{2611}\u{fe0f} Manually Verified as Member")
-        .field("Role", "Member; Manual Verify", false)
+        .field("Role", "Member; Manual Verify", false);
+    // The reason is moderator-only context: shown when a moderator looks up another
+    // member, hidden on the member's own card.
+    if show_note
+        && let Some(note) = stamp.note.as_deref()
+        && !note.is_empty()
+    {
+        embed = embed.field("Reason", note, false);
+    }
+    embed
         .field("Approve Date", approve_date, true)
         .field("Approving Mod", approver, true)
         .footer(CreateEmbedFooter::new(
@@ -288,12 +300,20 @@ mod tests {
                     .unwrap(),
                 chrono::Utc,
             ),
+            note: None,
+        }
+    }
+
+    fn stamp_with_note(note: &str) -> engine::store::OverrideRecord {
+        engine::store::OverrideRecord {
+            note: Some(note.to_string()),
+            ..stamp()
         }
     }
 
     #[test]
     fn override_card_shows_manual_verify_role_and_mention() {
-        let e = override_card("rose", &stamp());
+        let e = override_card("rose", &stamp(), false);
         let v = json(e);
         assert_eq!(v["color"].as_u64(), Some(COLOR_GREEN as u64));
         assert_eq!(
@@ -314,8 +334,37 @@ mod tests {
     }
 
     #[test]
+    fn override_card_shows_reason_for_a_moderator_view() {
+        let e = override_card(
+            "rose",
+            &stamp_with_note("vouched at the branch meeting"),
+            true,
+        );
+        assert_eq!(
+            field_value(&json(e), "Reason").as_deref(),
+            Some("vouched at the branch meeting")
+        );
+    }
+
+    #[test]
+    fn override_card_hides_reason_on_a_self_view() {
+        let e = override_card(
+            "rose",
+            &stamp_with_note("vouched at the branch meeting"),
+            false,
+        );
+        assert_eq!(field_value(&json(e), "Reason"), None);
+    }
+
+    #[test]
+    fn override_card_omits_reason_when_absent() {
+        let e = override_card("rose", &stamp(), true);
+        assert_eq!(field_value(&json(e), "Reason"), None);
+    }
+
+    #[test]
     fn override_card_dates_share_an_inline_row() {
-        let e = override_card("rose", &stamp());
+        let e = override_card("rose", &stamp(), false);
         let v = json(e);
         let inline_of = |name: &str| {
             v["fields"]

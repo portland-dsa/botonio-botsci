@@ -71,7 +71,7 @@ async fn render_outcome(
     };
     match outcome {
         LookupOutcome::Card(rec) | LookupOutcome::SelfCard(Some(rec)) => {
-            render_view(ctx, CardView::Member(rec), &target.name).await?;
+            render_view(ctx, CardView::Member(rec), &target.name, false).await?;
         }
         LookupOutcome::SelfCard(None) => {
             ctx.send(reply(
@@ -80,8 +80,11 @@ async fn render_outcome(
             ))
             .await?;
         }
-        LookupOutcome::SelfOverride(stamp) | LookupOutcome::OverrideCard(stamp) => {
-            render_view(ctx, CardView::Override(stamp), &target.name).await?;
+        LookupOutcome::OverrideCard(stamp) => {
+            render_view(ctx, CardView::Override(stamp), &target.name, true).await?;
+        }
+        LookupOutcome::SelfOverride(stamp) => {
+            render_view(ctx, CardView::Override(stamp), &target.name, false).await?;
         }
         LookupOutcome::NotFound => {
             ctx.send(reply("No membership record found for that member."))
@@ -115,12 +118,17 @@ async fn render_outcome(
 /// the menu/lookup path stay in step. [`CardView::Unknown`] has no card; callers render
 /// that with their own "no record" text (the wording differs by context) before
 /// delegating here.
-async fn render_view(ctx: Context<'_>, view: CardView, display_name: &str) -> Result<(), Error> {
+async fn render_view(
+    ctx: Context<'_>,
+    view: CardView,
+    display_name: &str,
+    show_note: bool,
+) -> Result<(), Error> {
     let embed = match view {
         CardView::Member(rec) => {
             render::card::membership_card(&rec, display_name, None, Utc::now().date_naive())
         }
-        CardView::Override(stamp) => render::card::override_card(display_name, &stamp),
+        CardView::Override(stamp) => render::card::override_card(display_name, &stamp, show_note),
         CardView::Unknown => return Ok(()),
     };
     ctx.send(poise::CreateReply::default().embed(embed).ephemeral(true))
@@ -177,5 +185,5 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
         .map(|m| m.display_name().to_string())
         .unwrap_or_else(|| user.name.clone());
 
-    render_view(ctx, view, &display_name).await
+    render_view(ctx, view, &display_name, false).await
 }
