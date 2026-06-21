@@ -61,6 +61,36 @@ impl DiscordHttp {
         }
     }
 
+    /// Build directly from an already-resolved `Role -> RoleId` map, bypassing the
+    /// by-name [`resolve_managed_roles`] lookup. A caller that holds the role ids
+    /// already - for instance from stored configuration - uses this to build the
+    /// write client without a guild role fetch, and may rebuild it cheaply whenever
+    /// those ids change. `managed` is derived from the map for the trait's
+    /// [`managed_roles`](DiscordClient::managed_roles) accessor; the role name is
+    /// filled with the [`Role`]'s own label, since the live guild name is fetched on
+    /// demand where it is actually displayed.
+    pub fn from_role_map(
+        http: Arc<Http>,
+        guild_id: GuildId,
+        role_ids: HashMap<Role, RoleId>,
+    ) -> Self {
+        let managed = role_ids
+            .iter()
+            .map(|(role, id)| ManagedRole {
+                role: *role,
+                id: id.get(),
+                name: role.as_str().to_owned(),
+                from_env_override: false,
+            })
+            .collect();
+        Self {
+            http,
+            guild_id,
+            role_ids,
+            managed,
+        }
+    }
+
     /// Constructs the client standalone, reading the token and building its own
     /// `Http`.
     ///
