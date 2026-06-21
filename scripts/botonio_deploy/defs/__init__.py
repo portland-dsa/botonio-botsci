@@ -40,7 +40,6 @@ class SecretTokens(StrEnum):
 
 
 class EnvVars(StrEnum):
-    DiscordModeratorRoleId = "discord_mod_id"
     DiscordGuildId = "discord_guild_id"
     StUserListId = "st_user_list_id"
     # Discord: Personas (staging mock only)
