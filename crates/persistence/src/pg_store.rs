@@ -27,7 +27,8 @@ use sqlx::postgres::PgPoolOptions;
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::store::{
-    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, RosterWrite, dedup_records,
+    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, OverrideLog, RosterWrite,
+    dedup_records,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -395,6 +396,56 @@ impl IdentityWrite for PgStore {
                 "link_identity matched no cached row; the member is not yet in the cache, so the identity repair will land on the next roster sweep"
             );
         }
+        Ok(())
+    }
+
+    /// Clear the cached Discord identity from the row holding `discord_id`, so a later
+    /// verify misses by both id and handle. A `discord_id` no row holds updates nothing,
+    /// which stays a success - there is nothing to unlink.
+    async fn unlink_by_discord_id(
+        &self,
+        discord_id: DiscordUserId,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"UPDATE member_cache SET discord_user_id = NULL, discord_handle = NULL
+               WHERE discord_user_id = $1"#,
+            discord_id.0 as i64
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OverrideLog for PgStore {
+    type Error = PersistenceError;
+
+    /// Stamp a hand approval. `ON CONFLICT DO NOTHING` makes it insert-once: a re-stamp
+    /// for the same subject leaves the original `approved_by`/`approved_at` untouched.
+    async fn stamp_override(
+        &self,
+        subject: DiscordUserId,
+        approver: DiscordUserId,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO manual_override (discord_user_id, approved_by)
+               VALUES ($1, $2) ON CONFLICT (discord_user_id) DO NOTHING"#,
+            subject.0 as i64,
+            approver.0 as i64,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_override(&self, subject: DiscordUserId) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            "DELETE FROM manual_override WHERE discord_user_id = $1",
+            subject.0 as i64
+        )
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 }

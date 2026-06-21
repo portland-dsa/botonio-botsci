@@ -256,6 +256,11 @@ pub trait IdentityWrite: Send + Sync {
         discord_id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), Self::Error>;
+
+    /// Clear the Discord identity (id and handle) from whichever cached row currently
+    /// holds `discord_id`, returning the member to an unlinked state so a later verify
+    /// misses by both id and handle. A `discord_id` no row holds is a silent no-op.
+    async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Self::Error>;
 }
 
 /// Read and replace one guild's [`GuildConfig`]. Fallible and async from the start
@@ -279,12 +284,39 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), Self::Error>;
 }
 
+/// Record and clear the permanent note that a member was hand-approved past Solidarity
+/// Tech. Keyed on the immutable Discord id - an overridden member has no Solidarity Tech
+/// id to key on. [`stamp_override`](Self::stamp_override) is insert-once: a second stamp
+/// for the same subject preserves the first approval. [`delete_override`](Self::delete_override)
+/// is the reset path; production withholds the `DELETE` privilege, so the call compiles
+/// but cannot succeed there.
+#[async_trait]
+pub trait OverrideLog: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Stamp that `subject` was hand-approved by `approver`. Insert-once, so a retry
+    /// after a later failure preserves the original approval rather than overwriting it.
+    async fn stamp_override(
+        &self,
+        subject: DiscordUserId,
+        approver: DiscordUserId,
+    ) -> Result<(), Self::Error>;
+
+    /// Remove `subject`'s override stamp, returning them to an un-stamped state.
+    /// Reachable only through the staging-gated reset; production withholds the `DELETE`
+    /// grant, so this fails closed there.
+    async fn delete_override(&self, subject: DiscordUserId) -> Result<(), Self::Error>;
+}
+
 /// The in-memory [`MemberStore`]: a snapshot [`Index`] behind a
 /// `RwLock<Arc<Index>>`. Reads clone out the `Arc` and never block a concurrent
 /// rebuild; the write lock is held only for the pointer swap itself.
 pub struct InMemoryStore {
     index: RwLock<Arc<Index>>,
     config: RwLock<GuildConfig>,
+    /// Hand-approval stamps: subject Discord id to first approver Discord id. The
+    /// in-memory analogue of the `manual_override` table, insert-once just like it.
+    overrides: RwLock<HashMap<u64, u64>>,
 }
 
 impl InMemoryStore {
@@ -293,6 +325,7 @@ impl InMemoryStore {
         Self {
             index: RwLock::new(Arc::new(index)),
             config: RwLock::new(GuildConfig::default()),
+            overrides: RwLock::new(HashMap::new()),
         }
     }
 
@@ -364,6 +397,57 @@ impl IdentityWrite for InMemoryStore {
             }
         }
         self.swap(Index::from_records(records));
+        Ok(())
+    }
+
+    /// Clear the Discord identity from the record holding `discord_id`, then swap - the
+    /// same copy-on-write rebuild [`link_identity`](Self::link_identity) uses, a both-mapped
+    /// record collected from each map and the duplicates collapsing in
+    /// [`Index::from_records`]. With both identity columns cleared the record falls out of
+    /// both index maps, so a later lookup misses by id and handle alike.
+    async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Infallible> {
+        let mut records: Vec<MemberRecord> = {
+            let snap = self.snapshot();
+            snap.by_id
+                .values()
+                .chain(snap.by_handle.values())
+                .cloned()
+                .collect()
+        };
+        for rec in &mut records {
+            if rec.discord_user_id == Some(discord_id) {
+                rec.discord_user_id = None;
+                rec.discord_handle = None;
+            }
+        }
+        self.swap(Index::from_records(records));
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl OverrideLog for InMemoryStore {
+    type Error = Infallible;
+
+    async fn stamp_override(
+        &self,
+        subject: DiscordUserId,
+        approver: DiscordUserId,
+    ) -> Result<(), Infallible> {
+        // Insert-once: the first approver wins, so a re-stamp preserves the original.
+        self.overrides
+            .write()
+            .expect("overrides lock poisoned")
+            .entry(subject.0)
+            .or_insert(approver.0);
+        Ok(())
+    }
+
+    async fn delete_override(&self, subject: DiscordUserId) -> Result<(), Infallible> {
+        self.overrides
+            .write()
+            .expect("overrides lock poisoned")
+            .remove(&subject.0);
         Ok(())
     }
 }

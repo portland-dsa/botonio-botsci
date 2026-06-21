@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE member_cache SET discord_user_id = NULL, discord_handle = NULL\n               WHERE discord_user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2656ee19ef3a0e90e20a13857c323ebfc48aa4ca94750b809f94f19d1a6d5955"
+}

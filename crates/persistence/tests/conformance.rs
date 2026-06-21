@@ -16,7 +16,9 @@ use chrono::NaiveDate;
 
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::store::{IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, RosterWrite};
+use engine::store::{
+    IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, OverrideLog, RosterWrite,
+};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use persistence::PgStore;
 
@@ -314,4 +316,87 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
     };
     store.save_config(guild, &partial).await.unwrap();
     assert_eq!(store.load_config(guild).await.unwrap(), partial);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn override_stamp_is_insert_once_and_deletable(pool: sqlx::PgPool) {
+    let store = PgStore::new(pool.clone());
+    let subject = DiscordUserId(4242);
+
+    store
+        .stamp_override(subject, DiscordUserId(1))
+        .await
+        .unwrap();
+    // Insert-once: a second stamp with a different approver neither overwrites nor errors.
+    store
+        .stamp_override(subject, DiscordUserId(2))
+        .await
+        .unwrap();
+    let approver = sqlx::query_scalar!(
+        "SELECT approved_by FROM manual_override WHERE discord_user_id = $1",
+        subject.0 as i64
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(approver, 1, "the first approver is preserved on a re-stamp");
+
+    // delete_override needs DELETE, which the test role holds; production withholds it.
+    store.delete_override(subject).await.unwrap();
+    let remaining = sqlx::query_scalar!(
+        "SELECT count(*) FROM manual_override WHERE discord_user_id = $1",
+        subject.0 as i64
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(remaining, Some(0), "delete_override removes the stamp");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn unlink_clears_the_cached_identity(pool: sqlx::PgPool) {
+    let store = PgStore::new(pool);
+    store
+        .replace_roster(vec![MemberRecord {
+            st_user_id: StUserId("st-link".into()),
+            discord_user_id: Some(DiscordUserId(7)),
+            discord_handle: Some(DiscordHandle("linked".into())),
+            email: Email("linked@b.test".into()),
+            full_name: None,
+            standing: None,
+            join_date: None,
+            expires: None,
+            membership_type: None,
+            monthly_dues: None,
+            yearly_dues: None,
+        }])
+        .await
+        .unwrap();
+    assert!(
+        store
+            .by_discord_id(DiscordUserId(7))
+            .await
+            .unwrap()
+            .is_some(),
+        "the linked member is present before the unlink"
+    );
+
+    store.unlink_by_discord_id(DiscordUserId(7)).await.unwrap();
+
+    assert!(
+        store
+            .by_discord_id(DiscordUserId(7))
+            .await
+            .unwrap()
+            .is_none(),
+        "the id column is cleared, so the member is no longer found by id"
+    );
+    assert!(
+        store
+            .by_handle(&DiscordHandle("linked".into()))
+            .await
+            .unwrap()
+            .is_none(),
+        "the handle column is cleared too, so the member is no longer found by handle"
+    );
 }

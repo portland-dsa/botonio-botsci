@@ -137,6 +137,10 @@ impl IdentityWrite for CountingStore {
             .link_identity(st_user_id, discord_id, handle)
             .await
     }
+
+    async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Infallible> {
+        self.inner.unlink_by_discord_id(discord_id).await
+    }
 }
 
 #[derive(Debug, cucumber::World)]
