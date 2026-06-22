@@ -572,11 +572,12 @@ async fn run_wizard(
 
 /// Whether a [`DiscordError`] represents a 404 (member not found / left the guild).
 fn is_not_found(e: &DiscordError) -> bool {
+    let DiscordError::Serenity(inner) = e else {
+        return false;
+    };
     matches!(
-        e,
-        DiscordError::Serenity(serenity::Error::Http(
-            serenity::http::HttpError::UnsuccessfulRequest(resp)
-        ))
+        inner.as_ref(),
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
         if resp.status_code == serenity::http::StatusCode::NOT_FOUND
     )
 }

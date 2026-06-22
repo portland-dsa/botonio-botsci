@@ -34,5 +34,8 @@ pub use http::SolidarityTechHttp;
 pub use member::{CustomUserProperty, SolidarityTechMember};
 pub use status::{DuesStatus, MembershipType};
 
-#[cfg(feature = "mock")]
-pub use client::MockSolidarityTechClient;
+#[cfg(feature = "fakes")]
+mod fakes;
+
+#[cfg(feature = "fakes")]
+pub use fakes::FakeSolidarityTech;

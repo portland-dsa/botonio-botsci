@@ -76,7 +76,7 @@ jobs:
           cargo install sqlx-cli --version ^0.9 --no-default-features --features rustls,postgres --locked
           psql "$DATABASE_URL" -c "CREATE ROLE botonio_app NOLOGIN;"
           cargo sqlx migrate run
-          cargo sqlx prepare --check
+          cargo sqlx prepare --check -- --features live-db --all-targets
       - name: gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:

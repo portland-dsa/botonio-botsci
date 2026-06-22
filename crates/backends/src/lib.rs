@@ -1,8 +1,8 @@
 //! Backend client traits, their HTTP implementations, and the [`Clients`] bundle
 //! that hands them to the engine.
 //!
-//! Each submodule follows the same shape: a `*Client` trait (mockable via the
-//! `mock` cargo feature), a live `*Http` struct that implements it, a `*Error`
+//! Each submodule follows the same shape: a `*Client` trait (hand-faked via the
+//! `fakes` cargo feature), a live `*Http` struct that implements it, a `*Error`
 //! enum, and `from_env` plus test constructors. [`Clients`] aggregates one live
 //! client per backend so the engine can take a single `&Clients` rather than two
 //! separate arguments.
@@ -58,16 +58,16 @@ pub enum Error {
 /// [`Iterator`] can't express it - `next` would have to `.await`. (The GAT /
 /// lending-iterator limitation is *not* the issue: we yield owned `Vec`s, so
 /// nothing borrows the cursor.) The async equivalent, a `futures::Stream`,
-/// *would* work, but the backend trait here is object-safe and `#[automock]`ed
-/// so the engine can unit-test against a mock. A stream-returning method can't
-/// keep both: `-> impl Stream` makes the trait non-object-safe and
-/// un-automockable, and the object-safe alternative is `BoxStream`
+/// *would* work, but the backend trait here is object-safe and easy to hand-fake
+/// so the engine can unit-test against a state-based fake. A stream-returning method
+/// can't keep both: `-> impl Stream` makes the trait non-object-safe and awkward
+/// to hand-fake, and the object-safe alternative is `BoxStream`
 /// (`Pin<Box<dyn Stream>>`) - reintroducing the `dyn` we deliberately avoid, and
-/// making every mock hand back a boxed stream. So instead the backend exposes a
+/// making every fake hand back a boxed stream. So instead the backend exposes a
 /// concrete `members_page(cursor) -> MemberPage` (the `next`), and the engine's
 /// generic `drain_pages` does the looping: callers get
 /// iterator-like ergonomics - a `Vec` back, no loop of their own - with zero
-/// `dyn` and a trivially mockable backend.
+/// `dyn` and a trivially fakeable backend.
 ///
 /// - `members` - the records kept from this page (projected; malformed ones are
 ///   already dropped).

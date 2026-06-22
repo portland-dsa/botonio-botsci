@@ -4,9 +4,11 @@
 #[derive(Debug, thiserror::Error)]
 pub enum DiscordError {
     /// A serenity HTTP or model error - typically a network failure or a
-    /// non-success Discord API response.
+    /// non-success Discord API response. Boxed so `DiscordError` stays small:
+    /// `serenity::Error` is ~136 bytes, so an inline variant would bloat every
+    /// `Result<_, DiscordError>` enough to trip `clippy::result_large_err`.
     #[error("serenity error: {0}")]
-    Serenity(#[from] serenity::Error),
+    Serenity(#[source] Box<serenity::Error>),
     /// A required environment variable was absent at startup; the value names it.
     #[error("missing env var: {0}")]
     MissingEnv(&'static str),
@@ -21,4 +23,14 @@ pub enum DiscordError {
     /// A Manual Override marker write was attempted but no override role is configured.
     #[error("no Manual Override role is configured")]
     OverrideRoleUnconfigured,
+}
+
+/// Boxes the large `serenity::Error` into [`DiscordError::Serenity`]. thiserror's
+/// `#[from]` only derives `From<serenity::Error>` for an unboxed field, so the box
+/// (which keeps the enum small) costs us this hand-written conversion - `?` on a
+/// `serenity::Error` still lands here.
+impl From<serenity::Error> for DiscordError {
+    fn from(err: serenity::Error) -> Self {
+        Self::Serenity(Box::new(err))
+    }
 }

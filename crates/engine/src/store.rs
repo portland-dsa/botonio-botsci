@@ -780,26 +780,11 @@ mod tests {
     use chrono::NaiveDate;
     use domain::{MigsStatus, Role};
 
-    use crate::backends::MemberPage;
-    use crate::backends::solidarity_tech::MockSolidarityTechClient;
-    use crate::testkit::ready_ok;
-
-    fn st_page(members: Vec<SolidarityTechMember>) -> MemberPage<SolidarityTechMember> {
-        let scanned = members.len() as u64;
-        MemberPage {
-            members,
-            scanned,
-            total: Some(scanned),
-            next: None,
-        }
-    }
+    use crate::backends::solidarity_tech::FakeSolidarityTech;
 
     #[tokio::test]
     async fn sweep_roster_fetches_the_discord_list() {
-        let mut st_client = MockSolidarityTechClient::new();
-        st_client
-            .expect_members_in_list_page()
-            .returning(|_, _| ready_ok(st_page(vec![st("zoop", 42, "zoop")])));
+        let st_client = FakeSolidarityTech::new().with_members(vec![st("zoop", 42, "zoop")]);
         let records = sweep_roster(&st_client, "1234").await.unwrap();
         assert!(
             records

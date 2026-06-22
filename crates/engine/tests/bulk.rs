@@ -4,13 +4,9 @@
 //! knows in good standing; Shadow is unknown (a miss); Knuckles already holds the
 //! Member role; Silver is a second miss.
 
-use std::future::Future;
-use std::pin::Pin;
-
 use cucumber::{World as _, given, then, when};
 
-use engine::backends::MemberPage;
-use engine::backends::discord::{DiscordRosterMember, MockDiscordClient, Role};
+use engine::backends::discord::{DiscordRosterMember, FakeDiscord, Role};
 use engine::bulk::{self, PreviewTally, miss_still_pending};
 use engine::store::{
     BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, InMemoryStore, Index,
@@ -22,15 +18,6 @@ use domain::{DiscordGuildId, MigsStatus};
 
 const SONIC: u64 = 1;
 const GUILD: u64 = 100;
-
-/// The boxed future an `async_trait`-desugared mock method returns.
-fn ready_ok<T, E>(v: T) -> Pin<Box<dyn Future<Output = Result<T, E>> + Send>>
-where
-    T: Send + 'static,
-    E: 'static,
-{
-    Box::pin(async move { Ok(v) })
-}
 
 /// Fixed ids and handles for each actor by name.
 fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
@@ -229,19 +216,8 @@ async fn preview_unmanaged(world: &mut BulkWorld) {
     let roster = world.roster.clone();
     let known = world.known.clone();
 
-    let mut mock = MockDiscordClient::new();
-    mock.expect_members_page().returning(move |_cursor| {
-        let members = roster.clone();
-        let scanned = members.len() as u64;
-        ready_ok(MemberPage {
-            members,
-            scanned,
-            total: Some(scanned),
-            next: None,
-        })
-    });
-
-    let members = bulk::enumerate(&mock, BulkScope::UnmanagedOnly)
+    let discord = FakeDiscord::new().with_roster(roster);
+    let members = bulk::enumerate(&discord, BulkScope::UnmanagedOnly)
         .await
         .unwrap();
     let store = InMemoryStore::new(Index::from_records(known.clone()));
@@ -253,19 +229,10 @@ async fn preview_whole_guild(world: &mut BulkWorld) {
     let roster = world.roster.clone();
     let known = world.known.clone();
 
-    let mut mock = MockDiscordClient::new();
-    mock.expect_members_page().returning(move |_cursor| {
-        let members = roster.clone();
-        let scanned = members.len() as u64;
-        ready_ok(MemberPage {
-            members,
-            scanned,
-            total: Some(scanned),
-            next: None,
-        })
-    });
-
-    let members = bulk::enumerate(&mock, BulkScope::WholeGuild).await.unwrap();
+    let discord = FakeDiscord::new().with_roster(roster);
+    let members = bulk::enumerate(&discord, BulkScope::WholeGuild)
+        .await
+        .unwrap();
     let store = InMemoryStore::new(Index::from_records(known.clone()));
     world.tally = Some(bulk::preview(&store, &members).await.unwrap());
 }

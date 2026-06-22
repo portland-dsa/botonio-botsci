@@ -206,13 +206,11 @@ pub async fn resolve_managed_roles(
 }
 
 #[cfg(feature = "live-discord")]
-#[allow(clippy::result_large_err)] // shares DiscordError with the trait methods
 fn read_env(key: &'static str) -> Result<String, DiscordError> {
     std::env::var(key).map_err(|_| DiscordError::MissingEnv(key))
 }
 
 #[cfg(feature = "live-discord")]
-#[allow(clippy::result_large_err)] // shares DiscordError with the trait methods
 fn read_env_u64(key: &'static str) -> Result<u64, DiscordError> {
     read_env(key)?
         .parse::<u64>()

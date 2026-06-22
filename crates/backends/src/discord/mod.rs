@@ -1,7 +1,7 @@
 //! Discord backend: read guild members and set their status roles via the
 //! Discord REST API.
 //!
-//! Provides [`DiscordClient`] (with a `mockall` mock under `#[cfg(test)]`) and
+//! Provides [`DiscordClient`] (with a hand-written fake under the `fakes` feature) and
 //! the live [`DiscordHttp`], built on `serenity::http::Http` only - no gateway,
 //! no cache, no event handler. The gateway lives in the bot binary alone; this
 //! shared layer is a pure REST write path, so guild state is only ever mutated
@@ -22,5 +22,8 @@ pub use error::DiscordError;
 pub use http::{DiscordHttp, resolve_managed_roles};
 pub use roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
 
-#[cfg(feature = "mock")]
-pub use client::MockDiscordClient;
+#[cfg(feature = "fakes")]
+mod fakes;
+
+#[cfg(feature = "fakes")]
+pub use fakes::{DiscordOp, FakeDiscord};

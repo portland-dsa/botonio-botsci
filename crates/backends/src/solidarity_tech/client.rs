@@ -25,12 +25,11 @@ pub struct StClearFlags {
 
 /// Reads Solidarity Tech members and writes Discord identity back to them.
 ///
-/// The trait is object-safe and `async` (through the `async_trait` crate), and
-/// gets a `mockall` mock under `#[cfg(test)]` so callers can be unit-tested
-/// without a live API. The production implementation is
-/// [`SolidarityTechHttp`](super::SolidarityTechHttp).
+/// The trait is object-safe and `async` (through the `async_trait` crate). A
+/// hand-written, state-based fake is available under the `fakes` feature so
+/// callers can be unit-tested without a live API. The production implementation
+/// is [`SolidarityTechHttp`](super::SolidarityTechHttp).
 #[async_trait]
-#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait SolidarityTechClient: Send + Sync {
     /// Look up members by email. Returns the full match list (usually 0 or 1);
     /// thin wrapper over [`find_members`](Self::find_members).
