@@ -54,6 +54,12 @@ harness = false
 name = "lookup"
 harness = false
 
+# Behavior suite for the verify wizard's modal re-click dispatch (`src/commands/reclick.rs`).
+# Offline, Cucumber, no gateway. Cast: Ralsei is the moderator running the wizard.
+[[test]]
+name = "wizard_dispatch"
+harness = false
+
 # `sd-notify` is a Unix-datagram-socket protocol and is meaningless off Linux; gating
 # it here keeps non-Linux development builds from pulling or compiling it.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -15,6 +15,7 @@ use engine::verify::{DataStore, Member, Target, VerifyOutcome};
 
 use domain::Role;
 
+use crate::commands::reclick::{ReclickAction, reclick_action};
 use crate::data::{Context, Error};
 use crate::moderator::invoker_is_moderator;
 use crate::render::modal::{
@@ -46,6 +47,21 @@ pub(crate) enum StepOutcome {
     Expired,
     /// A backend error occurred.
     Errored,
+}
+
+/// Result of waiting on an open modal while its trigger button stays live. A modal
+/// dismissed without submitting fires no event, so the wait also watches for further
+/// presses on the same row: a re-click of the trigger reopens the modal in place (handled
+/// inline, no variant), and any other button is stashed for the outer dispatch.
+enum ModalWait {
+    /// The moderator submitted the modal. Boxed because `ModalInteraction` is large and
+    /// the other variants carry nothing (clippy::large_enum_variant).
+    Submitted(Box<serenity::all::ModalInteraction>),
+    /// The moderator pressed a different live button; it is stashed in `pending` for the
+    /// outer loop to route (Skip/Stop, Override, or a fresh lookup).
+    Redispatch,
+    /// The idle window elapsed with no interaction.
+    TimedOut,
 }
 
 /// Verify a member and assign their standing role. Moderators only.
@@ -228,18 +244,29 @@ pub(crate) async fn verify_step(
     let modal_id = format!("{EMAIL_MODAL_ID}:{}", message.id.get());
     let sctx = ctx.serenity_context();
 
+    // A button press waiting to be dispatched. Normally we await a fresh press at the top
+    // of the loop, but a modal dismissed without submitting leaves its trigger button live;
+    // a follow-up press is captured by the modal wait below and stashed here so this same
+    // dispatch handles it (reopen the lookup, Skip/Stop, or Override).
+    let mut pending: Option<ComponentInteraction> = None;
     loop {
-        // Wait for the moderator to press the button.
-        let Some(button) = message
-            .await_component_interaction(sctx)
-            .author_id(ctx.author().id)
-            .timeout(IDLE)
-            .await
-        else {
-            // No interaction arrived before the idle window closed. The caller edits
-            // the host message to show the expired state because ephemeral edits
-            // require the original reply handle, which the step does not hold.
-            return Ok((StepOutcome::Expired, None));
+        // Take a stashed press, or wait for the moderator to press a button.
+        let button = match pending.take() {
+            Some(button) => button,
+            None => {
+                let Some(button) = message
+                    .await_component_interaction(sctx)
+                    .author_id(ctx.author().id)
+                    .timeout(IDLE)
+                    .await
+                else {
+                    // No interaction arrived before the idle window closed. The caller
+                    // edits the host message to show the expired state because ephemeral
+                    // edits require the original reply handle, which the step does not hold.
+                    return Ok((StepOutcome::Expired, None));
+                };
+                button
+            }
         };
 
         // If the moderator pressed one of the wizard's extra controls (Skip, Stop,
@@ -282,9 +309,11 @@ pub(crate) async fn verify_step(
                     CreateInteractionResponse::Modal(override_modal(&override_modal_id, &display)),
                 )
                 .await?;
-            // A dismissed modal sends no event, so also watch for a re-click of the
-            // still-visible button and reopen it.
-            let submit = loop {
+            // A dismissed modal sends no event, so also watch for a further button press.
+            // A re-click of the override button reopens the modal in place; any other button
+            // is stashed for the outer dispatch (so Skip/Stop and the email lookup still work
+            // after the reason modal is dismissed).
+            let wait = loop {
                 tokio::select! {
                     modal = async {
                         message
@@ -293,7 +322,7 @@ pub(crate) async fn verify_step(
                             .custom_ids(vec![override_modal_id.clone()])
                             .timeout(IDLE)
                             .await
-                    } => break modal,
+                    } => break modal.map_or(ModalWait::TimedOut, |m| ModalWait::Submitted(Box::new(m))),
                     reclick = async {
                         message
                             .await_component_interaction(sctx)
@@ -301,23 +330,31 @@ pub(crate) async fn verify_step(
                             .timeout(IDLE)
                             .await
                     } => match reclick {
-                        Some(rc) => {
-                            rc.create_response(
-                                sctx,
-                                CreateInteractionResponse::Modal(override_modal(
-                                    &override_modal_id,
-                                    &display,
-                                )),
-                            )
-                            .await?;
-                            continue;
-                        }
-                        None => break None,
+                        Some(rc) => match reclick_action(&rc.data.custom_id, OVERRIDE_BUTTON_ID) {
+                            ReclickAction::Reopen => {
+                                rc.create_response(
+                                    sctx,
+                                    CreateInteractionResponse::Modal(override_modal(
+                                        &override_modal_id,
+                                        &display,
+                                    )),
+                                )
+                                .await?;
+                                continue;
+                            }
+                            ReclickAction::Redispatch => {
+                                pending = Some(rc);
+                                break ModalWait::Redispatch;
+                            }
+                        },
+                        None => break ModalWait::TimedOut,
                     },
                 }
             };
-            let Some(submit) = submit else {
-                return Ok((StepOutcome::Expired, None));
+            let submit = match wait {
+                ModalWait::Submitted(submit) => *submit,
+                ModalWait::Redispatch => continue,
+                ModalWait::TimedOut => return Ok((StepOutcome::Expired, None)),
             };
             // Acknowledge so the audit/stamp/role writes below cannot blow Discord's
             // 3-second interaction deadline.
@@ -367,9 +404,11 @@ pub(crate) async fn verify_step(
             .await?;
 
         // Await the submission. Dismissing a modal sends no event, so also watch for a
-        // re-click of the still-visible button and reopen the modal - otherwise the button
-        // would be dead until this wait timed out.
-        let submit = loop {
+        // further press on the still-visible row. A re-click of the lookup button reopens
+        // the modal in place; any other button (Skip/Stop/Override) is stashed so the outer
+        // dispatch handles it - otherwise the row would be dead until timeout, and a
+        // Skip/Stop press would wrongly reopen the email modal.
+        let wait = loop {
             tokio::select! {
                 modal = async {
                     message
@@ -378,7 +417,7 @@ pub(crate) async fn verify_step(
                         .custom_ids(vec![modal_id.clone()])
                         .timeout(IDLE)
                         .await
-                } => break modal,
+                } => break modal.map_or(ModalWait::TimedOut, |m| ModalWait::Submitted(Box::new(m))),
                 reclick = async {
                     message
                         .await_component_interaction(sctx)
@@ -386,20 +425,28 @@ pub(crate) async fn verify_step(
                         .timeout(IDLE)
                         .await
                 } => match reclick {
-                    Some(rc) => {
-                        rc.create_response(
-                            sctx,
-                            CreateInteractionResponse::Modal(email_modal(&modal_id, &display)),
-                        )
-                        .await?;
-                        continue;
-                    }
-                    None => break None,
+                    Some(rc) => match reclick_action(&rc.data.custom_id, LOOKUP_BUTTON_ID) {
+                        ReclickAction::Reopen => {
+                            rc.create_response(
+                                sctx,
+                                CreateInteractionResponse::Modal(email_modal(&modal_id, &display)),
+                            )
+                            .await?;
+                            continue;
+                        }
+                        ReclickAction::Redispatch => {
+                            pending = Some(rc);
+                            break ModalWait::Redispatch;
+                        }
+                    },
+                    None => break ModalWait::TimedOut,
                 },
             }
         };
-        let Some(submit) = submit else {
-            return Ok((StepOutcome::Expired, None));
+        let submit = match wait {
+            ModalWait::Submitted(submit) => *submit,
+            ModalWait::Redispatch => continue,
+            ModalWait::TimedOut => return Ok((StepOutcome::Expired, None)),
         };
 
         // Acknowledge the submission immediately (a deferred message update) so the live
