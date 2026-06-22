@@ -5,8 +5,8 @@
 
 use serenity::all::User;
 
-use engine::backends::util::DiscordUserId;
-use engine::verify;
+use engine::backends::util::{DiscordHandle, DiscordUserId};
+use engine::verify::{DataStore, Member, Target};
 
 use crate::data::{Context, Error};
 use crate::moderator::invoker_is_moderator;
@@ -37,14 +37,20 @@ pub async fn forget(
     };
     let invoker = DiscordUserId(ctx.author().id.get());
     let target_id = DiscordUserId(target.id.get());
-    match verify::forget_member(
+    let store = DataStore::new(
+        &*data.solidarity_tech,
         &discord,
         &*data.store,
-        &*data.store,
         &*data.auditor,
-        invoker,
-        target_id,
+    );
+    match Member::new(
+        &store,
+        Target {
+            id: target_id,
+            handle: DiscordHandle(target.name.clone()),
+        },
     )
+    .forget(invoker)
     .await
     {
         Ok(()) => {

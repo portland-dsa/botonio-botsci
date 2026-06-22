@@ -11,7 +11,7 @@ use serenity::all::{
 
 use engine::backends::discord::DiscordHttp;
 use engine::backends::util::{DiscordHandle, DiscordUserId};
-use engine::verify::{self, VerifyOutcome};
+use engine::verify::{DataStore, Member, Target, VerifyOutcome};
 
 use domain::Role;
 
@@ -88,15 +88,20 @@ pub async fn verify(
         return Ok(());
     };
 
-    let result = verify::verify(
+    let store = DataStore::new(
         &*data.solidarity_tech,
         &discord,
         &*data.store,
         &*data.auditor,
-        invoker,
-        target_id,
-        target_handle.clone(),
+    );
+    let result = Member::new(
+        &store,
+        Target {
+            id: target_id,
+            handle: target_handle.clone(),
+        },
     )
+    .verify(invoker)
     .await;
 
     match result {
@@ -320,14 +325,20 @@ pub(crate) async fn verify_step(
                 .create_response(sctx, CreateInteractionResponse::Acknowledge)
                 .await?;
             let reason = parse_reason(&read_input(&submit, REASON_FIELD_ID));
-            let (next, outcome) = match verify::override_approve(
+            let store = DataStore::new(
+                &*data.solidarity_tech,
                 discord,
                 &*data.store,
                 &*data.auditor,
-                invoker,
-                target_id,
-                reason,
+            );
+            let (next, outcome) = match Member::new(
+                &store,
+                Target {
+                    id: target_id,
+                    handle: target_handle.clone(),
+                },
             )
+            .override_approve(invoker, reason)
             .await
             {
                 Ok(()) => (VerifyState::Overridden, StepOutcome::Overridden),
@@ -403,16 +414,20 @@ pub(crate) async fn verify_step(
             None => VerifyState::InvalidEmail,
             Some(email) => {
                 let data = ctx.data();
-                match verify::verify_by_email(
+                let store = DataStore::new(
                     &*data.solidarity_tech,
                     discord,
                     &*data.store,
                     &*data.auditor,
-                    invoker,
-                    target_id,
-                    target_handle.clone(),
-                    email,
+                );
+                match Member::new(
+                    &store,
+                    Target {
+                        id: target_id,
+                        handle: target_handle.clone(),
+                    },
                 )
+                .verify_by_email(invoker, email)
                 .await
                 {
                     Ok(VerifyOutcome::Verified(role)) => VerifyState::Verified(role),

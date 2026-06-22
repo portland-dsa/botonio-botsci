@@ -12,7 +12,7 @@ use crate::backends::discord::{DiscordClient, DiscordError, DiscordRosterMember}
 use crate::paging::drain_pages;
 use crate::seam::NoProgress;
 use crate::store::{BulkScope, MemberStore};
-use crate::verify::{MatchOutcome, match_member};
+use crate::verify::{MatchOutcome, decide, locate};
 
 /// Returns the staleness window (7 days). An in-progress session older than this
 /// is treated as abandoned, evaluated lazily at command entry (there is no background
@@ -83,7 +83,7 @@ pub struct PreviewTally {
     pub conflicts: usize,
 }
 
-/// Partition `members` by running the pure `match_member` decision over cache reads
+/// Partition `members` by running [`locate`] then [`decide`] over cache reads
 /// (id first, then handle), tallying role changes, already-correct members, misses, and
 /// conflicts. A matched member already holding exactly their earned role counts as
 /// `unchanged`, not a change. A fresh decision at apply time is authoritative; this is the
@@ -97,12 +97,8 @@ pub async fn preview<S: MemberStore>(
     let mut misses = 0usize;
     let mut conflicts = 0usize;
     for m in members {
-        let by_id = store.by_discord_id(m.id).await?;
-        let by_handle = match &by_id {
-            Some(_) => None,
-            None => store.by_handle(&m.handle).await?,
-        };
-        match match_member(by_id, by_handle, m.id, &m.handle) {
+        let located = locate(store, m.id, &m.handle).await?;
+        match decide(located, m.id, &m.handle) {
             MatchOutcome::Matched { record, .. } => {
                 let role = record.role();
                 if already_in_role(&m.held, role) {

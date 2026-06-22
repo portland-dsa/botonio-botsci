@@ -16,7 +16,7 @@ use engine::backends::discord::{DiscordClient, DiscordError};
 use engine::backends::util::{DiscordHandle, DiscordUserId};
 use engine::bulk::{self, miss_still_pending};
 use engine::store::{BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, MissState};
-use engine::verify::{self, ResyncOutcome};
+use engine::verify::{DataStore, Member, ResyncOutcome, Target};
 
 use crate::commands::verify::{StepOutcome, verify_step};
 use crate::data::{Context, Error};
@@ -295,17 +295,21 @@ pub async fn bulk_verify(
     let mut queue: Vec<BulkMiss> = Vec::new();
     let mut role_tally: Vec<(Role, usize)> = Role::ALL.into_iter().map(|r| (r, 0)).collect();
 
+    let store = DataStore::new(
+        &*data.solidarity_tech,
+        &discord,
+        &*data.store,
+        &*data.auditor,
+    );
     for (i, m) in members.iter().enumerate() {
-        let outcome = verify::resync_member(
-            &*data.solidarity_tech,
-            &discord,
-            &*data.store,
-            &*data.auditor,
-            invoker,
-            m.id,
-            m.handle.clone(),
-            &m.held,
+        let outcome = Member::new(
+            &store,
+            Target {
+                id: m.id,
+                handle: m.handle.clone(),
+            },
         )
+        .resync(invoker, &m.held)
         .await;
 
         // Pace only the members we actually wrote to: a role change, or a miss that was not
