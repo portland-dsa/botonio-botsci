@@ -2,10 +2,31 @@
 //! `Role -> RoleId` map. Pure so it is unit-tested without a gateway.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use domain::Role;
 use engine::store::GuildConfig;
 use serenity::model::id::RoleId;
+
+/// Build the role-write client from `cfg`, or `None` when the three managed roles are not
+/// all configured. Used by both `Data::role_writer` and the scan loop, so the logic lives
+/// once rather than duplicated in two places.
+pub fn build_role_writer(
+    http: Arc<serenity::http::Http>,
+    guild_id: u64,
+    cfg: &GuildConfig,
+) -> Option<engine::backends::discord::DiscordHttp> {
+    let map = managed_role_map(cfg)?;
+    let override_role = cfg
+        .manual_override_role
+        .map(|r| serenity::all::RoleId::new(r.0));
+    Some(engine::backends::discord::DiscordHttp::from_role_map(
+        http,
+        serenity::all::GuildId::new(guild_id),
+        map,
+        override_role,
+    ))
+}
 
 /// The managed `Role -> RoleId` map for the role-write client, or `None` if any of
 /// the three managed roles is unset. A write path that gets `None` reports that the

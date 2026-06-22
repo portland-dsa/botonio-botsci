@@ -38,6 +38,14 @@ pub struct BotConfig {
     pub audit_key_id: String,
     /// Per-moderator ceiling on member-card lookups of *other* members, per minute.
     pub lookup_rate_per_min: u32,
+    /// How often the scheduled scan runs (when enabled in /setup).
+    pub scan_interval: Duration,
+    /// Tripwire: abort a pass when demotions reach this percentage of scanned members.
+    pub scan_tripwire_percent: u8,
+    /// Tripwire: ...and reach this absolute floor (so small guilds don't trip on churn).
+    pub scan_tripwire_floor: usize,
+    /// Pause between role writes during the scan's apply phase.
+    pub scan_pace: Duration,
 }
 
 /// Everything that can go wrong reading config.
@@ -75,6 +83,13 @@ impl BotConfig {
         let audit_key_id = std::env::var("AUDIT_KEY_ID").unwrap_or_else(|_| "v1".to_owned());
         let lookup_rate_per_min =
             parse_lookup_rate(std::env::var("BOT_LOOKUP_RATE_PER_MIN").ok().as_deref());
+        let scan_interval =
+            parse_scan_interval(std::env::var("BOT_SCAN_INTERVAL_SECS").ok().as_deref());
+        let scan_tripwire_percent =
+            parse_tripwire_percent(std::env::var("BOT_SCAN_TRIPWIRE_PERCENT").ok().as_deref());
+        let scan_tripwire_floor =
+            parse_tripwire_floor(std::env::var("BOT_SCAN_TRIPWIRE_FLOOR").ok().as_deref());
+        let scan_pace = parse_scan_pace(std::env::var("BOT_SCAN_PACE_MS").ok().as_deref());
         Ok(Self {
             token,
             guild_id,
@@ -85,6 +100,10 @@ impl BotConfig {
             audit_hash_key,
             audit_key_id,
             lookup_rate_per_min,
+            scan_interval,
+            scan_tripwire_percent,
+            scan_tripwire_floor,
+            scan_pace,
         })
     }
 }
@@ -121,6 +140,41 @@ fn parse_refresh_secs(raw: Option<&str>) -> Duration {
         .map(Duration::from_secs)
         .unwrap_or(DEFAULT_REFRESH)
         .max(MIN_REFRESH)
+}
+
+/// Default scan cadence (4h) - matches Solidarity Tech's own ~4-hour record sync; a
+/// quicker manual edit is covered by /refresh-cache.
+const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(14_400);
+/// Floor on the scan cadence (`interval(0)` panics; sub-5-minute scans waste work).
+const MIN_SCAN_INTERVAL: Duration = Duration::from_secs(300);
+const DEFAULT_TRIPWIRE_PERCENT: u8 = 20;
+const DEFAULT_TRIPWIRE_FLOOR: usize = 5;
+const DEFAULT_SCAN_PACE: Duration = Duration::from_millis(250);
+
+fn parse_scan_interval(raw: Option<&str>) -> Duration {
+    raw.and_then(|s| s.parse().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_SCAN_INTERVAL)
+        .max(MIN_SCAN_INTERVAL)
+}
+
+/// Parse the tripwire percentage, clamped to 1..=100 (0 would abort on a single demotion;
+/// >100 can never trip).
+fn parse_tripwire_percent(raw: Option<&str>) -> u8 {
+    raw.and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TRIPWIRE_PERCENT)
+        .clamp(1, 100)
+}
+
+fn parse_tripwire_floor(raw: Option<&str>) -> usize {
+    raw.and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TRIPWIRE_FLOOR)
+}
+
+fn parse_scan_pace(raw: Option<&str>) -> Duration {
+    raw.and_then(|s| s.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_SCAN_PACE)
 }
 
 #[cfg(test)]
@@ -163,5 +217,32 @@ mod tests {
         assert_eq!(parse_lookup_rate(Some("xyz")), DEFAULT_LOOKUP_RATE);
         // Zero would refuse every lookup; clamp up to 1.
         assert_eq!(parse_lookup_rate(Some("0")), 1);
+    }
+
+    #[test]
+    fn scan_interval_defaults_and_clamps() {
+        assert_eq!(parse_scan_interval(None), DEFAULT_SCAN_INTERVAL);
+        assert_eq!(
+            parse_scan_interval(Some("28800")),
+            Duration::from_secs(28_800)
+        );
+        assert_eq!(parse_scan_interval(Some("0")), MIN_SCAN_INTERVAL);
+        assert_eq!(parse_scan_interval(Some("xyz")), DEFAULT_SCAN_INTERVAL);
+    }
+
+    #[test]
+    fn tripwire_percent_defaults_and_clamps() {
+        assert_eq!(parse_tripwire_percent(None), DEFAULT_TRIPWIRE_PERCENT);
+        assert_eq!(parse_tripwire_percent(Some("35")), 35);
+        assert_eq!(parse_tripwire_percent(Some("0")), 1);
+        assert_eq!(parse_tripwire_percent(Some("250")), 100);
+    }
+
+    #[test]
+    fn tripwire_floor_and_pace_default() {
+        assert_eq!(parse_tripwire_floor(None), DEFAULT_TRIPWIRE_FLOOR);
+        assert_eq!(parse_tripwire_floor(Some("10")), 10);
+        assert_eq!(parse_scan_pace(None), DEFAULT_SCAN_PACE);
+        assert_eq!(parse_scan_pace(Some("500")), Duration::from_millis(500));
     }
 }

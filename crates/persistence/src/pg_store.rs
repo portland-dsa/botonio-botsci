@@ -482,6 +482,7 @@ struct GuildConfigRow {
     mod_approval_channel_id: Option<i64>,
     unverified_channel_id: Option<i64>,
     dues_expired_channel_id: Option<i64>,
+    scan_enabled: bool,
 }
 
 impl From<GuildConfigRow> for GuildConfig {
@@ -497,6 +498,7 @@ impl From<GuildConfigRow> for GuildConfig {
             mod_approval_channel: chan(r.mod_approval_channel_id),
             unverified_channel: chan(r.unverified_channel_id),
             dues_expired_channel: chan(r.dues_expired_channel_id),
+            scan_enabled: r.scan_enabled,
         }
     }
 }
@@ -510,7 +512,7 @@ impl ConfigStore for PgStore {
             GuildConfigRow,
             r#"SELECT moderator_role_id, member_role_id, dues_expired_role_id,
                       unverified_role_id, manual_override_role_id, mod_approval_channel_id,
-                      unverified_channel_id, dues_expired_channel_id
+                      unverified_channel_id, dues_expired_channel_id, scan_enabled
                FROM guild_config WHERE guild_id = $1"#,
             guild.0 as i64
         )
@@ -530,8 +532,8 @@ impl ConfigStore for PgStore {
             r#"INSERT INTO guild_config
                  (guild_id, moderator_role_id, member_role_id, dues_expired_role_id,
                   unverified_role_id, manual_override_role_id, mod_approval_channel_id,
-                  unverified_channel_id, dues_expired_channel_id, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+                  unverified_channel_id, dues_expired_channel_id, scan_enabled, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
                ON CONFLICT (guild_id) DO UPDATE SET
                  moderator_role_id       = EXCLUDED.moderator_role_id,
                  member_role_id          = EXCLUDED.member_role_id,
@@ -541,6 +543,7 @@ impl ConfigStore for PgStore {
                  mod_approval_channel_id = EXCLUDED.mod_approval_channel_id,
                  unverified_channel_id   = EXCLUDED.unverified_channel_id,
                  dues_expired_channel_id = EXCLUDED.dues_expired_channel_id,
+                 scan_enabled            = EXCLUDED.scan_enabled,
                  updated_at              = now()"#,
             guild.0 as i64,
             role(config.moderator_role),
@@ -551,6 +554,7 @@ impl ConfigStore for PgStore {
             chan(config.mod_approval_channel),
             chan(config.unverified_channel),
             chan(config.dues_expired_channel),
+            config.scan_enabled,
         )
         .execute(&self.pool)
         .await?;

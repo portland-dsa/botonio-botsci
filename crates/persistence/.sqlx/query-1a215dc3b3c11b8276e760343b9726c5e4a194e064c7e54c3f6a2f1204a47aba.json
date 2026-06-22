@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, mod_approval_channel_id,\n                      unverified_channel_id, dues_expired_channel_id\n               FROM guild_config WHERE guild_id = $1",
+  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, mod_approval_channel_id,\n                      unverified_channel_id, dues_expired_channel_id, scan_enabled\n               FROM guild_config WHERE guild_id = $1",
   "describe": {
     "columns": [
       {
@@ -90,6 +90,17 @@
             "name": "dues_expired_channel_id"
           }
         }
+      },
+      {
+        "ordinal": 8,
+        "name": "scan_enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "scan_enabled"
+          }
+        }
       }
     ],
     "parameters": {
@@ -105,8 +116,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "e027ca74c9b9baf097018c86f3929fe9c8e2c567433dda03abcd8eccc827b640"
+  "hash": "1a215dc3b3c11b8276e760343b9726c5e4a194e064c7e54c3f6a2f1204a47aba"
 }
