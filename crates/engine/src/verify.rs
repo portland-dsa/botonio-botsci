@@ -13,7 +13,7 @@ use crate::audit::AuditLog;
 use crate::backends::discord::DiscordClient;
 use crate::backends::solidarity_tech::SolidarityTechClient;
 use crate::store::{IdentityWrite, MemberRecord, MemberStore, OverrideLog};
-use crate::util::{DiscordHandle, DiscordUserId, Email};
+use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 /// The identity repair a successful match implies.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +241,339 @@ pub enum VerifyError {
     SolidarityTech(String),
     #[error("override stamp write failed: {0}")]
     Override(String),
+}
+
+/// Everything a member facade operation can fail with - the one concrete error the verbs
+/// surface. Each backend's associated error is stringified once, inside [`DataStore`], rather
+/// than at every call in the verbs; the typed variants stay intact so the bot can match the
+/// same generic, PII-free cases. Its shape is exactly [`VerifyError`]'s, which folds into it.
+#[derive(Debug, thiserror::Error)]
+pub enum MemberError {
+    #[error("cache read/write failed: {0}")]
+    Store(String),
+    #[error("discord write failed: {0}")]
+    Discord(String),
+    #[error("solidarity tech failed: {0}")]
+    SolidarityTech(String),
+    #[error("override write failed: {0}")]
+    Override(String),
+    #[error("audit write failed: {0}")]
+    Audit(String),
+}
+
+/// Member-oriented reads that hide which backend answers. The read half of the facade;
+/// siblings with [`MemberWrite`] (a writer need not read - see [`Heal`] for the fusion).
+#[async_trait::async_trait]
+pub trait MemberRead: Send + Sync {
+    /// Read a member id-first then handle, as a [`Located`] (the read [`locate`] performs).
+    async fn lookup(
+        &self,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<Located, MemberError>;
+
+    /// The Solidarity Tech records a membership email resolves to, projected to [`MemberRecord`]s.
+    async fn find_by_email(&self, email: &Email) -> Result<Vec<MemberRecord>, MemberError>;
+
+    /// The member's currently-held managed status roles.
+    async fn held_roles(&self, id: DiscordUserId) -> Result<Vec<Role>, MemberError>;
+}
+
+/// Member-oriented writes. Independent of [`MemberRead`] because not every writer reads (an
+/// override grant writes without ever reading the member). The identity write-back primitives
+/// ([`push_identity`](MemberWrite::push_identity), [`link_cache`](MemberWrite::link_cache)) are
+/// the pieces [`Heal::self_heal`] composes.
+#[async_trait::async_trait]
+pub trait MemberWrite: Send + Sync {
+    /// Set the member's status role to exactly `role`, stripping any other managed role.
+    async fn assign_role(&self, id: DiscordUserId, role: Role) -> Result<(), MemberError>;
+
+    /// Remove every role in `roles` from the member.
+    async fn strip_roles(&self, id: DiscordUserId, roles: &[Role]) -> Result<(), MemberError>;
+
+    /// Clear the member's cached Discord identity, returning them to an unlinked state.
+    async fn unlink(&self, id: DiscordUserId) -> Result<(), MemberError>;
+
+    /// Stamp that `target` was hand-approved by `approver`, with an optional `note`. Insert-once.
+    async fn stamp_override(
+        &self,
+        target: DiscordUserId,
+        approver: DiscordUserId,
+        note: Option<String>,
+    ) -> Result<(), MemberError>;
+
+    /// Remove `target`'s override stamp (the reset path; fails closed where the grant is withheld).
+    async fn delete_override(&self, target: DiscordUserId) -> Result<(), MemberError>;
+
+    /// Add the additive Manual Override marker role.
+    async fn set_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError>;
+
+    /// Remove the Manual Override marker role.
+    async fn clear_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError>;
+
+    /// Append one audited action by `actor` upon `subject`.
+    async fn record(
+        &self,
+        actor: DiscordUserId,
+        subject: DiscordUserId,
+        action: &str,
+        detail: serde_json::Value,
+    ) -> Result<(), MemberError>;
+
+    /// Push the discovered Discord identity to Solidarity Tech (the source of truth): an
+    /// [`UpdateHandle`](HealAction::UpdateHandle) refreshes the handle, a
+    /// [`BackfillId`](HealAction::BackfillId) sets the full identity. A composition primitive of
+    /// [`Heal::self_heal`].
+    async fn push_identity(
+        &self,
+        st: &StUserId,
+        heal: &HealAction,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), MemberError>;
+
+    /// Write the discovered Discord identity through to the cache. A composition primitive of
+    /// [`Heal::self_heal`].
+    async fn link_cache(
+        &self,
+        st: &StUserId,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), MemberError>;
+}
+
+/// The combiner for operations that read a record and then write a repair. Its
+/// [`self_heal`](Heal::self_heal) is a defaulted method: push the discovered identity to the
+/// source, then write it through to the cache. Best-effort is the *verb's* concern - `self_heal`
+/// surfaces the error and the verb logs and discards it, so the best-effort-ness reads as a gate
+/// at the call site rather than being hidden here.
+#[async_trait::async_trait]
+pub trait Heal: MemberRead + MemberWrite {
+    /// Repair the stored identity link a successful match implies: Solidarity Tech first, then
+    /// the cache. A [`None`](HealAction::None) heal is a no-op. The cache write runs only if the
+    /// source write succeeded (the `?` short-circuits), preserving the existing ordering.
+    async fn self_heal(
+        &self,
+        record: &MemberRecord,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+        heal: &HealAction,
+    ) -> Result<(), MemberError> {
+        if matches!(heal, HealAction::None) {
+            return Ok(());
+        }
+        self.push_identity(&record.st_user_id, heal, id, handle)
+            .await?;
+        self.link_cache(&record.st_user_id, id, handle).await?;
+        Ok(())
+    }
+}
+
+/// The production [`MemberRead`] / [`MemberWrite`] / [`Heal`] implementor: holds borrows of the
+/// four backends, stringifies each backend's error into [`MemberError`] in one place, and owns
+/// the choreography the facade hides - the strip-stale-roles dance in
+/// [`assign_role`](MemberWrite::assign_role) and the per-[`HealAction`] source write in
+/// [`push_identity`](MemberWrite::push_identity). Generic over the backend traits (not the
+/// concrete `Http` types) so the same code runs over the fakes in tests; production pins the
+/// type parameters at the bot call site.
+pub struct DataStore<'a, St, Dc, S, A> {
+    st: &'a St,
+    discord: &'a Dc,
+    store: &'a S,
+    audit: &'a A,
+}
+
+impl<'a, St, Dc, S, A> DataStore<'a, St, Dc, S, A> {
+    /// Bundle the four backends into one facade value.
+    pub fn new(st: &'a St, discord: &'a Dc, store: &'a S, audit: &'a A) -> Self {
+        Self {
+            st,
+            discord,
+            store,
+            audit,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<St, Dc, S, A> MemberRead for DataStore<'_, St, Dc, S, A>
+where
+    St: SolidarityTechClient,
+    Dc: DiscordClient,
+    S: MemberStore + IdentityWrite + OverrideLog,
+    A: AuditLog,
+{
+    async fn lookup(
+        &self,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<Located, MemberError> {
+        locate(self.store, id, handle)
+            .await
+            .map_err(|e| MemberError::Store(e.to_string()))
+    }
+
+    async fn find_by_email(&self, email: &Email) -> Result<Vec<MemberRecord>, MemberError> {
+        let members = self
+            .st
+            .find_by_email(email)
+            .await
+            .map_err(|e| MemberError::SolidarityTech(e.to_string()))?;
+        Ok(members.into_iter().map(MemberRecord::from).collect())
+    }
+
+    async fn held_roles(&self, id: DiscordUserId) -> Result<Vec<Role>, MemberError> {
+        Ok(self
+            .discord
+            .member_roles(id)
+            .await
+            .map_err(|e| MemberError::Discord(e.to_string()))?
+            .held)
+    }
+}
+
+#[async_trait::async_trait]
+impl<St, Dc, S, A> MemberWrite for DataStore<'_, St, Dc, S, A>
+where
+    St: SolidarityTechClient,
+    Dc: DiscordClient,
+    S: MemberStore + IdentityWrite + OverrideLog,
+    A: AuditLog,
+{
+    async fn assign_role(&self, id: DiscordUserId, role: Role) -> Result<(), MemberError> {
+        // Set the status role to exactly `role`: add it and strip every other managed role.
+        // `set_role` removes only the single role handed to it as `current`, so drive it with
+        // one stale role (stripped in the same call as the add) and remove any further stale
+        // roles after. See the original assign_role for the full rationale.
+        let held = self
+            .discord
+            .member_roles(id)
+            .await
+            .map_err(|e| MemberError::Discord(e.to_string()))?
+            .held;
+        let stale: Vec<Role> = held.iter().copied().filter(|&r| r != role).collect();
+        let current = stale
+            .first()
+            .copied()
+            .or_else(|| held.contains(&role).then_some(role));
+        self.discord
+            .set_role(id, current, role)
+            .await
+            .map_err(|e| MemberError::Discord(e.to_string()))?;
+        if stale.len() > 1 {
+            self.discord
+                .remove_roles(id, &stale[1..])
+                .await
+                .map_err(|e| MemberError::Discord(e.to_string()))?;
+        }
+        Ok(())
+    }
+
+    async fn strip_roles(&self, id: DiscordUserId, roles: &[Role]) -> Result<(), MemberError> {
+        if roles.is_empty() {
+            return Ok(());
+        }
+        self.discord
+            .remove_roles(id, roles)
+            .await
+            .map_err(|e| MemberError::Discord(e.to_string()))
+    }
+
+    async fn unlink(&self, id: DiscordUserId) -> Result<(), MemberError> {
+        self.store
+            .unlink_by_discord_id(id)
+            .await
+            .map_err(|e| MemberError::Store(e.to_string()))
+    }
+
+    async fn stamp_override(
+        &self,
+        target: DiscordUserId,
+        approver: DiscordUserId,
+        note: Option<String>,
+    ) -> Result<(), MemberError> {
+        self.store
+            .stamp_override(target, approver, note)
+            .await
+            .map_err(|e| MemberError::Override(e.to_string()))
+    }
+
+    async fn delete_override(&self, target: DiscordUserId) -> Result<(), MemberError> {
+        self.store
+            .delete_override(target)
+            .await
+            .map_err(|e| MemberError::Override(e.to_string()))
+    }
+
+    async fn set_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError> {
+        self.discord
+            .assign_override_marker(id)
+            .await
+            .map_err(|e| MemberError::Discord(e.to_string()))
+    }
+
+    async fn clear_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError> {
+        self.discord
+            .remove_override_marker(id)
+            .await
+            .map_err(|e| MemberError::Discord(e.to_string()))
+    }
+
+    async fn record(
+        &self,
+        actor: DiscordUserId,
+        subject: DiscordUserId,
+        action: &str,
+        detail: serde_json::Value,
+    ) -> Result<(), MemberError> {
+        self.audit
+            .record(actor, subject, action, detail)
+            .await
+            .map_err(|e| MemberError::Audit(e.to_string()))
+    }
+
+    async fn push_identity(
+        &self,
+        st: &StUserId,
+        heal: &HealAction,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), MemberError> {
+        let st_id = st.as_str();
+        let result = match heal {
+            HealAction::UpdateHandle(h) => self.st.set_discord_handle(st_id, h).await,
+            HealAction::BackfillId(backfill_id) => {
+                self.st
+                    .set_discord_identity(st_id, handle, *backfill_id)
+                    .await
+            }
+            HealAction::None => return Ok(()),
+        };
+        let _ = id; // BackfillId carries the id to write; UpdateHandle needs only the handle.
+        result.map_err(|e| MemberError::SolidarityTech(e.to_string()))
+    }
+
+    async fn link_cache(
+        &self,
+        st: &StUserId,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), MemberError> {
+        self.store
+            .link_identity(st, id, handle)
+            .await
+            .map_err(|e| MemberError::Store(e.to_string()))
+    }
+}
+
+// Empty impl: `self_heal` uses the trait default. No method bodies, so no `#[async_trait]`.
+impl<St, Dc, S, A> Heal for DataStore<'_, St, Dc, S, A>
+where
+    St: SolidarityTechClient,
+    Dc: DiscordClient,
+    S: MemberStore + IdentityWrite + OverrideLog,
+    A: AuditLog,
+{
 }
 
 /// How a verification was initiated, written to the audit row's `method` field so a query
@@ -1081,5 +1414,135 @@ mod resync_tests {
             discord.roles_of(DiscordUserId(7)).contains(&Role::Member),
             "role applied"
         );
+    }
+}
+
+#[cfg(test)]
+mod datastore_tests {
+    use super::*;
+    use crate::backends::discord::{DiscordOp, FakeDiscord};
+    use crate::backends::solidarity_tech::{FakeSolidarityTech, SolidarityTechMember};
+    use crate::store::{InMemoryStore, Index, MemberRecord};
+    use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
+    use domain::MigsStatus;
+    use std::convert::Infallible;
+
+    #[derive(Default)]
+    struct NoopAudit;
+    #[async_trait::async_trait]
+    impl AuditLog for NoopAudit {
+        type Error = Infallible;
+        async fn record(
+            &self,
+            _actor: DiscordUserId,
+            _subject: DiscordUserId,
+            _action: &str,
+            _detail: serde_json::Value,
+        ) -> Result<(), Infallible> {
+            Ok(())
+        }
+    }
+
+    fn linked_record(st: &str, id: u64, handle: &str) -> MemberRecord {
+        MemberRecord {
+            st_user_id: StUserId(st.into()),
+            discord_user_id: Some(DiscordUserId(id)),
+            discord_handle: Some(DiscordHandle(handle.into())),
+            email: Email(format!("{handle}@b.test")),
+            full_name: None,
+            standing: Some(MigsStatus::MemberInGoodStanding),
+            join_date: None,
+            expires: None,
+            membership_type: None,
+            monthly_dues: None,
+            yearly_dues: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn assign_role_strips_every_other_managed_role() {
+        // Holds two stale managed roles; assigning Member must leave exactly Member.
+        let discord = FakeDiscord::new()
+            .with_roles(DiscordUserId(7), vec![Role::Unverified, Role::DuesExpired]);
+        let st = FakeSolidarityTech::new();
+        let store = InMemoryStore::new(Index::default());
+        let audit = NoopAudit;
+        let ds = DataStore::new(&st, &discord, &store, &audit);
+
+        ds.assign_role(DiscordUserId(7), Role::Member)
+            .await
+            .unwrap();
+
+        assert_eq!(discord.roles_of(DiscordUserId(7)), vec![Role::Member]);
+    }
+
+    #[tokio::test]
+    async fn self_heal_writes_source_then_cache() {
+        // A linked member whose handle drifted: self_heal updates the ST handle and writes
+        // through to the cache. The default Heal::self_heal composes push_identity + link_cache.
+        let record = linked_record("st-7", 7, "rosy");
+        let st = FakeSolidarityTech::new().with_members(vec![SolidarityTechMember {
+            id: StUserId("st-7".into()),
+            email: Email("rosy@b.test".into()),
+            discord_handle: Some(DiscordHandle("old".into())),
+            discord_user_id: Some(DiscordUserId(7)),
+            membership_standing: Some(MigsStatus::MemberInGoodStanding),
+            ..Default::default()
+        }]);
+        let discord = FakeDiscord::new();
+        let store = InMemoryStore::new(Index::default());
+        let audit = NoopAudit;
+        let ds = DataStore::new(&st, &discord, &store, &audit);
+
+        ds.self_heal(
+            &record,
+            DiscordUserId(7),
+            &DiscordHandle("rosy".into()),
+            &HealAction::UpdateHandle(DiscordHandle("rosy".into())),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(st.writes(), 1, "the source handle was written once");
+        assert_eq!(
+            st.get("st-7").unwrap().discord_handle,
+            Some(DiscordHandle("rosy".into())),
+        );
+    }
+
+    #[tokio::test]
+    async fn self_heal_none_writes_nothing() {
+        let record = linked_record("st-7", 7, "rosy");
+        let st = FakeSolidarityTech::new();
+        let discord = FakeDiscord::new();
+        let store = InMemoryStore::new(Index::default());
+        let audit = NoopAudit;
+        let ds = DataStore::new(&st, &discord, &store, &audit);
+
+        ds.self_heal(
+            &record,
+            DiscordUserId(7),
+            &DiscordHandle("rosy".into()),
+            &HealAction::None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(st.writes(), 0, "a None heal touches no backend");
+    }
+
+    #[tokio::test]
+    async fn assign_role_surfaces_a_discord_failure_as_member_error() {
+        let discord = FakeDiscord::new().failing(DiscordOp::SetRole);
+        let st = FakeSolidarityTech::new();
+        let store = InMemoryStore::new(Index::default());
+        let audit = NoopAudit;
+        let ds = DataStore::new(&st, &discord, &store, &audit);
+
+        let err = ds
+            .assign_role(DiscordUserId(7), Role::Member)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MemberError::Discord(_)));
     }
 }
