@@ -80,12 +80,14 @@ struct FakeMembers {
     stamped: Mutex<Option<DiscordUserId>>,
     stamp_note: Mutex<Option<String>>,
     deleted: Mutex<Option<DiscordUserId>>,
-    /// (st_user_id -> written id/handle): the source write-back self_heal performs.
-    pushes: Mutex<Vec<(String, DiscordUserId, DiscordHandle)>>,
+    /// (st_user_id -> written id (None for a handle-only update) / handle): the source
+    /// write-back self_heal performs.
+    pushes: Mutex<Vec<(String, Option<DiscordUserId>, DiscordHandle)>>,
     /// (st_user_id -> id/handle): the cache write-through self_heal performs.
     links: Mutex<Vec<(String, DiscordUserId, DiscordHandle)>>,
     audit_available: bool,
     assign_fails: bool,
+    marker_fails: bool,
 }
 
 impl FakeMembers {
@@ -173,8 +175,12 @@ impl MemberWrite for FakeMembers {
         Ok(())
     }
 
-    async fn strip_roles(&self, id: DiscordUserId, _roles: &[Role]) -> Result<(), MemberError> {
-        self.roles.lock().unwrap().insert(id.0, vec![]);
+    async fn strip_roles(&self, id: DiscordUserId, roles: &[Role]) -> Result<(), MemberError> {
+        // Honor the slice: remove exactly the roles passed, leaving any others, so a verb that
+        // strips the wrong set is caught rather than masked.
+        if let Some(held) = self.roles.lock().unwrap().get_mut(&id.0) {
+            held.retain(|r| !roles.contains(r));
+        }
         Ok(())
     }
 
@@ -203,6 +209,9 @@ impl MemberWrite for FakeMembers {
     }
 
     async fn set_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError> {
+        if self.marker_fails {
+            return Err(MemberError::Discord("marker write failing".into()));
+        }
         self.markers.lock().unwrap().insert(id.0);
         Ok(())
     }
@@ -234,13 +243,13 @@ impl MemberWrite for FakeMembers {
         &self,
         st: &StUserId,
         heal: &HealAction,
-        id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), MemberError> {
-        // Record the resulting identity the source learns, by heal kind.
+        // Record the resulting identity the source learns, by heal kind. UpdateHandle writes
+        // only the handle (no id); BackfillId writes the full identity.
         let written = match heal {
-            HealAction::UpdateHandle(h) => (st.as_str().to_owned(), id, h.clone()),
-            HealAction::BackfillId(bid) => (st.as_str().to_owned(), *bid, handle.clone()),
+            HealAction::UpdateHandle(h) => (st.as_str().to_owned(), None, h.clone()),
+            HealAction::BackfillId(bid) => (st.as_str().to_owned(), Some(*bid), handle.clone()),
             HealAction::None => return Ok(()),
         };
         self.pushes.lock().unwrap().push(written);
@@ -270,6 +279,7 @@ struct VerifyWorld {
     held_roles: Vec<Role>,
     audit_available: bool,
     discord_fails: bool,
+    marker_fails: bool,
     last: Option<Result<VerifyOutcome, MemberError>>,
     forget_result: Option<Result<(), MemberError>>,
     last_target: Option<DiscordUserId>,
@@ -292,6 +302,7 @@ impl VerifyWorld {
             held_roles: Vec::new(),
             audit_available: true,
             discord_fails: false,
+            marker_fails: false,
             last: None,
             forget_result: None,
             last_target: None,
@@ -308,6 +319,7 @@ impl VerifyWorld {
         fake.seed_roles(target, self.held_roles.clone());
         fake.audit_available = self.audit_available;
         fake.assign_fails = self.discord_fails;
+        fake.marker_fails = self.marker_fails;
         fake
     }
 
@@ -348,9 +360,7 @@ impl VerifyWorld {
 
     async fn run_forget(&mut self, target: DiscordUserId, handle: DiscordHandle) {
         self.last_target = Some(target);
-        let mut fake = self.build_fake(target);
-        // Pre-stamp so the delete is observable.
-        *fake.stamped.get_mut().unwrap() = Some(target);
+        let fake = self.build_fake(target);
         self.forget_result = Some(
             Member::new(&fake, Target { id: target, handle })
                 .forget(DiscordUserId(SONIC))
@@ -398,6 +408,11 @@ async fn also_holds(world: &mut VerifyWorld, _name: String, role: String) {
 #[given("assigning roles is failing")]
 async fn role_writes_failing(world: &mut VerifyWorld) {
     world.discord_fails = true;
+}
+
+#[given("the override marker write is failing")]
+async fn marker_writes_failing(world: &mut VerifyWorld) {
+    world.marker_fails = true;
 }
 
 #[given(regex = r"^(\w+) was hand-approved by override$")]
@@ -460,7 +475,7 @@ async fn identity_written(world: &mut VerifyWorld, name: String) {
     assert!(
         pushes
             .iter()
-            .any(|(st, wid, _)| *st == st_id(&name) && *wid == id),
+            .any(|(st, wid, _)| *st == st_id(&name) && *wid == Some(id)),
         "{name}'s id was written back to the source"
     );
 }
@@ -601,6 +616,22 @@ async fn stamp_records_reason(world: &mut VerifyWorld, reason: String) {
 async fn override_marker_assigned(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
     assert!(world.fake.as_ref().unwrap().has_marker(id));
+}
+
+#[then(regex = r"^the override marker is not assigned to (\w+)$")]
+async fn override_marker_not_assigned(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert!(!world.fake.as_ref().unwrap().has_marker(id));
+}
+
+#[then("the marker failure is recorded in the audit log")]
+async fn marker_failure_recorded(world: &mut VerifyWorld) {
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
+    assert!(
+        rows.iter()
+            .any(|r| r["outcome"] == "override_marker_failed"),
+        "expected an override_marker_failed audit row; rows: {rows:?}"
+    );
 }
 
 #[then("the approval stamp is recorded")]

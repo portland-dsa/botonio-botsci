@@ -313,7 +313,6 @@ pub trait MemberWrite: Send + Sync {
         &self,
         st: &StUserId,
         heal: &HealAction,
-        id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), MemberError>;
 
@@ -347,8 +346,7 @@ pub trait Heal: MemberRead + MemberWrite {
         if matches!(heal, HealAction::None) {
             return Ok(());
         }
-        self.push_identity(&record.st_user_id, heal, id, handle)
-            .await?;
+        self.push_identity(&record.st_user_id, heal, handle).await?;
         self.link_cache(&record.st_user_id, id, handle).await?;
         Ok(())
     }
@@ -521,7 +519,6 @@ where
         &self,
         st: &StUserId,
         heal: &HealAction,
-        id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), MemberError> {
         let st_id = st.as_str();
@@ -534,7 +531,6 @@ where
             }
             HealAction::None => return Ok(()),
         };
-        let _ = id; // BackfillId carries the id to write; UpdateHandle needs only the handle.
         result.map_err(|e| MemberError::SolidarityTech(e.to_string()))
     }
 
@@ -694,19 +690,11 @@ impl<M: MemberWrite> Member<'_, M> {
         }
         Ok(())
     }
-
-    /// Clear a hand approval: remove the Manual Override marker and delete the stamp. The inverse
-    /// of [`override_approve`](Member::override_approve), reused by [`forget`](Member::forget).
-    pub async fn clear_override(&self) -> Result<(), MemberError> {
-        self.store.clear_override_marker(self.target.id).await?;
-        self.store.delete_override(self.target.id).await?;
-        Ok(())
-    }
 }
 
 impl<M: MemberRead + MemberWrite> Member<'_, M> {
     /// Reset the member to a pristine, unknown state: strip every held status role and the
-    /// override marker, delete the override stamp, and unlink the cached identity. Records one
+    /// override marker, unlink the cached identity, and delete the override stamp. Records one
     /// `member_forget` row first (audit-before-write), so the erase stays attributable even if a
     /// later write fails.
     pub async fn forget(&self, invoker: DiscordUserId) -> Result<(), MemberError> {
@@ -724,8 +712,9 @@ impl<M: MemberRead + MemberWrite> Member<'_, M> {
             )
             .await?;
         self.store.strip_roles(self.target.id, &held).await?;
-        self.clear_override().await?;
+        self.store.clear_override_marker(self.target.id).await?;
         self.store.unlink(self.target.id).await?;
+        self.store.delete_override(self.target.id).await?;
         Ok(())
     }
 }
@@ -1269,6 +1258,52 @@ mod datastore_tests {
         .unwrap();
 
         assert_eq!(st.writes(), 0, "a None heal touches no backend");
+    }
+
+    #[tokio::test]
+    async fn self_heal_skips_the_cache_when_the_source_push_fails() {
+        // The `?` between push_identity and link_cache is the source-of-truth-first guarantee:
+        // a failed Solidarity Tech write must skip the cache write entirely, so the cache never
+        // disagrees with an unhealed source.
+        let record = linked_record("st-7", 7, "rosy");
+        let st = FakeSolidarityTech::new()
+            .with_members(vec![SolidarityTechMember {
+                id: StUserId("st-7".into()),
+                email: Email("rosy@b.test".into()),
+                discord_handle: Some(DiscordHandle("old".into())),
+                discord_user_id: Some(DiscordUserId(7)),
+                membership_standing: Some(MigsStatus::MemberInGoodStanding),
+                ..Default::default()
+            }])
+            .failing_writes();
+        let discord = FakeDiscord::new();
+        // Seed the cache with the stale handle so a stray link_cache would be observable.
+        let store = InMemoryStore::new(Index::from_records(vec![linked_record("st-7", 7, "old")]));
+        let audit = NoopAudit;
+        let ds = DataStore::new(&st, &discord, &store, &audit);
+
+        let err = ds
+            .self_heal(
+                &record,
+                DiscordUserId(7),
+                &DiscordHandle("rosy".into()),
+                &HealAction::UpdateHandle(DiscordHandle("rosy".into())),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, MemberError::SolidarityTech(_)));
+        // link_cache must not have run: the cached handle is still the stale one.
+        let cached = store
+            .by_discord_id(DiscordUserId(7))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cached.discord_handle,
+            Some(DiscordHandle("old".into())),
+            "the cache write must be skipped when the source push fails"
+        );
     }
 
     #[tokio::test]

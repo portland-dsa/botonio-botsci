@@ -3,9 +3,9 @@
 //! [`FakeSolidarityTech`] holds member fixtures and applies the Discord-identity
 //! write-backs to them, so a test reads a member back with
 //! [`get`](FakeSolidarityTech::get) to confirm a self-heal landed, and reads
-//! [`writes`](FakeSolidarityTech::writes) to confirm none did. Failure injection
-//! is intentionally omitted: no current test exercises a Solidarity Tech error
-//! path; add it (with the matching [`SolidarityTechError`] variant) when one does.
+//! [`writes`](FakeSolidarityTech::writes) to confirm none did.
+//! [`failing_writes`](FakeSolidarityTech::failing_writes) makes the identity
+//! write-backs error, to exercise the self-heal source-write failure path.
 
 use std::sync::Mutex;
 
@@ -23,6 +23,7 @@ use super::member::{CustomUserProperty, SolidarityTechMember};
 pub struct FakeSolidarityTech {
     members: Mutex<Vec<SolidarityTechMember>>,
     writes: Mutex<usize>,
+    fail_writes: bool,
 }
 
 impl FakeSolidarityTech {
@@ -34,6 +35,15 @@ impl FakeSolidarityTech {
     /// Seed the member fixtures reads resolve against.
     pub fn with_members(self, members: Vec<SolidarityTechMember>) -> Self {
         *self.members.lock().unwrap() = members;
+        self
+    }
+
+    /// Make the identity write-backs ([`set_discord_handle`](SolidarityTechClient::set_discord_handle)
+    /// and [`set_discord_identity`](SolidarityTechClient::set_discord_identity)) return an error, to
+    /// exercise the self-heal source-write failure path. A failed write is not counted in
+    /// [`writes`](Self::writes).
+    pub fn failing_writes(mut self) -> Self {
+        self.fail_writes = true;
         self
     }
 
@@ -123,6 +133,12 @@ impl SolidarityTechClient for FakeSolidarityTech {
         member_id: &str,
         handle: &DiscordHandle,
     ) -> Result<(), SolidarityTechError> {
+        if self.fail_writes {
+            return Err(SolidarityTechError::Status {
+                status: 500,
+                body: "fake write failure".into(),
+            });
+        }
         self.mutate(member_id, |m| m.discord_handle = Some(handle.clone()));
         Ok(())
     }
@@ -144,6 +160,12 @@ impl SolidarityTechClient for FakeSolidarityTech {
         handle: &DiscordHandle,
         id: DiscordUserId,
     ) -> Result<(), SolidarityTechError> {
+        if self.fail_writes {
+            return Err(SolidarityTechError::Status {
+                status: 500,
+                body: "fake write failure".into(),
+            });
+        }
         self.mutate(member_id, |m| {
             m.discord_handle = Some(handle.clone());
             m.discord_user_id = Some(id);
