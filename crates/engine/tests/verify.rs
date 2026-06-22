@@ -202,6 +202,9 @@ struct VerifyWorld {
     forget_result: Option<Result<(), VerifyError>>,
     /// Whether the cache link was cleared (the member is no longer found by id).
     unlink_cleared: bool,
+    /// The Discord id targeted by the last verify run, so an assertion can read its
+    /// resulting roles without re-deriving the actor from the step text.
+    last_target: Option<DiscordUserId>,
     /// The Discord fake after a run, for asserting resulting roles and markers.
     discord: Option<FakeDiscord>,
     /// The Solidarity Tech fake after a run, for asserting identity write-backs.
@@ -227,12 +230,14 @@ impl VerifyWorld {
             last: None,
             forget_result: None,
             unlink_cleared: false,
+            last_target: None,
             discord: None,
             st: None,
         }
     }
 
     async fn run(&mut self, target: DiscordUserId, handle: DiscordHandle) {
+        self.last_target = Some(target);
         let store = CountingStore {
             inner: InMemoryStore::new(Index::build(self.members.clone())),
             links: self.cache_writes.clone(),
@@ -260,6 +265,7 @@ impl VerifyWorld {
     }
 
     async fn run_by_email(&mut self, target: DiscordUserId, handle: DiscordHandle, email: Email) {
+        self.last_target = Some(target);
         let store = CountingStore {
             inner: InMemoryStore::new(Index::build(self.members.clone())),
             links: self.cache_writes.clone(),
@@ -422,9 +428,16 @@ async fn handle_written(world: &mut VerifyWorld, name: String) {
 #[then(regex = r"^the (\w+) and (\w+) roles are stripped from (\w+)$")]
 async fn roles_stripped(world: &mut VerifyWorld, first: String, second: String, name: String) {
     let (id, _) = actor(&name);
+    let (stale_a, stale_b) = (role_by_name(&first), role_by_name(&second));
     let held = world.discord.as_ref().unwrap().roles_of(id);
-    assert!(!held.contains(&role_by_name(&first)), "{first} stripped");
-    assert!(!held.contains(&role_by_name(&second)), "{second} stripped");
+    assert!(!held.contains(&stale_a), "{first} stripped");
+    assert!(!held.contains(&stale_b), "{second} stripped");
+    // The freshly granted role is never stripped along with the stale ones: a role
+    // distinct from both must survive.
+    assert!(
+        held.iter().any(|r| *r != stale_a && *r != stale_b),
+        "the granted role must survive the strip"
+    );
 }
 
 #[then("nothing is written back to our records")]
@@ -442,12 +455,11 @@ async fn nothing_written(world: &mut VerifyWorld) {
 #[then("the verification is refused")]
 async fn refused(world: &mut VerifyWorld) {
     assert!(matches!(world.last, Some(Ok(VerifyOutcome::Conflict))));
-    // A conflict assigns nothing; the conflicting target holds no managed role.
+    // A conflict assigns nothing: the verified target holds no managed role.
+    let target = world.last_target.expect("a verify run recorded the target");
     assert!(
-        world
-            .discord
-            .as_ref()
-            .is_none_or(|d| d.roles_of(actor("Eggman").0).is_empty())
+        world.discord.as_ref().unwrap().roles_of(target).is_empty(),
+        "a refused verification grants no role"
     );
 }
 
@@ -494,8 +506,14 @@ async fn sonic_verifies_by_email(world: &mut VerifyWorld, name: String) {
 #[then(regex = r"^the email lookup finds no record$")]
 async fn email_not_found(world: &mut VerifyWorld) {
     assert!(matches!(world.last, Some(Ok(VerifyOutcome::NotFound))));
-    // Independent check: the not-found path performs no write-back. `find_by_email` is a
-    // read and does not bump `writes()`, so a stray write here would trip this.
+    // A miss writes back nothing: no Discord role on the target, and no Solidarity Tech
+    // write either. `find_by_email` is a read that never bumps `writes()`, so a stray
+    // write of either kind trips one of these.
+    let target = world.last_target.expect("a verify run recorded the target");
+    assert!(
+        world.discord.as_ref().unwrap().roles_of(target).is_empty(),
+        "not-found grants no role"
+    );
     assert_eq!(
         world.st.as_ref().unwrap().writes(),
         0,

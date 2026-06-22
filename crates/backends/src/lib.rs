@@ -1,8 +1,8 @@
 //! Backend client traits, their HTTP implementations, and the [`Clients`] bundle
 //! that hands them to the engine.
 //!
-//! Each submodule follows the same shape: a `*Client` trait (mockable via the
-//! `mock` cargo feature), a live `*Http` struct that implements it, a `*Error`
+//! Each submodule follows the same shape: a `*Client` trait (hand-faked via the
+//! `fakes` cargo feature), a live `*Http` struct that implements it, a `*Error`
 //! enum, and `from_env` plus test constructors. [`Clients`] aggregates one live
 //! client per backend so the engine can take a single `&Clients` rather than two
 //! separate arguments.

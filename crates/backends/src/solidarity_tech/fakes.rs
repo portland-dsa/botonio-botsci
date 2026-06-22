@@ -74,6 +74,11 @@ impl SolidarityTechClient for FakeSolidarityTech {
         email: Option<&Email>,
         phone: Option<&Phone>,
     ) -> Result<Vec<SolidarityTechMember>, SolidarityTechError> {
+        // Mirror the real backend's guard: it refuses an unfiltered query rather
+        // than fetching everyone (see SolidarityTechHttp::find_members).
+        if email.is_none() && phone.is_none() {
+            return Err(SolidarityTechError::NoQueryCriteria);
+        }
         let members = self.members.lock().unwrap();
         let hits = members
             .iter()
