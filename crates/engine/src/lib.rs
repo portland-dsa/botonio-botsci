@@ -23,6 +23,7 @@ pub mod error;
 pub mod verify;
 pub use error::{Error, Result};
 pub mod paging;
+pub mod scan;
 pub mod seam;
 pub mod store;
 pub mod util;
