@@ -47,6 +47,11 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
 
 /// Build a `MemberRecord` for `name` that the cache knows, with `MemberInGoodStanding`.
 fn known_record(name: &str) -> MemberRecord {
+    known_record_standing(name, MigsStatus::MemberInGoodStanding)
+}
+
+/// Build a `MemberRecord` for `name` that the cache knows, with the given `standing`.
+fn known_record_standing(name: &str, standing: MigsStatus) -> MemberRecord {
     let (id, handle) = actor(name);
     MemberRecord {
         st_user_id: StUserId(format!("st-{}", name.to_lowercase())),
@@ -54,7 +59,7 @@ fn known_record(name: &str) -> MemberRecord {
         discord_handle: Some(handle),
         email: Email(format!("{}@b.test", name.to_lowercase())),
         full_name: Some(name.to_owned()),
-        standing: Some(MigsStatus::MemberInGoodStanding),
+        standing: Some(standing),
         join_date: None,
         expires: None,
         membership_type: None,
@@ -170,6 +175,34 @@ async fn roster_already_member(world: &mut BulkWorld, name: String) {
 #[given(regex = r"^(\w+) is a bot in the roster$")]
 async fn roster_bot(world: &mut BulkWorld, name: String) {
     world.roster.push(bot_member(&name));
+}
+
+#[given(
+    regex = r"^(\w+) is in the roster already holding the Member role, known to us as a Member$"
+)]
+async fn roster_known_already_member(world: &mut BulkWorld, name: String) {
+    world.roster.push(roster_member(&name, vec![Role::Member]));
+    world.known.push(known_record(&name));
+}
+
+#[given(
+    regex = r"^(\w+) is in the roster already holding the Dues Expired role, known to us as Dues Expired$"
+)]
+async fn roster_known_already_dues_expired(world: &mut BulkWorld, name: String) {
+    world
+        .roster
+        .push(roster_member(&name, vec![Role::DuesExpired]));
+    world
+        .known
+        .push(known_record_standing(&name, MigsStatus::Lapsed));
+}
+
+#[given(regex = r"^(\w+) is in the roster holding only the Unverified role, unknown to us$")]
+async fn roster_unverified_unknown(world: &mut BulkWorld, name: String) {
+    world
+        .roster
+        .push(roster_member(&name, vec![Role::Unverified]));
+    // not added to known - still a miss, but a bare Unverified counts as unmanaged
 }
 
 #[given("a started session whose queue is Shadow then Silver")]
@@ -331,6 +364,12 @@ async fn sweep_matches_as(world: &mut BulkWorld, count: usize, role_name: String
 async fn sweep_counts_misses(world: &mut BulkWorld, count: usize) {
     let tally = world.tally.as_ref().expect("no tally");
     assert_eq!(tally.misses, count, "miss count mismatch");
+}
+
+#[then(regex = r"^the sweep leaves (\d+) members? unchanged$")]
+async fn sweep_leaves_unchanged(world: &mut BulkWorld, count: usize) {
+    let tally = world.tally.as_ref().expect("no tally");
+    assert_eq!(tally.unchanged, count, "unchanged count mismatch");
 }
 
 #[then(regex = r"^the next pending member is (\w+)$")]

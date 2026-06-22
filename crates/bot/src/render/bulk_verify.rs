@@ -51,8 +51,8 @@ pub fn resume_embed(
 }
 
 /// Build the preview embed shown before the moderator confirms a bulk-verify run.
-/// Lists each role that has a non-zero matched count, then misses and (when non-zero)
-/// conflicts.
+/// Lists each role that has a non-zero change count (members already in their correct role
+/// are summarised separately, never as a change), then misses and (when non-zero) conflicts.
 pub fn preview_embed(scope: BulkScope, tally: &PreviewTally) -> CreateEmbed {
     let mut lines: Vec<String> = Vec::new();
     lines.push(scope_line(scope).to_string());
@@ -67,6 +67,10 @@ pub fn preview_embed(scope: BulkScope, tally: &PreviewTally) -> CreateEmbed {
         if *count > 0 {
             lines.push(format!("{}: {}", role.as_str(), count));
         }
+    }
+
+    if tally.unchanged > 0 {
+        lines.push(format!("Already in the right role: {}", tally.unchanged));
     }
 
     lines.push(format!("Not matched (wizard queue): {}", tally.misses));
@@ -197,12 +201,13 @@ mod tests {
     #[test]
     fn preview_embed_mixed_tally_skips_zero_rows_and_shows_conflicts() {
         let tally = PreviewTally {
-            scanned: 10,
+            scanned: 16,
             matched: vec![
                 (Role::Member, 4),
                 (Role::DuesExpired, 0),
                 (Role::Unverified, 2),
             ],
+            unchanged: 6,
             misses: 3,
             conflicts: 1,
         };
@@ -212,6 +217,10 @@ mod tests {
         assert!(d.contains("Member: 4"), "Member count present");
         assert!(!d.contains("Dues Expired: 0"), "zero row must be skipped");
         assert!(d.contains("Unverified: 2"), "Unverified count present");
+        assert!(
+            d.contains("Already in the right role: 6"),
+            "unchanged count present"
+        );
         assert!(d.contains("Not matched"), "miss line present");
         assert!(d.contains("Conflicts: 1"), "conflict line present");
         assert!(d.contains("/verify"), "conflict note present");
@@ -227,6 +236,7 @@ mod tests {
                 (Role::DuesExpired, 0),
                 (Role::Unverified, 0),
             ],
+            unchanged: 0,
             misses: 0,
             conflicts: 0,
         };
@@ -235,6 +245,10 @@ mod tests {
         assert!(
             !desc(&v).contains("Conflicts"),
             "no conflict line when zero"
+        );
+        assert!(
+            !desc(&v).contains("Already in the right role"),
+            "no unchanged line when zero"
         );
     }
 
