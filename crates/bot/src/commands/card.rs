@@ -6,7 +6,7 @@ use chrono::Utc;
 use serenity::all::User;
 
 use engine::backends::util::DiscordUserId;
-use engine::card::{self, CardView, PresentMember};
+use engine::card::{CardRead, CardView, PresentMember};
 
 use crate::data::{Context, Error};
 use crate::lookup::{self, LookupOutcome};
@@ -46,7 +46,6 @@ async fn show_for_target(ctx: Context<'_>, target: &User) -> Result<(), Error> {
     // concrete type the trait is implemented for; rate_limiter is a concrete
     // `&RateLimiter` where deref coercion applies (and clippy prefers the bare `&`).
     let outcome = lookup::lookup(
-        &*data.store,
         &*data.store,
         &*data.auditor,
         &data.rate_limiter,
@@ -143,7 +142,7 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
     // Resolve through both the member store and the override log so a manually-approved
     // member sees their override card, not a "record not found" response.
     let data = ctx.data();
-    let view = match card::resolve_view(&*data.store, &*data.store, &subject).await {
+    let view = match data.store.card_view(&subject).await {
         Ok(v) => v,
         // Any store or override-log read failure lands here. Log the detail and give
         // the member a generic, PII-free reply rather than surfacing the error. (The
