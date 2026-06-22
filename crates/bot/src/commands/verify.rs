@@ -5,12 +5,15 @@
 use std::time::Duration;
 
 use serenity::all::{
-    ActionRowComponent, ButtonStyle, CreateActionRow, CreateButton, CreateEmbed,
-    CreateInteractionResponse, EditInteractionResponse, User,
+    ActionRowComponent, ButtonStyle, ComponentInteraction, CreateActionRow, CreateButton,
+    CreateEmbed, CreateInteractionResponse, EditInteractionResponse, Message, User,
 };
 
+use engine::backends::discord::DiscordHttp;
 use engine::backends::util::{DiscordHandle, DiscordUserId};
 use engine::verify::{self, VerifyOutcome};
+
+use domain::Role;
 
 use crate::data::{Context, Error};
 use crate::moderator::invoker_is_moderator;
@@ -26,6 +29,24 @@ const IDLE: Duration = Duration::from_secs(180);
 
 /// The "Override and approve" button id - shown only on the not-found state.
 const OVERRIDE_BUTTON_ID: &str = "verify_override_approve";
+
+/// Outcome returned by `verify_step` once the exchange with the moderator ends.
+// `Verified`'s inner `Role` is not read by the current callers.
+#[allow(dead_code)]
+pub(crate) enum StepOutcome {
+    /// The member was found in Solidarity Tech and the role was assigned.
+    Verified(Role),
+    /// The member was hand-approved via the Manual Override path.
+    Overridden,
+    /// The moderator exhausted retries and did not override (or pressed a wizard control).
+    NotFoundExhausted,
+    /// Solidarity Tech found a handle/account conflict; nothing was changed.
+    Conflict,
+    /// The moderator did not interact within the idle window.
+    Expired,
+    /// A backend error occurred.
+    Errored,
+}
 
 /// Verify a member and assign their standing role. Moderators only.
 ///
@@ -122,7 +143,7 @@ fn header(target: &User) -> (String, String, String) {
 /// One ephemeral message hosting the email-lookup button and every outcome edit.
 async fn manual_verify_flow(
     ctx: Context<'_>,
-    discord: &engine::backends::discord::DiscordHttp,
+    discord: &DiscordHttp,
     target: &User,
     invoker: DiscordUserId,
     target_id: DiscordUserId,
@@ -140,10 +161,65 @@ async fn manual_verify_flow(
     let handle_msg = ctx
         .send(reply(
             state_embed(&display, &handle, &avatar, &VerifyState::Prompt),
-            vec![buttons_for(&VerifyState::Prompt)],
+            vec![buttons_for(&VerifyState::Prompt, &[])],
         ))
         .await?;
     let message = handle_msg.message().await?;
+
+    let (outcome, _) = verify_step(
+        ctx,
+        &message,
+        discord,
+        target,
+        invoker,
+        target_id,
+        target_handle,
+        &[],
+    )
+    .await?;
+
+    // The step itself edits the message for most terminal states via interaction
+    // responses. The only state that requires editing the host reply handle directly
+    // is a timeout, where no interaction is available.
+    if matches!(outcome, StepOutcome::Expired) {
+        handle_msg
+            .edit(
+                ctx,
+                reply(
+                    state_embed(&display, &handle, &avatar, &VerifyState::Expired),
+                    vec![],
+                ),
+            )
+            .await?;
+    }
+
+    Ok(())
+}
+
+/// Drive the email-lookup / override exchange for a single member on an already-sent
+/// host message. Returns the outcome and, if the moderator pressed one of
+/// `extra_buttons` (wizard controls like Skip or Stop), the interaction for that press
+/// so the caller can own those semantics.
+///
+/// For `/verify`, pass `&[]` for `extra_buttons` and ignore the second field; the
+/// host message is created by `manual_verify_flow` and the result is discarded.
+///
+/// On `StepOutcome::Expired`, the caller is responsible for editing the host message
+/// to show the expired state (the step has no access to the reply handle required for
+/// ephemeral message edits when no interaction is present).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn verify_step(
+    ctx: Context<'_>,
+    message: &Message,
+    discord: &DiscordHttp,
+    target: &User,
+    invoker: DiscordUserId,
+    target_id: DiscordUserId,
+    target_handle: DiscordHandle,
+    extra_buttons: &[CreateButton],
+) -> Result<(StepOutcome, Option<ComponentInteraction>), Error> {
+    let (display, handle, avatar) = header(target);
+
     let modal_id = format!("{EMAIL_MODAL_ID}:{}", message.id.get());
     let sctx = ctx.serenity_context();
 
@@ -155,17 +231,20 @@ async fn manual_verify_flow(
             .timeout(IDLE)
             .await
         else {
-            handle_msg
-                .edit(
-                    ctx,
-                    reply(
-                        state_embed(&display, &handle, &avatar, &VerifyState::Expired),
-                        vec![],
-                    ),
-                )
-                .await?;
-            return Ok(());
+            // No interaction arrived before the idle window closed. The caller edits
+            // the host message to show the expired state because ephemeral edits
+            // require the original reply handle, which the step does not hold.
+            return Ok((StepOutcome::Expired, None));
         };
+
+        // If the moderator pressed one of the wizard's extra controls (Skip, Stop,
+        // etc.), return that interaction immediately so the caller can handle it. These
+        // are any button that is not one the step itself owns.
+        let is_step_button = button.data.custom_id == LOOKUP_BUTTON_ID
+            || button.data.custom_id == OVERRIDE_BUTTON_ID;
+        if !extra_buttons.is_empty() && !is_step_button {
+            return Ok((StepOutcome::NotFoundExhausted, Some(button)));
+        }
 
         // The override button is the deliberate last resort: hand-approve a member
         // Solidarity Tech does not know, granting Member plus the Manual Override marker.
@@ -187,7 +266,7 @@ async fn manual_verify_flow(
                             .components(vec![]),
                     )
                     .await?;
-                return Ok(());
+                return Ok((StepOutcome::Errored, None));
             }
 
             // Collect an optional reason in a modal before approving.
@@ -233,16 +312,7 @@ async fn manual_verify_flow(
                 }
             };
             let Some(submit) = submit else {
-                handle_msg
-                    .edit(
-                        ctx,
-                        reply(
-                            state_embed(&display, &handle, &avatar, &VerifyState::Expired),
-                            vec![],
-                        ),
-                    )
-                    .await?;
-                return Ok(());
+                return Ok((StepOutcome::Expired, None));
             };
             // Acknowledge so the audit/stamp/role writes below cannot blow Discord's
             // 3-second interaction deadline.
@@ -250,7 +320,7 @@ async fn manual_verify_flow(
                 .create_response(sctx, CreateInteractionResponse::Acknowledge)
                 .await?;
             let reason = parse_reason(&read_input(&submit, REASON_FIELD_ID));
-            let next = match verify::override_approve(
+            let (next, outcome) = match verify::override_approve(
                 discord,
                 &*data.store,
                 &*data.auditor,
@@ -260,10 +330,10 @@ async fn manual_verify_flow(
             )
             .await
             {
-                Ok(()) => VerifyState::Overridden,
+                Ok(()) => (VerifyState::Overridden, StepOutcome::Overridden),
                 Err(e) => {
                     tracing::error!(error = %e, "override approve failed");
-                    VerifyState::Error
+                    (VerifyState::Error, StepOutcome::Errored)
                 }
             };
             submit
@@ -274,7 +344,7 @@ async fn manual_verify_flow(
                         .components(vec![]),
                 )
                 .await?;
-            return Ok(());
+            return Ok((outcome, None));
         }
 
         // Open the modal in response to the button.
@@ -318,16 +388,7 @@ async fn manual_verify_flow(
             }
         };
         let Some(submit) = submit else {
-            handle_msg
-                .edit(
-                    ctx,
-                    reply(
-                        state_embed(&display, &handle, &avatar, &VerifyState::Expired),
-                        vec![],
-                    ),
-                )
-                .await?;
-            return Ok(());
+            return Ok((StepOutcome::Expired, None));
         };
 
         // Acknowledge the submission immediately (a deferred message update) so the live
@@ -375,7 +436,7 @@ async fn manual_verify_flow(
                 EditInteractionResponse::new()
                     .embed(state_embed(&display, &handle, &avatar, &next))
                     .components(if keep_button {
-                        vec![buttons_for(&next)]
+                        vec![buttons_for(&next, extra_buttons)]
                     } else {
                         vec![]
                     }),
@@ -383,15 +444,21 @@ async fn manual_verify_flow(
             .await?;
 
         if !keep_button {
-            return Ok(());
+            let outcome = match next {
+                VerifyState::Verified(role) => StepOutcome::Verified(role),
+                VerifyState::Conflict => StepOutcome::Conflict,
+                _ => StepOutcome::Errored,
+            };
+            return Ok((outcome, None));
         }
         // Loop: await the next button press on the same message.
     }
 }
 
 /// The button row for a given state: the lookup/retry button always, plus the red
-/// override button once a lookup has missed (the deliberate last resort).
-fn buttons_for(state: &VerifyState) -> CreateActionRow {
+/// override button once a lookup has missed (the deliberate last resort), and any
+/// extra buttons the caller provides (e.g., Skip/Stop for the bulk wizard).
+fn buttons_for(state: &VerifyState, extra_buttons: &[CreateButton]) -> CreateActionRow {
     let mut buttons = vec![
         CreateButton::new(LOOKUP_BUTTON_ID)
             .label("Look up by email")
@@ -404,6 +471,7 @@ fn buttons_for(state: &VerifyState) -> CreateActionRow {
                 .style(ButtonStyle::Danger),
         );
     }
+    buttons.extend(extra_buttons.iter().cloned());
     CreateActionRow::Buttons(buttons)
 }
 

@@ -1,3 +1,4 @@
+pub mod bulk_verify;
 pub mod card;
 pub mod forget;
 pub mod help;
@@ -13,6 +14,7 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         card::membership_card_menu(),
         card::lookup(),
         verify::verify(),
+        bulk_verify::bulk_verify(),
         setup::setup(),
         help::help(),
     ];

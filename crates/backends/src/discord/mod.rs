@@ -20,7 +20,7 @@ mod roles;
 pub use client::DiscordClient;
 pub use error::DiscordError;
 pub use http::{DiscordHttp, resolve_managed_roles};
-pub use roles::{ManagedRole, MemberRoles, Role};
+pub use roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
 
 #[cfg(feature = "mock")]
 pub use client::MockDiscordClient;

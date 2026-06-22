@@ -331,6 +331,160 @@ pub trait OverrideLog: Send + Sync {
     async fn delete_override(&self, subject: DiscordUserId) -> Result<(), Self::Error>;
 }
 
+/// Which members `/bulk-verify` sweeps. The DB token spellings are owned here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkScope {
+    /// Members holding none of the managed status roles - the onboarding/repair default.
+    UnmanagedOnly,
+    /// Every member, re-evaluated - the opt-in full resync.
+    WholeGuild,
+}
+
+impl BulkScope {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            BulkScope::UnmanagedOnly => "unmanaged",
+            BulkScope::WholeGuild => "whole_guild",
+        }
+    }
+    /// Decode a stored token; an unrecognized value is `None` (caller treats a
+    /// corrupt row as no session, never silently guesses a scope).
+    pub fn from_token(t: &str) -> Option<Self> {
+        match t {
+            "unmanaged" => Some(BulkScope::UnmanagedOnly),
+            "whole_guild" => Some(BulkScope::WholeGuild),
+            _ => None,
+        }
+    }
+}
+
+/// A bulk session's lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkStatus {
+    InProgress,
+    Complete,
+    Abandoned,
+}
+
+impl BulkStatus {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            BulkStatus::InProgress => "in_progress",
+            BulkStatus::Complete => "complete",
+            BulkStatus::Abandoned => "abandoned",
+        }
+    }
+    pub fn from_token(t: &str) -> Option<Self> {
+        match t {
+            "in_progress" => Some(BulkStatus::InProgress),
+            "complete" => Some(BulkStatus::Complete),
+            "abandoned" => Some(BulkStatus::Abandoned),
+            _ => None,
+        }
+    }
+}
+
+/// Where one queued miss stands in the wizard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissState {
+    Pending,
+    Verified,
+    Skipped,
+}
+
+impl MissState {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            MissState::Pending => "pending",
+            MissState::Verified => "verified",
+            MissState::Skipped => "skipped",
+        }
+    }
+    pub fn from_token(t: &str) -> Option<Self> {
+        match t {
+            "pending" => Some(MissState::Pending),
+            "verified" => Some(MissState::Verified),
+            "skipped" => Some(MissState::Skipped),
+            _ => None,
+        }
+    }
+}
+
+/// One in-progress (or terminal) per-guild bulk session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkSession {
+    pub guild: DiscordGuildId,
+    pub scope: BulkScope,
+    pub status: BulkStatus,
+    pub started_by: DiscordUserId,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One member in a session's frozen miss queue. `handle` is a display snapshot
+/// captured at sweep time and is never read back for matching - every wizard action
+/// keys on `discord_user_id`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BulkMiss {
+    pub discord_user_id: DiscordUserId,
+    pub handle: Option<DiscordHandle>,
+    pub position: i32,
+    pub state: MissState,
+}
+
+/// The pending/verified/skipped tally for the resume prompt and final summary.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MissCounts {
+    pub pending: usize,
+    pub verified: usize,
+    pub skipped: usize,
+}
+
+/// The resumable per-guild bulk-verify session: one in-progress session per guild,
+/// any moderator resumes it. Wholesale-replace semantics on start (like
+/// [`RosterWrite::replace_roster`]), so the Postgres impl is granted `DELETE`.
+/// Fallible/async from the start; the in-memory impl's error is [`Infallible`].
+#[async_trait]
+pub trait BulkSessionStore: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// The guild's session, whatever its status, or `None` if it never had one.
+    async fn load_session(&self, guild: DiscordGuildId)
+    -> Result<Option<BulkSession>, Self::Error>;
+
+    /// Replace the guild's session and its whole miss queue in one shot (deletes any
+    /// prior session/queue first). `misses` is stored in `position` order, all
+    /// `Pending`. This is both the initial start and "Start over".
+    async fn start_session(
+        &self,
+        session: &BulkSession,
+        misses: &[BulkMiss],
+    ) -> Result<(), Self::Error>;
+
+    /// The lowest-position still-`Pending` miss for the guild, or `None` when the
+    /// queue is exhausted.
+    async fn next_pending(&self, guild: DiscordGuildId) -> Result<Option<BulkMiss>, Self::Error>;
+
+    /// Set one queued member's state (keyed on the id), and touch the session's
+    /// `updated_at`. A member not in the queue is a silent no-op.
+    async fn mark_miss(
+        &self,
+        guild: DiscordGuildId,
+        member: DiscordUserId,
+        state: MissState,
+    ) -> Result<(), Self::Error>;
+
+    /// The pending/verified/skipped counts for the guild's queue.
+    async fn counts(&self, guild: DiscordGuildId) -> Result<MissCounts, Self::Error>;
+
+    /// Mark the session `Complete` (called when no pending miss remains).
+    async fn complete_session(&self, guild: DiscordGuildId) -> Result<(), Self::Error>;
+
+    /// Mark the session `Abandoned` - the lazy staleness purge at entry. Leaves the
+    /// queue rows; the next `start_session` replaces them.
+    async fn abandon_session(&self, guild: DiscordGuildId) -> Result<(), Self::Error>;
+}
+
 /// The in-memory [`MemberStore`]: a snapshot [`Index`] behind a
 /// `RwLock<Arc<Index>>`. Reads clone out the `Arc` and never block a concurrent
 /// rebuild; the write lock is held only for the pointer swap itself.
@@ -340,6 +494,10 @@ pub struct InMemoryStore {
     /// Hand-approval stamps: subject Discord id to its [`OverrideRecord`]. The
     /// in-memory analogue of the `manual_override` table, insert-once just like it.
     overrides: RwLock<HashMap<u64, OverrideRecord>>,
+    /// The single per-guild bulk session + its queue (in-memory analogue of the
+    /// bulk_verify_session/miss tables). `BTreeMap<position, BulkMiss>` keeps the
+    /// queue ordered; the option is the at-most-one session.
+    bulk: RwLock<Option<(BulkSession, std::collections::BTreeMap<i32, BulkMiss>)>>,
 }
 
 impl InMemoryStore {
@@ -349,6 +507,7 @@ impl InMemoryStore {
             index: RwLock::new(Arc::new(index)),
             config: RwLock::new(GuildConfig::default()),
             overrides: RwLock::new(HashMap::new()),
+            bulk: RwLock::new(None),
         }
     }
 
@@ -502,6 +661,89 @@ impl ConfigStore for InMemoryStore {
         config: &GuildConfig,
     ) -> Result<(), Infallible> {
         *self.config.write().expect("config lock poisoned") = config.clone();
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl BulkSessionStore for InMemoryStore {
+    type Error = Infallible;
+
+    async fn load_session(
+        &self,
+        _guild: DiscordGuildId,
+    ) -> Result<Option<BulkSession>, Infallible> {
+        Ok(self
+            .bulk
+            .read()
+            .expect("bulk lock poisoned")
+            .as_ref()
+            .map(|(s, _)| s.clone()))
+    }
+
+    async fn start_session(
+        &self,
+        session: &BulkSession,
+        misses: &[BulkMiss],
+    ) -> Result<(), Infallible> {
+        let queue = misses.iter().map(|m| (m.position, m.clone())).collect();
+        *self.bulk.write().expect("bulk lock poisoned") = Some((session.clone(), queue));
+        Ok(())
+    }
+
+    async fn next_pending(&self, _guild: DiscordGuildId) -> Result<Option<BulkMiss>, Infallible> {
+        Ok(self
+            .bulk
+            .read()
+            .expect("bulk lock poisoned")
+            .as_ref()
+            .and_then(|(_, q)| q.values().find(|m| m.state == MissState::Pending).cloned()))
+    }
+
+    async fn mark_miss(
+        &self,
+        _guild: DiscordGuildId,
+        member: DiscordUserId,
+        state: MissState,
+    ) -> Result<(), Infallible> {
+        let mut guard = self.bulk.write().expect("bulk lock poisoned");
+        if let Some((session, q)) = guard.as_mut()
+            && let Some(miss) = q.values_mut().find(|m| m.discord_user_id == member)
+        {
+            miss.state = state;
+            session.updated_at = Utc::now();
+        }
+        Ok(())
+    }
+
+    async fn counts(&self, _guild: DiscordGuildId) -> Result<MissCounts, Infallible> {
+        let guard = self.bulk.read().expect("bulk lock poisoned");
+        let mut counts = MissCounts::default();
+        if let Some((_, q)) = guard.as_ref() {
+            for m in q.values() {
+                match m.state {
+                    MissState::Pending => counts.pending += 1,
+                    MissState::Verified => counts.verified += 1,
+                    MissState::Skipped => counts.skipped += 1,
+                }
+            }
+        }
+        Ok(counts)
+    }
+
+    async fn complete_session(&self, _guild: DiscordGuildId) -> Result<(), Infallible> {
+        if let Some((s, _)) = self.bulk.write().expect("bulk lock poisoned").as_mut() {
+            s.status = BulkStatus::Complete;
+            s.updated_at = Utc::now();
+        }
+        Ok(())
+    }
+
+    async fn abandon_session(&self, _guild: DiscordGuildId) -> Result<(), Infallible> {
+        if let Some((s, _)) = self.bulk.write().expect("bulk lock poisoned").as_mut() {
+            s.status = BulkStatus::Abandoned;
+            s.updated_at = Utc::now();
+        }
         Ok(())
     }
 }
@@ -766,5 +1008,25 @@ mod tests {
         let got = store.get_override(DiscordUserId(7)).await.unwrap().unwrap();
         assert_eq!(got.approved_by, DiscordUserId(99));
         assert_eq!(got.note.as_deref(), Some("vouched in person"));
+    }
+
+    #[test]
+    fn bulk_enum_tokens_round_trip() {
+        for s in [BulkScope::UnmanagedOnly, BulkScope::WholeGuild] {
+            assert_eq!(BulkScope::from_token(s.as_token()), Some(s));
+        }
+        for s in [
+            BulkStatus::InProgress,
+            BulkStatus::Complete,
+            BulkStatus::Abandoned,
+        ] {
+            assert_eq!(BulkStatus::from_token(s.as_token()), Some(s));
+        }
+        for s in [MissState::Pending, MissState::Verified, MissState::Skipped] {
+            assert_eq!(MissState::from_token(s.as_token()), Some(s));
+        }
+        assert_eq!(BulkScope::from_token("nonsense"), None);
+        assert_eq!(BulkStatus::from_token("nonsense"), None);
+        assert_eq!(MissState::from_token("nonsense"), None);
     }
 }

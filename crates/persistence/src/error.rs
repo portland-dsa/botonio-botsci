@@ -12,4 +12,8 @@ pub enum PersistenceError {
     /// A schema-migration failure (the `migrate` phase).
     #[error(transparent)]
     Migrate(#[from] sqlx::migrate::MigrateError),
+    /// A stored text token did not decode to a known enum value - a corrupt or
+    /// out-of-date row, surfaced rather than silently coerced to a default.
+    #[error("corrupt stored token: {0}")]
+    BadToken(String),
 }

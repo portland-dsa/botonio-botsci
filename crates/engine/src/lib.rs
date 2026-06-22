@@ -17,9 +17,10 @@
 pub use backends;
 
 pub mod audit;
+pub mod bulk;
 pub mod card;
-pub mod verify;
 pub mod error;
+pub mod verify;
 pub use error::{Error, Result};
 pub mod paging;
 pub mod seam;

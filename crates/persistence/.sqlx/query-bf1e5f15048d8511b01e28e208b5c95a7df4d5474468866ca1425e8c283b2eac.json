@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bulk_verify_session SET status = 'abandoned', updated_at = now() WHERE guild_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bf1e5f15048d8511b01e28e208b5c95a7df4d5474468866ca1425e8c283b2eac"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE bulk_verify_session SET updated_at = now() WHERE guild_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d611fca575ef8d9b7d69f9a69ac4770f41fcdc55cf2c74023e2584d3a831e918"
+}
