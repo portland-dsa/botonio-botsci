@@ -100,21 +100,32 @@ async fn run_once(
             floor = threshold.floor,
             "scheduled scan ABORTED by the mass-demote tripwire; no roles changed"
         );
-        if let Some(channel) = mod_channel {
-            let embed = crate::render::scan::scan_alert_embed(
-                demotions,
-                scanned,
-                threshold.percent,
-                threshold.floor,
-            );
-            if let Err(e) = channel
-                .send_message(
-                    http.as_ref(),
-                    serenity::all::CreateMessage::new().embed(embed),
-                )
-                .await
-            {
-                tracing::error!(error = %e, "scheduled scan: failed to post the tripwire alert");
+        match mod_channel {
+            Some(channel) => {
+                let embed = crate::render::scan::scan_alert_embed(
+                    demotions,
+                    scanned,
+                    threshold.percent,
+                    threshold.floor,
+                );
+                if let Err(e) = channel
+                    .send_message(
+                        http.as_ref(),
+                        serenity::all::CreateMessage::new().embed(embed),
+                    )
+                    .await
+                {
+                    tracing::error!(error = %e, "scheduled scan: failed to post the tripwire alert");
+                }
+            }
+            // No mod-approval channel configured: the abort would otherwise be silent. Log
+            // loudly so a paused mass-demote still leaves a visible trace; /setup also warns
+            // when the scan is enabled without a channel set.
+            None => {
+                tracing::error!(
+                    "scheduled scan: tripwire aborted but no mod-approval channel is configured; \
+                     the mass-demote alert could not be delivered - set one in /setup"
+                );
             }
         }
         return;

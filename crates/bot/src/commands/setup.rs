@@ -129,13 +129,45 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 }
                 let guild = DiscordGuildId(data.config.guild_id);
                 let mut cfg = GuildConfig::clone(&data.guild_config.load());
-                cfg.scan_enabled = !cfg.scan_enabled;
+                let was_enabled = cfg.scan_enabled;
+                cfg.scan_enabled = !was_enabled;
+                let no_mod_channel = cfg.mod_approval_channel.is_none();
                 let note = if let Err(e) = data.store.save_config(guild, &cfg).await {
                     tracing::error!(error = %e, "setup: failed to save guild config");
                     Some("Something went wrong saving that - please try again.".to_owned())
                 } else {
+                    let now_enabled = cfg.scan_enabled;
                     data.guild_config.store(std::sync::Arc::new(cfg));
-                    None
+                    // Attribute the toggle like every other config change (see `apply_selection`):
+                    // enabling a background job that can demote roles is a mod action to log.
+                    if let Err(e) = data
+                        .auditor
+                        .record(
+                            invoker,
+                            invoker,
+                            "config.set_scan",
+                            serde_json::json!({
+                                "field": "scheduled scan",
+                                "old": was_enabled,
+                                "new": now_enabled
+                            }),
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "setup: failed to audit config change");
+                    }
+                    // Turning the scan on with no mod-approval channel leaves the mass-demote
+                    // tripwire alert nowhere to post; warn rather than enable it silently.
+                    if now_enabled && no_mod_channel {
+                        Some(
+                            "Scheduled scan on. Note: no mod-approval channel is set, so the \
+                             safety alert can't be posted if a scan is paused - set one under \
+                             Set channels."
+                                .to_owned(),
+                        )
+                    } else {
+                        None
+                    }
                 };
                 edit_panel(&ctx, &interaction, accent, panel_buttons(), note.as_deref()).await;
             }
