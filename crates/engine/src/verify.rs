@@ -601,6 +601,330 @@ impl VerifyMethod {
     }
 }
 
+/// The non-identifying audit detail for a verify-family outcome: the outcome verb, the method,
+/// and (when a role is granted) its name - never PII or the conflicting account.
+fn verify_detail(outcome: &str, role: Option<Role>, method: VerifyMethod) -> serde_json::Value {
+    match role {
+        Some(r) => {
+            serde_json::json!({ "outcome": outcome, "role": r.as_str(), "method": method.as_str() })
+        }
+        None => serde_json::json!({ "outcome": outcome, "method": method.as_str() }),
+    }
+}
+
+/// A member's identity: the immutable id and the current handle. A *required* pair - every verb
+/// starts from a live Discord target, so both are always present (the email path adds an email
+/// argument, not an optional identity).
+#[derive(Debug, Clone)]
+pub struct Target {
+    pub id: DiscordUserId,
+    pub handle: DiscordHandle,
+}
+
+/// A member the verbs operate on: a borrow of the facade plus the target's identity, so a call
+/// site reads `Member::new(&store, target).verify(invoker)` rather than re-listing collaborators.
+/// The capability-gated `impl` blocks below mean a caller holding a read-only facade cannot reach
+/// a write. The acting moderator is not part of `Member` - the member is the subject, the
+/// moderator a separate actor - so write methods still take `invoker`.
+pub struct Member<'a, M> {
+    store: &'a M,
+    target: Target,
+}
+
+impl<'a, M> Member<'a, M> {
+    /// Bind a facade and a target into a handle the verbs hang off.
+    pub fn new(store: &'a M, target: Target) -> Self {
+        Self { store, target }
+    }
+}
+
+impl<M: MemberWrite> Member<'_, M> {
+    /// Assign `role`, and if the write fails, append a `verify_failed` follow-up to the audit log
+    /// (best-effort: the role write already failed, so the follow-up's own failure is logged, not
+    /// surfaced) before returning the original error. Shared by every granting verb.
+    async fn assign_or_record_failure(
+        &self,
+        invoker: DiscordUserId,
+        role: Role,
+        method: VerifyMethod,
+    ) -> Result<(), MemberError> {
+        let Err(e) = self.store.assign_role(self.target.id, role).await else {
+            return Ok(());
+        };
+        if let Err(audit_err) = self
+            .store
+            .record(
+                invoker,
+                self.target.id,
+                "member_verify",
+                verify_detail("verify_failed", Some(role), method),
+            )
+            .await
+        {
+            tracing::warn!(
+                error = %audit_err,
+                "verify: could not record the verify_failed follow-up after a failed role write"
+            );
+        }
+        Err(e)
+    }
+
+    /// Hand-approve the member past Solidarity Tech: grant `Member` plus the additive Manual
+    /// Override marker, stamping the approval permanently with an optional `note`. Fail-closed
+    /// twice before the grant (audit row, then the stamp), so "your approval has been logged"
+    /// holds whenever a role lands; the marker is added last and best-effort.
+    pub async fn override_approve(
+        &self,
+        invoker: DiscordUserId,
+        note: Option<String>,
+    ) -> Result<(), MemberError> {
+        self.store
+            .record(
+                invoker,
+                self.target.id,
+                "member_verify",
+                verify_detail("override", Some(Role::Member), VerifyMethod::Override),
+            )
+            .await?;
+        self.store
+            .stamp_override(self.target.id, invoker, note)
+            .await?;
+        self.assign_or_record_failure(invoker, Role::Member, VerifyMethod::Override)
+            .await?;
+        if let Err(e) = self.store.set_override_marker(self.target.id).await {
+            tracing::warn!(error = %e, "override: marker role write failed; Member granted and stamped, will re-add on retry");
+            if let Err(audit_err) = self
+                .store
+                .record(
+                    invoker,
+                    self.target.id,
+                    "member_verify",
+                    verify_detail("override_marker_failed", None, VerifyMethod::Override),
+                )
+                .await
+            {
+                tracing::warn!(error = %audit_err, "override: could not record the marker-failure follow-up");
+            }
+        }
+        Ok(())
+    }
+
+    /// Clear a hand approval: remove the Manual Override marker and delete the stamp. The inverse
+    /// of [`override_approve`](Member::override_approve), reused by [`forget`](Member::forget).
+    pub async fn clear_override(&self) -> Result<(), MemberError> {
+        self.store.clear_override_marker(self.target.id).await?;
+        self.store.delete_override(self.target.id).await?;
+        Ok(())
+    }
+}
+
+impl<M: MemberRead + MemberWrite> Member<'_, M> {
+    /// Reset the member to a pristine, unknown state: strip every held status role and the
+    /// override marker, delete the override stamp, and unlink the cached identity. Records one
+    /// `member_forget` row first (audit-before-write), so the erase stays attributable even if a
+    /// later write fails.
+    pub async fn forget(&self, invoker: DiscordUserId) -> Result<(), MemberError> {
+        let held = self.store.held_roles(self.target.id).await?;
+        self.store
+            .record(
+                invoker,
+                self.target.id,
+                "member_forget",
+                serde_json::json!({
+                    "roles_stripped": held.len(),
+                    "cache_unlinked": true,
+                    "stamp_deleted": true
+                }),
+            )
+            .await?;
+        self.store.strip_roles(self.target.id, &held).await?;
+        self.clear_override().await?;
+        self.store.unlink(self.target.id).await?;
+        Ok(())
+    }
+}
+
+impl<M: Heal> Member<'_, M> {
+    /// Verify the member and assign their standing role, on behalf of moderator `invoker`. Reads
+    /// id-then-handle, decides via [`decide`], records the decided outcome before any write (an
+    /// audit failure refuses the grant), assigns the role, then best-effort repairs the stored
+    /// identity link.
+    pub async fn verify(&self, invoker: DiscordUserId) -> Result<VerifyOutcome, MemberError> {
+        let located = self
+            .store
+            .lookup(self.target.id, &self.target.handle)
+            .await?;
+        match decide(located, self.target.id, &self.target.handle) {
+            MatchOutcome::Matched { record, heal } => {
+                let role = record.role();
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("verified", Some(role), VerifyMethod::Discord),
+                    )
+                    .await?;
+                self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
+                    .await?;
+                self.heal(&record, &heal).await;
+                Ok(VerifyOutcome::Verified(role))
+            }
+            MatchOutcome::Miss => {
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("unverified", Some(Role::Unverified), VerifyMethod::Discord),
+                    )
+                    .await?;
+                self.assign_or_record_failure(invoker, Role::Unverified, VerifyMethod::Discord)
+                    .await?;
+                Ok(VerifyOutcome::Unverified)
+            }
+            MatchOutcome::Conflict => {
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("conflict", None, VerifyMethod::Discord),
+                    )
+                    .await?;
+                Ok(VerifyOutcome::Conflict)
+            }
+        }
+    }
+
+    /// Resync one swept member: like [`verify`](Member::verify), but skip the work when nothing
+    /// would change. `held` is the member's current managed roles from the sweep; an already-
+    /// correct member gets no audit and no role write, only the best-effort heal.
+    pub async fn resync(
+        &self,
+        invoker: DiscordUserId,
+        held: &[Role],
+    ) -> Result<ResyncOutcome, MemberError> {
+        let located = self
+            .store
+            .lookup(self.target.id, &self.target.handle)
+            .await?;
+        match decide(located, self.target.id, &self.target.handle) {
+            MatchOutcome::Matched { record, heal } => {
+                let role = record.role();
+                if crate::bulk::already_in_role(held, role) {
+                    self.heal(&record, &heal).await;
+                    Ok(ResyncOutcome::Unchanged(role))
+                } else {
+                    self.store
+                        .record(
+                            invoker,
+                            self.target.id,
+                            "member_verify",
+                            verify_detail("verified", Some(role), VerifyMethod::Discord),
+                        )
+                        .await?;
+                    self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
+                        .await?;
+                    self.heal(&record, &heal).await;
+                    Ok(ResyncOutcome::Changed(role))
+                }
+            }
+            MatchOutcome::Miss => {
+                if crate::bulk::already_in_role(held, Role::Unverified) {
+                    return Ok(ResyncOutcome::Miss);
+                }
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("unverified", Some(Role::Unverified), VerifyMethod::Discord),
+                    )
+                    .await?;
+                self.assign_or_record_failure(invoker, Role::Unverified, VerifyMethod::Discord)
+                    .await?;
+                Ok(ResyncOutcome::Miss)
+            }
+            MatchOutcome::Conflict => {
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("conflict", None, VerifyMethod::Discord),
+                    )
+                    .await?;
+                Ok(ResyncOutcome::Conflict)
+            }
+        }
+    }
+
+    /// Verify from a moderator-supplied membership `email`, the manual fallback when the automatic
+    /// id/handle match misses. Reads Solidarity Tech live by email, decides via [`match_by_email`],
+    /// and otherwise mirrors [`verify`](Member::verify). Every outcome is audited with
+    /// `method: "email"`, never the email itself.
+    pub async fn verify_by_email(
+        &self,
+        invoker: DiscordUserId,
+        email: Email,
+    ) -> Result<VerifyOutcome, MemberError> {
+        let records = self.store.find_by_email(&email).await?;
+        match match_by_email(records, self.target.id, &self.target.handle) {
+            EmailMatchOutcome::Matched { record, heal } => {
+                let role = record.role();
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("verified", Some(role), VerifyMethod::Email),
+                    )
+                    .await?;
+                self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
+                    .await?;
+                self.heal(&record, &heal).await;
+                Ok(VerifyOutcome::Verified(role))
+            }
+            EmailMatchOutcome::Conflict => {
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("conflict", None, VerifyMethod::Email),
+                    )
+                    .await?;
+                Ok(VerifyOutcome::Conflict)
+            }
+            EmailMatchOutcome::Miss => {
+                self.store
+                    .record(
+                        invoker,
+                        self.target.id,
+                        "member_verify",
+                        verify_detail("not_found", None, VerifyMethod::Email),
+                    )
+                    .await?;
+                Ok(VerifyOutcome::NotFound)
+            }
+        }
+    }
+
+    /// Best-effort identity repair shared by the granting verbs: run `self_heal` and log (never
+    /// surface) a failure - the role is already granted, and the next run re-heals. The
+    /// best-effort gate lives here at the call site, not inside the facade.
+    async fn heal(&self, record: &MemberRecord, heal: &HealAction) {
+        if let Err(e) = self
+            .store
+            .self_heal(record, self.target.id, &self.target.handle, heal)
+            .await
+        {
+            tracing::warn!(error = %e, "verify: self-heal failed; role granted, will re-heal");
+        }
+    }
+}
+
 /// Verify `target` and assign their role, on behalf of moderator `invoker`.
 ///
 /// Reads the cache by id then handle via [`locate`], decides via [`decide`], records the

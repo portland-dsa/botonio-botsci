@@ -1,29 +1,26 @@
-//! Behaviour suite for the verify orchestrator (`engine::verify::verify`).
+//! Behaviour suite for the verify verbs (`engine::verify::Member`).
 //!
-//! Cast: Sonic is the moderator; Tails is known only by handle (backfill), Knuckles a
-//! linked member whose handle drifted (repair), Shadow someone we do not know
-//! (Unverified), Eggman a handle claimed by a different account (conflict). The roster
-//! is an in-memory store; Solidarity Tech and Discord are state-based fakes the world
-//! holds across a run, so each step reads the resulting roles, markers, and write-backs;
-//! the audit log is a recording double that can be made unavailable - so the suite runs
-//! offline.
+//! Cast: Sonic is the moderator; Tails is known only by handle (backfill), Knuckles a linked
+//! member whose handle drifted (repair), Shadow someone we do not know (Unverified), Eggman a
+//! handle claimed by a different account (conflict). The facade is a single in-memory fake the
+//! world holds across a run, so each step reads the resulting roles, markers, write-backs, and
+//! audit rows; the fake's audit can be made unavailable, so the suite runs offline.
 
-use std::convert::Infallible;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 use cucumber::{World as _, given, then, when};
 
-use engine::backends::discord::{DiscordOp, FakeDiscord, Role};
-use engine::backends::solidarity_tech::{FakeSolidarityTech, SolidarityTechMember};
-use engine::store::{IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, OverrideLog};
+use engine::backends::discord::Role;
+use engine::store::MemberRecord;
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use engine::verify::{
-    VerifyError, VerifyOutcome, forget_member, override_approve, verify, verify_by_email,
+    HealAction, Located, Member, MemberError, MemberRead, MemberWrite, Target, VerifyOutcome,
 };
 
 use domain::MigsStatus;
 
-const SONIC: u64 = 1; // the moderator running /verify
+const SONIC: u64 = 1;
 
 /// The fixed id and current handle for each target.
 fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
@@ -38,96 +35,8 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
     (DiscordUserId(raw), DiscordHandle(name.to_lowercase()))
 }
 
-fn member(name: &str, handle: DiscordHandle, id: Option<DiscordUserId>) -> SolidarityTechMember {
-    SolidarityTechMember {
-        id: StUserId(format!("st-{}", name.to_lowercase())),
-        email: Email(format!("{}@b.test", name.to_lowercase())),
-        first_name: Some(name.to_owned()),
-        discord_handle: Some(handle),
-        discord_user_id: id,
-        membership_standing: Some(MigsStatus::MemberInGoodStanding),
-        ..Default::default()
-    }
-}
-
-/// A recording audit sink that can be made unavailable to exercise the fail-closed path.
-#[derive(Debug, Clone)]
-struct CapturingAudit {
-    available: bool,
-    rows: Arc<Mutex<Vec<serde_json::Value>>>,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("audit unavailable")]
-struct AuditUnavailable;
-
-#[async_trait::async_trait]
-impl engine::audit::AuditLog for CapturingAudit {
-    type Error = AuditUnavailable;
-    async fn record(
-        &self,
-        _actor: DiscordUserId,
-        _subject: DiscordUserId,
-        action: &str,
-        detail: serde_json::Value,
-    ) -> Result<(), AuditUnavailable> {
-        if !self.available {
-            return Err(AuditUnavailable);
-        }
-        let mut row = detail;
-        if let Some(obj) = row.as_object_mut() {
-            obj.insert("action".to_string(), serde_json::json!(action));
-        }
-        self.rows.lock().unwrap().push(row);
-        Ok(())
-    }
-}
-
-/// A recording override-log double that captures stamp calls and enforces insert-once,
-/// and captures delete calls.
-#[derive(Debug, Clone)]
-struct CapturingOverrides {
-    /// The subject whose stamp was recorded, if any.
-    stamped: Arc<Mutex<Option<DiscordUserId>>>,
-    /// The note recorded with the first stamp, if any.
-    note: Arc<Mutex<Option<String>>>,
-    /// The subject whose override was deleted, if any.
-    deleted: Arc<Mutex<Option<DiscordUserId>>>,
-}
-
-#[async_trait::async_trait]
-impl OverrideLog for CapturingOverrides {
-    type Error = std::convert::Infallible;
-
-    async fn stamp_override(
-        &self,
-        subject: DiscordUserId,
-        _approver: DiscordUserId,
-        note: Option<String>,
-    ) -> Result<(), std::convert::Infallible> {
-        // Insert-once: only record the first stamp (and its note).
-        let mut guard = self.stamped.lock().unwrap();
-        if guard.is_none() {
-            *guard = Some(subject);
-            *self.note.lock().unwrap() = note;
-        }
-        Ok(())
-    }
-
-    async fn get_override(
-        &self,
-        _subject: DiscordUserId,
-    ) -> Result<Option<engine::store::OverrideRecord>, std::convert::Infallible> {
-        Ok(None)
-    }
-
-    async fn delete_override(
-        &self,
-        subject: DiscordUserId,
-    ) -> Result<(), std::convert::Infallible> {
-        *self.deleted.lock().unwrap() = Some(subject);
-        Ok(())
-    }
+fn st_id(name: &str) -> String {
+    format!("st-{}", name.to_lowercase())
 }
 
 fn role_by_name(name: &str) -> Role {
@@ -139,207 +48,322 @@ fn role_by_name(name: &str) -> Role {
     }
 }
 
-fn st_id(name: &str) -> String {
-    format!("st-{}", name.to_lowercase())
-}
-
-/// Wraps the in-memory store to count identity write-throughs, so the fail-closed
-/// scenario can assert nothing reached the cache either - not only that no Solidarity Tech
-/// write ran. Reads delegate unchanged.
-struct CountingStore {
-    inner: InMemoryStore,
-    links: Arc<Mutex<usize>>,
-}
-
-#[async_trait::async_trait]
-impl MemberStore for CountingStore {
-    type Error = Infallible;
-    async fn by_discord_id(&self, id: DiscordUserId) -> Result<Option<MemberRecord>, Infallible> {
-        self.inner.by_discord_id(id).await
-    }
-    async fn by_handle(&self, handle: &DiscordHandle) -> Result<Option<MemberRecord>, Infallible> {
-        self.inner.by_handle(handle).await
+/// A `MemberRecord` for `name` in good standing, linked to `id` (or `None`) under `handle`.
+fn record(name: &str, handle: DiscordHandle, id: Option<DiscordUserId>) -> MemberRecord {
+    MemberRecord {
+        st_user_id: StUserId(st_id(name)),
+        discord_user_id: id,
+        discord_handle: Some(handle),
+        email: Email(format!("{}@b.test", name.to_lowercase())),
+        full_name: Some(name.to_owned()),
+        standing: Some(MigsStatus::MemberInGoodStanding),
+        join_date: None,
+        expires: None,
+        membership_type: None,
+        monthly_dues: None,
+        yearly_dues: None,
     }
 }
 
+/// One in-memory member facade: a seeded roster for the reads, plus a recorder for every write,
+/// with failure injection for the audit and the role write. Stands in for the four backends in
+/// the verb-policy tests.
+#[derive(Default)]
+struct FakeMembers {
+    by_id: HashMap<u64, MemberRecord>,
+    by_handle: HashMap<String, MemberRecord>,
+    by_email: HashMap<String, Vec<MemberRecord>>,
+    roles: Mutex<HashMap<u64, Vec<Role>>>,
+    markers: Mutex<HashSet<u64>>,
+    unlinked: Mutex<HashSet<u64>>,
+    audit_rows: Mutex<Vec<serde_json::Value>>,
+    stamped: Mutex<Option<DiscordUserId>>,
+    stamp_note: Mutex<Option<String>>,
+    deleted: Mutex<Option<DiscordUserId>>,
+    /// (st_user_id -> written id/handle): the source write-back self_heal performs.
+    pushes: Mutex<Vec<(String, DiscordUserId, DiscordHandle)>>,
+    /// (st_user_id -> id/handle): the cache write-through self_heal performs.
+    links: Mutex<Vec<(String, DiscordUserId, DiscordHandle)>>,
+    audit_available: bool,
+    assign_fails: bool,
+}
+
+impl FakeMembers {
+    fn new() -> Self {
+        Self {
+            audit_available: true,
+            ..Default::default()
+        }
+    }
+
+    /// Seed a record into the id/handle/email maps the reads consult.
+    fn seed(&mut self, rec: MemberRecord) {
+        if let Some(id) = rec.discord_user_id {
+            self.by_id.insert(id.0, rec.clone());
+        }
+        if let Some(h) = rec.discord_handle.clone() {
+            self.by_handle.insert(h.0, rec.clone());
+        }
+        self.by_email
+            .entry(rec.email.as_str().to_owned())
+            .or_default()
+            .push(rec);
+    }
+
+    fn seed_roles(&mut self, id: DiscordUserId, held: Vec<Role>) {
+        self.roles.get_mut().unwrap().insert(id.0, held);
+    }
+
+    fn roles_of(&self, id: DiscordUserId) -> Vec<Role> {
+        self.roles
+            .lock()
+            .unwrap()
+            .get(&id.0)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn has_marker(&self, id: DiscordUserId) -> bool {
+        self.markers.lock().unwrap().contains(&id.0)
+    }
+
+    /// Total source + cache write-backs - the analogue of the old `st.writes()` plus cache count.
+    fn write_backs(&self) -> usize {
+        self.pushes.lock().unwrap().len() + self.links.lock().unwrap().len()
+    }
+}
+
 #[async_trait::async_trait]
-impl IdentityWrite for CountingStore {
-    type Error = Infallible;
-    async fn link_identity(
+impl MemberRead for FakeMembers {
+    async fn lookup(
         &self,
-        st_user_id: &StUserId,
-        discord_id: DiscordUserId,
+        id: DiscordUserId,
         handle: &DiscordHandle,
-    ) -> Result<(), Infallible> {
-        *self.links.lock().unwrap() += 1;
-        self.inner
-            .link_identity(st_user_id, discord_id, handle)
-            .await
+    ) -> Result<Located, MemberError> {
+        if let Some(r) = self.by_id.get(&id.0) {
+            return Ok(Located::ById(r.clone()));
+        }
+        Ok(match self.by_handle.get(&handle.0) {
+            Some(r) => Located::ByHandle(r.clone()),
+            None => Located::Unknown,
+        })
     }
 
-    async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Infallible> {
-        self.inner.unlink_by_discord_id(discord_id).await
+    async fn find_by_email(&self, email: &Email) -> Result<Vec<MemberRecord>, MemberError> {
+        Ok(self
+            .by_email
+            .get(email.as_str())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn held_roles(&self, id: DiscordUserId) -> Result<Vec<Role>, MemberError> {
+        Ok(self.roles_of(id))
     }
 }
 
-#[derive(Debug, cucumber::World)]
+#[async_trait::async_trait]
+impl MemberWrite for FakeMembers {
+    async fn assign_role(&self, id: DiscordUserId, role: Role) -> Result<(), MemberError> {
+        if self.assign_fails {
+            return Err(MemberError::Discord("assign failing".into()));
+        }
+        // Model "set to exactly this role": the strip-stale dance is DataStore's concern.
+        self.roles.lock().unwrap().insert(id.0, vec![role]);
+        Ok(())
+    }
+
+    async fn strip_roles(&self, id: DiscordUserId, _roles: &[Role]) -> Result<(), MemberError> {
+        self.roles.lock().unwrap().insert(id.0, vec![]);
+        Ok(())
+    }
+
+    async fn unlink(&self, id: DiscordUserId) -> Result<(), MemberError> {
+        self.unlinked.lock().unwrap().insert(id.0);
+        Ok(())
+    }
+
+    async fn stamp_override(
+        &self,
+        target: DiscordUserId,
+        _approver: DiscordUserId,
+        note: Option<String>,
+    ) -> Result<(), MemberError> {
+        let mut stamped = self.stamped.lock().unwrap();
+        if stamped.is_none() {
+            *stamped = Some(target);
+            *self.stamp_note.lock().unwrap() = note;
+        }
+        Ok(())
+    }
+
+    async fn delete_override(&self, target: DiscordUserId) -> Result<(), MemberError> {
+        *self.deleted.lock().unwrap() = Some(target);
+        Ok(())
+    }
+
+    async fn set_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError> {
+        self.markers.lock().unwrap().insert(id.0);
+        Ok(())
+    }
+
+    async fn clear_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError> {
+        self.markers.lock().unwrap().remove(&id.0);
+        Ok(())
+    }
+
+    async fn record(
+        &self,
+        _actor: DiscordUserId,
+        _subject: DiscordUserId,
+        action: &str,
+        detail: serde_json::Value,
+    ) -> Result<(), MemberError> {
+        if !self.audit_available {
+            return Err(MemberError::Audit("audit unavailable".into()));
+        }
+        let mut row = detail;
+        if let Some(obj) = row.as_object_mut() {
+            obj.insert("action".to_string(), serde_json::json!(action));
+        }
+        self.audit_rows.lock().unwrap().push(row);
+        Ok(())
+    }
+
+    async fn push_identity(
+        &self,
+        st: &StUserId,
+        heal: &HealAction,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), MemberError> {
+        // Record the resulting identity the source learns, by heal kind.
+        let written = match heal {
+            HealAction::UpdateHandle(h) => (st.as_str().to_owned(), id, h.clone()),
+            HealAction::BackfillId(bid) => (st.as_str().to_owned(), *bid, handle.clone()),
+            HealAction::None => return Ok(()),
+        };
+        self.pushes.lock().unwrap().push(written);
+        Ok(())
+    }
+
+    async fn link_cache(
+        &self,
+        st: &StUserId,
+        id: DiscordUserId,
+        handle: &DiscordHandle,
+    ) -> Result<(), MemberError> {
+        self.links
+            .lock()
+            .unwrap()
+            .push((st.as_str().to_owned(), id, handle.clone()));
+        Ok(())
+    }
+}
+
+impl engine::verify::Heal for FakeMembers {}
+
+#[derive(cucumber::World)]
 #[world(init = Self::new)]
 struct VerifyWorld {
-    members: Vec<SolidarityTechMember>,
-    audit: CapturingAudit,
-    /// Managed roles the target already holds when verify runs (the Discord fake returns
-    /// these from `member_roles`). Empty unless a scenario stacks stale roles.
+    members: Vec<MemberRecord>,
     held_roles: Vec<Role>,
-    /// How many cache write-throughs (`link_identity`) ran, captured from [`CountingStore`].
-    cache_writes: Arc<Mutex<usize>>,
-    /// When set, the Discord fake's `set_role` returns an error, to exercise the failed
-    /// role-write path.
+    audit_available: bool,
     discord_fails: bool,
-    /// The override-log double, capturing stamp calls for the override scenario.
-    overrides: CapturingOverrides,
-    last: Option<Result<VerifyOutcome, VerifyError>>,
-    /// The result of `forget_member` (returns `()`, not a `VerifyOutcome`).
-    forget_result: Option<Result<(), VerifyError>>,
-    /// Whether the cache link was cleared (the member is no longer found by id).
-    unlink_cleared: bool,
-    /// The Discord id targeted by the last verify run, so an assertion can read its
-    /// resulting roles without re-deriving the actor from the step text.
+    last: Option<Result<VerifyOutcome, MemberError>>,
+    forget_result: Option<Result<(), MemberError>>,
     last_target: Option<DiscordUserId>,
-    /// The Discord fake after a run, for asserting resulting roles and markers.
-    discord: Option<FakeDiscord>,
-    /// The Solidarity Tech fake after a run, for asserting identity write-backs.
-    st: Option<FakeSolidarityTech>,
+    fake: Option<FakeMembers>,
+}
+
+impl std::fmt::Debug for VerifyWorld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifyWorld")
+            .field("members", &self.members.len())
+            .field("held_roles", &self.held_roles)
+            .finish_non_exhaustive()
+    }
 }
 
 impl VerifyWorld {
     async fn new() -> Self {
         Self {
             members: Vec::new(),
-            audit: CapturingAudit {
-                available: true,
-                rows: Arc::new(Mutex::new(Vec::new())),
-            },
             held_roles: Vec::new(),
-            cache_writes: Arc::new(Mutex::new(0)),
+            audit_available: true,
             discord_fails: false,
-            overrides: CapturingOverrides {
-                stamped: Arc::new(Mutex::new(None)),
-                note: Arc::new(Mutex::new(None)),
-                deleted: Arc::new(Mutex::new(None)),
-            },
             last: None,
             forget_result: None,
-            unlink_cleared: false,
             last_target: None,
-            discord: None,
-            st: None,
+            fake: None,
         }
+    }
+
+    /// Build and seed a fake from the accumulated givens, targeting `target`.
+    fn build_fake(&self, target: DiscordUserId) -> FakeMembers {
+        let mut fake = FakeMembers::new();
+        for m in &self.members {
+            fake.seed(m.clone());
+        }
+        fake.seed_roles(target, self.held_roles.clone());
+        fake.audit_available = self.audit_available;
+        fake.assign_fails = self.discord_fails;
+        fake
     }
 
     async fn run(&mut self, target: DiscordUserId, handle: DiscordHandle) {
         self.last_target = Some(target);
-        let store = CountingStore {
-            inner: InMemoryStore::new(Index::build(self.members.clone())),
-            links: self.cache_writes.clone(),
-        };
-        let mut discord = FakeDiscord::new().with_roles(target, self.held_roles.clone());
-        if self.discord_fails {
-            discord = discord.failing(DiscordOp::SetRole);
-        }
-        let st = FakeSolidarityTech::new().with_members(self.members.clone());
-
-        self.last = Some(
-            verify(
-                &st,
-                &discord,
-                &store,
-                &self.audit,
-                DiscordUserId(SONIC),
-                target,
-                handle,
-            )
-            .await,
-        );
-        self.discord = Some(discord);
-        self.st = Some(st);
+        let fake = self.build_fake(target);
+        let result = Member::new(&fake, Target { id: target, handle })
+            .verify(DiscordUserId(SONIC))
+            .await;
+        self.last = Some(result);
+        self.fake = Some(fake);
     }
 
     async fn run_by_email(&mut self, target: DiscordUserId, handle: DiscordHandle, email: Email) {
         self.last_target = Some(target);
-        let store = CountingStore {
-            inner: InMemoryStore::new(Index::build(self.members.clone())),
-            links: self.cache_writes.clone(),
-        };
-        let mut discord = FakeDiscord::new().with_roles(target, self.held_roles.clone());
-        if self.discord_fails {
-            discord = discord.failing(DiscordOp::SetRole);
-        }
-        let st = FakeSolidarityTech::new().with_members(self.members.clone());
-
-        self.last = Some(
-            verify_by_email(
-                &st,
-                &discord,
-                &store,
-                &self.audit,
-                DiscordUserId(SONIC),
-                target,
-                handle,
-                email,
-            )
-            .await,
-        );
-        self.discord = Some(discord);
-        self.st = Some(st);
+        let fake = self.build_fake(target);
+        let result = Member::new(&fake, Target { id: target, handle })
+            .verify_by_email(DiscordUserId(SONIC), email)
+            .await;
+        self.last = Some(result);
+        self.fake = Some(fake);
     }
 
-    async fn run_override(&mut self, target: DiscordUserId, note: Option<String>) {
-        let discord = FakeDiscord::new().with_roles(target, self.held_roles.clone());
-
-        override_approve(
-            &discord,
-            &self.overrides,
-            &self.audit,
-            DiscordUserId(SONIC),
-            target,
-            note,
-        )
-        .await
-        .expect("override_approve should succeed in the override scenario");
-
-        self.discord = Some(discord);
-    }
-
-    async fn run_forget(&mut self, target: DiscordUserId) {
-        let store = InMemoryStore::new(Index::build(self.members.clone()));
-        let discord = FakeDiscord::new().with_roles(target, self.held_roles.clone());
-
-        // Pre-stamp so the delete is observable.
-        self.overrides
-            .stamp_override(target, DiscordUserId(SONIC), None)
+    async fn run_override(
+        &mut self,
+        target: DiscordUserId,
+        handle: DiscordHandle,
+        note: Option<String>,
+    ) {
+        self.last_target = Some(target);
+        let fake = self.build_fake(target);
+        Member::new(&fake, Target { id: target, handle })
+            .override_approve(DiscordUserId(SONIC), note)
             .await
-            .unwrap();
+            .expect("override_approve should succeed in the override scenario");
+        self.fake = Some(fake);
+    }
 
+    async fn run_forget(&mut self, target: DiscordUserId, handle: DiscordHandle) {
+        self.last_target = Some(target);
+        let mut fake = self.build_fake(target);
+        // Pre-stamp so the delete is observable.
+        *fake.stamped.get_mut().unwrap() = Some(target);
         self.forget_result = Some(
-            forget_member(
-                &discord,
-                &store,
-                &self.overrides,
-                &self.audit,
-                DiscordUserId(SONIC),
-                target,
-            )
-            .await,
+            Member::new(&fake, Target { id: target, handle })
+                .forget(DiscordUserId(SONIC))
+                .await,
         );
-        self.unlink_cleared = store.by_discord_id(target).await.unwrap().is_none();
-        self.discord = Some(discord);
+        self.fake = Some(fake);
     }
 }
 
 #[given(regex = r"^(\w+) is in our records by handle with no Discord id$")]
 async fn handle_only(world: &mut VerifyWorld, name: String) {
     let (_, handle) = actor(&name);
-    world.members.push(member(&name, handle, None));
+    world.members.push(record(&name, handle, None));
 }
 
 #[given(regex = r"^(\w+) is in our records linked to his Discord id, under an old handle$")]
@@ -347,7 +371,7 @@ async fn linked_old_handle(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
     world
         .members
-        .push(member(&name, DiscordHandle("old-handle".into()), Some(id)));
+        .push(record(&name, DiscordHandle("old-handle".into()), Some(id)));
 }
 
 #[given(regex = r"^(\w+) is not in our records$")]
@@ -356,15 +380,14 @@ async fn absent(_world: &mut VerifyWorld, _name: String) {}
 #[given(regex = r"^(\w+)'s handle is on record for a different account$")]
 async fn handle_conflict(world: &mut VerifyWorld, name: String) {
     let (_, handle) = actor(&name);
-    // The handle is on record, but bound to id 999 - a different account.
     world
         .members
-        .push(member(&name, handle, Some(DiscordUserId(999))));
+        .push(record(&name, handle, Some(DiscordUserId(999))));
 }
 
 #[given("the audit log is unavailable")]
 async fn audit_unavailable(world: &mut VerifyWorld) {
-    world.audit.available = false;
+    world.audit_available = false;
 }
 
 #[given(regex = r"^(\w+) also holds the (\w+) role$")]
@@ -377,10 +400,43 @@ async fn role_writes_failing(world: &mut VerifyWorld) {
     world.discord_fails = true;
 }
 
+#[given(regex = r"^(\w+) was hand-approved by override$")]
+async fn was_overridden(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    world.members.push(record(&name, handle, Some(id)));
+    world.held_roles.push(Role::Member);
+}
+
 #[when(regex = r"^Sonic verifies (\w+)$")]
 async fn sonic_verifies(world: &mut VerifyWorld, name: String) {
     let (id, handle) = actor(&name);
     world.run(id, handle).await;
+}
+
+#[when(regex = r"^Sonic verifies (\w+) by email$")]
+async fn sonic_verifies_by_email(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    let email = Email(format!("{}@b.test", name.to_lowercase()));
+    world.run_by_email(id, handle, email).await;
+}
+
+#[when(regex = r"^Sonic overrides (\w+)$")]
+async fn sonic_overrides(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    world.run_override(id, handle, None).await;
+}
+
+#[when(regex = r#"^Sonic overrides (\w+) with the reason "([^"]*)"$"#)]
+async fn sonic_overrides_with_reason(world: &mut VerifyWorld, name: String, reason: String) {
+    let (id, handle) = actor(&name);
+    world.run_override(id, handle, Some(reason)).await;
+}
+
+#[when(regex = r"^Sonic forgets (\w+)$")]
+async fn sonic_forgets(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    world.run_forget(id, handle).await;
+    assert!(matches!(world.forget_result, Some(Ok(()))));
 }
 
 #[then(regex = r"^(\w+) is assigned the (\w+) role$")]
@@ -388,7 +444,7 @@ async fn assigned_the_role(world: &mut VerifyWorld, name: String, role: String) 
     let (id, _) = actor(&name);
     assert!(
         world
-            .discord
+            .fake
             .as_ref()
             .unwrap()
             .roles_of(id)
@@ -400,28 +456,24 @@ async fn assigned_the_role(world: &mut VerifyWorld, name: String, role: String) 
 #[then(regex = r"^(\w+)'s Discord identity is written back to our records$")]
 async fn identity_written(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
-    let m = world
-        .st
-        .as_ref()
-        .unwrap()
-        .get(&st_id(&name))
-        .expect("member exists");
-    assert_eq!(m.discord_user_id, Some(id), "{name}'s id was written back");
+    let pushes = world.fake.as_ref().unwrap().pushes.lock().unwrap();
+    assert!(
+        pushes
+            .iter()
+            .any(|(st, wid, _)| *st == st_id(&name) && *wid == id),
+        "{name}'s id was written back to the source"
+    );
 }
 
 #[then(regex = r"^(\w+)'s handle is written back to our records$")]
 async fn handle_written(world: &mut VerifyWorld, name: String) {
     let (_, handle) = actor(&name);
-    let m = world
-        .st
-        .as_ref()
-        .unwrap()
-        .get(&st_id(&name))
-        .expect("member exists");
-    assert_eq!(
-        m.discord_handle,
-        Some(handle),
-        "{name}'s handle was written back"
+    let pushes = world.fake.as_ref().unwrap().pushes.lock().unwrap();
+    assert!(
+        pushes
+            .iter()
+            .any(|(st, _, h)| *st == st_id(&name) && *h == handle),
+        "{name}'s handle was written back to the source"
     );
 }
 
@@ -429,11 +481,9 @@ async fn handle_written(world: &mut VerifyWorld, name: String) {
 async fn roles_stripped(world: &mut VerifyWorld, first: String, second: String, name: String) {
     let (id, _) = actor(&name);
     let (stale_a, stale_b) = (role_by_name(&first), role_by_name(&second));
-    let held = world.discord.as_ref().unwrap().roles_of(id);
+    let held = world.fake.as_ref().unwrap().roles_of(id);
     assert!(!held.contains(&stale_a), "{first} stripped");
     assert!(!held.contains(&stale_b), "{second} stripped");
-    // The freshly granted role is never stripped along with the stale ones: a role
-    // distinct from both must survive.
     assert!(
         held.iter().any(|r| *r != stale_a && *r != stale_b),
         "the granted role must survive the strip"
@@ -442,35 +492,41 @@ async fn roles_stripped(world: &mut VerifyWorld, first: String, second: String, 
 
 #[then("nothing is written back to our records")]
 async fn nothing_written(world: &mut VerifyWorld) {
-    // Both write paths must stay untouched: the Solidarity Tech self-heal and the
-    // cache write-through. Asserting only one would let a leak through the other.
     assert_eq!(
-        world.st.as_ref().unwrap().writes(),
+        world.fake.as_ref().unwrap().write_backs(),
         0,
-        "no Solidarity Tech write"
+        "no source or cache write-back"
     );
-    assert_eq!(*world.cache_writes.lock().unwrap(), 0, "no cache write");
 }
 
 #[then("the verification is refused")]
 async fn refused(world: &mut VerifyWorld) {
     assert!(matches!(world.last, Some(Ok(VerifyOutcome::Conflict))));
-    // A conflict assigns nothing: the verified target holds no managed role.
     let target = world.last_target.expect("a verify run recorded the target");
     assert!(
-        world.discord.as_ref().unwrap().roles_of(target).is_empty(),
+        world.fake.as_ref().unwrap().roles_of(target).is_empty(),
         "a refused verification grants no role"
     );
 }
 
 #[then("the verification is recorded in the audit log")]
 async fn recorded(world: &mut VerifyWorld) {
-    assert_eq!(world.audit.rows.lock().unwrap().len(), 1);
+    assert_eq!(
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .audit_rows
+            .lock()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[then("the conflict is recorded in the audit log")]
 async fn conflict_recorded(world: &mut VerifyWorld) {
-    let rows = world.audit.rows.lock().unwrap();
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["outcome"], "conflict");
 }
@@ -478,52 +534,41 @@ async fn conflict_recorded(world: &mut VerifyWorld) {
 #[then(regex = r"^(\w+) is not assigned any role$")]
 async fn not_assigned(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
-    assert!(world.discord.as_ref().unwrap().roles_of(id).is_empty());
-    assert!(matches!(world.last, Some(Err(VerifyError::Audit(_)))));
+    assert!(world.fake.as_ref().unwrap().roles_of(id).is_empty());
+    assert!(matches!(world.last, Some(Err(MemberError::Audit(_)))));
 }
 
 #[then("the verification fails with an error")]
 async fn fails_with_error(world: &mut VerifyWorld) {
-    assert!(matches!(world.last, Some(Err(VerifyError::Discord(_)))));
+    assert!(matches!(world.last, Some(Err(MemberError::Discord(_)))));
 }
 
 #[then("the audit log records the attempt and its failure")]
 async fn attempt_and_failure_recorded(world: &mut VerifyWorld) {
-    let rows = world.audit.rows.lock().unwrap();
-    // The pre-write success row, then the reconciling failure follow-up.
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["outcome"], "verified");
     assert_eq!(rows[1]["outcome"], "verify_failed");
 }
 
-#[when(regex = r"^Sonic verifies (\w+) by email$")]
-async fn sonic_verifies_by_email(world: &mut VerifyWorld, name: String) {
-    let (id, handle) = actor(&name);
-    let email = Email(format!("{}@b.test", name.to_lowercase()));
-    world.run_by_email(id, handle, email).await;
-}
-
 #[then(regex = r"^the email lookup finds no record$")]
 async fn email_not_found(world: &mut VerifyWorld) {
     assert!(matches!(world.last, Some(Ok(VerifyOutcome::NotFound))));
-    // A miss writes back nothing: no Discord role on the target, and no Solidarity Tech
-    // write either. `find_by_email` is a read that never bumps `writes()`, so a stray
-    // write of either kind trips one of these.
     let target = world.last_target.expect("a verify run recorded the target");
     assert!(
-        world.discord.as_ref().unwrap().roles_of(target).is_empty(),
+        world.fake.as_ref().unwrap().roles_of(target).is_empty(),
         "not-found grants no role"
     );
     assert_eq!(
-        world.st.as_ref().unwrap().writes(),
+        world.fake.as_ref().unwrap().write_backs(),
         0,
-        "not-found assigns nothing, so no ST write-back"
+        "not-found assigns nothing, so no write-back"
     );
 }
 
 #[then(regex = r"^the not-found lookup is recorded in the audit log$")]
 async fn not_found_recorded(world: &mut VerifyWorld) {
-    let rows = world.audit.rows.lock().unwrap();
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["outcome"], "not_found");
     assert_eq!(rows[0]["method"], "email");
@@ -531,28 +576,23 @@ async fn not_found_recorded(world: &mut VerifyWorld) {
 
 #[then("the email verification is recorded with method email")]
 async fn email_verification_recorded(world: &mut VerifyWorld) {
-    let rows = world.audit.rows.lock().unwrap();
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["method"], "email");
     assert_eq!(rows[0]["outcome"], "verified");
 }
 
-#[when(regex = r"^Sonic overrides (\w+)$")]
-async fn sonic_overrides(world: &mut VerifyWorld, name: String) {
-    let (id, _) = actor(&name);
-    world.run_override(id, None).await;
-}
-
-#[when(regex = r#"^Sonic overrides (\w+) with the reason "([^"]*)"$"#)]
-async fn sonic_overrides_with_reason(world: &mut VerifyWorld, name: String, reason: String) {
-    let (id, _) = actor(&name);
-    world.run_override(id, Some(reason)).await;
-}
-
 #[then(regex = r#"^the approval stamp records the reason "([^"]*)"$"#)]
 async fn stamp_records_reason(world: &mut VerifyWorld, reason: String) {
     assert_eq!(
-        world.overrides.note.lock().unwrap().as_deref(),
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .stamp_note
+            .lock()
+            .unwrap()
+            .as_deref(),
         Some(reason.as_str())
     );
 }
@@ -560,17 +600,26 @@ async fn stamp_records_reason(world: &mut VerifyWorld, reason: String) {
 #[then(regex = r"^the override marker is assigned to (\w+)$")]
 async fn override_marker_assigned(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
-    assert!(world.discord.as_ref().unwrap().has_marker(id));
+    assert!(world.fake.as_ref().unwrap().has_marker(id));
 }
 
 #[then("the approval stamp is recorded")]
 async fn approval_stamp_recorded(world: &mut VerifyWorld) {
-    assert!(world.overrides.stamped.lock().unwrap().is_some());
+    assert!(
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .stamped
+            .lock()
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[then("the override is recorded in the audit log with method override")]
 async fn override_audit_recorded(world: &mut VerifyWorld) {
-    let rows = world.audit.rows.lock().unwrap();
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert!(
         rows.iter()
             .any(|r| r["method"] == "override" && r["outcome"] == "override"),
@@ -578,43 +627,42 @@ async fn override_audit_recorded(world: &mut VerifyWorld) {
     );
 }
 
-#[given(regex = r"^(\w+) was hand-approved by override$")]
-async fn was_overridden(world: &mut VerifyWorld, name: String) {
-    let (id, handle) = actor(&name);
-    world.members.push(member(&name, handle, Some(id)));
-    world.held_roles.push(Role::Member);
-}
-
-#[when(regex = r"^Sonic forgets (\w+)$")]
-async fn sonic_forgets(world: &mut VerifyWorld, name: String) {
-    let (id, _) = actor(&name);
-    world.run_forget(id).await;
-    assert!(matches!(world.forget_result, Some(Ok(()))));
-}
-
 #[then(regex = r"^(\w+)'s managed roles are stripped$")]
 async fn forget_roles_stripped(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
     assert!(
-        world.discord.as_ref().unwrap().roles_of(id).is_empty(),
+        world.fake.as_ref().unwrap().roles_of(id).is_empty(),
         "all roles stripped"
     );
 }
 
 #[then(regex = r"^(\w+)'s cache link is cleared$")]
-async fn cache_cleared(world: &mut VerifyWorld, _name: String) {
-    assert!(world.unlink_cleared);
+async fn cache_cleared(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert!(
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .unlinked
+            .lock()
+            .unwrap()
+            .contains(&id.0)
+    );
 }
 
 #[then(regex = r"^(\w+)'s override stamp is deleted$")]
 async fn stamp_deleted(world: &mut VerifyWorld, name: String) {
     let (id, _) = actor(&name);
-    assert_eq!(*world.overrides.deleted.lock().unwrap(), Some(id));
+    assert_eq!(
+        *world.fake.as_ref().unwrap().deleted.lock().unwrap(),
+        Some(id)
+    );
 }
 
 #[then("the reset is recorded in the audit log")]
 async fn forget_recorded(world: &mut VerifyWorld) {
-    let rows = world.audit.rows.lock().unwrap();
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert!(
         rows.iter()
             .any(|r| r["action"] == "member_forget" && r["cache_unlinked"] == true)
