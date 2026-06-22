@@ -939,10 +939,9 @@ mod match_tests {
 #[cfg(test)]
 mod resync_tests {
     use super::*;
-    use crate::backends::discord::{MemberRoles, MockDiscordClient};
-    use crate::backends::solidarity_tech::MockSolidarityTechClient;
+    use crate::backends::discord::FakeDiscord;
+    use crate::backends::solidarity_tech::FakeSolidarityTech;
     use crate::store::{InMemoryStore, Index, MemberRecord};
-    use crate::testkit::ready_ok;
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
     use domain::MigsStatus;
     use std::convert::Infallible;
@@ -991,11 +990,10 @@ mod resync_tests {
         let store = InMemoryStore::new(Index::from_records(vec![member_in_good_standing(
             7, "rosy",
         )]));
-        // No Discord or Solidarity Tech expectations: any write or read would panic, proving
-        // an already-correct member triggers neither (the handle matches, so the heal is a
-        // no-op too).
-        let discord = MockDiscordClient::new();
-        let st = MockSolidarityTechClient::new();
+        // Seed Rosy holding exactly Member, so an already-correct resync touches neither
+        // backend: any role write would change roles_of, any heal would bump writes().
+        let discord = FakeDiscord::new().with_roles(DiscordUserId(7), vec![Role::Member]);
+        let st = FakeSolidarityTech::new();
         let audit = Recorder::default();
 
         let outcome = resync_member(
@@ -1016,6 +1014,12 @@ mod resync_tests {
             audit.actions.lock().unwrap().is_empty(),
             "an unchanged member must not be audited"
         );
+        assert_eq!(
+            discord.roles_of(DiscordUserId(7)),
+            vec![Role::Member],
+            "no role write"
+        );
+        assert_eq!(st.writes(), 0, "no self-heal write");
     }
 
     #[tokio::test]
@@ -1023,12 +1027,9 @@ mod resync_tests {
         let store = InMemoryStore::new(Index::from_records(vec![member_in_good_standing(
             7, "rosy",
         )]));
-        let mut discord = MockDiscordClient::new();
-        discord
-            .expect_member_roles()
-            .returning(|_| ready_ok(MemberRoles::default()));
-        discord.expect_set_role().returning(|_, _, _| ready_ok(()));
-        let st = MockSolidarityTechClient::new();
+        // Rosy holds nothing, so resync moves her to Member.
+        let discord = FakeDiscord::new();
+        let st = FakeSolidarityTech::new();
         let audit = Recorder::default();
 
         let outcome = resync_member(
@@ -1049,6 +1050,10 @@ mod resync_tests {
             audit.actions.lock().unwrap().as_slice(),
             ["member_verify"],
             "the change is audited once"
+        );
+        assert!(
+            discord.roles_of(DiscordUserId(7)).contains(&Role::Member),
+            "role applied"
         );
     }
 }

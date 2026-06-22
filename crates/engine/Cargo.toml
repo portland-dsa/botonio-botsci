@@ -17,7 +17,7 @@ async-trait = "0.1"
 [dev-dependencies]
 # Enable the backends' mockall mocks so the store tests run without a network;
 # pull in a runtime for the `#[tokio::test]` async cases.
-backends = { path = "../backends", features = ["mock"] }
+backends = { path = "../backends", features = ["mock", "fakes"] }
 mockall = "0.13"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 cucumber = "0.21"

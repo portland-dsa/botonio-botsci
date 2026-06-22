@@ -26,6 +26,3 @@ pub mod paging;
 pub mod seam;
 pub mod store;
 pub mod util;
-
-#[cfg(test)]
-mod testkit;
