@@ -38,6 +38,20 @@ pub enum ResyncOutcome {
     Conflict,
 }
 
+/// What a staging reset did to one member - the finer outcome `/strip-roles` tallies. A
+/// previously-overridden member is fully forgotten (the DB stamp and cache link go with the
+/// roles); anyone else only loses their managed Discord roles and the override marker.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub enum StripOutcome {
+    /// The member was hand-approved, so the whole reset ran: status roles, the override
+    /// marker, the cache identity link, and the override stamp were all cleared (audited).
+    Forgotten,
+    /// The member was not overridden: their managed status roles and the override marker
+    /// were stripped, and nothing in the database was touched.
+    Stripped,
+}
+
 /// How a verification was initiated, written to the audit row's `method` field so a query
 /// or operator can tell the automatic id/handle path ([`verify`](Member::verify)) from the
 /// manual email path ([`verify_by_email`](Member::verify_by_email)) from the hand-approval
@@ -197,6 +211,30 @@ impl<M: MemberRead + MemberWrite> Member<'_, M> {
         self.store.unlink(self.target.id).await?;
         self.store.delete_override(self.target.id).await?;
         Ok(())
+    }
+
+    /// Reset one swept member for the staging-only `/strip-roles` test affordance.
+    ///
+    /// An `overridden` member - one carrying a hand-approval stamp - is handed to
+    /// [`forget`](Member::forget), so their cache link and stamp are cleared along with their
+    /// roles. Everyone else only has their `held` managed status roles stripped and the
+    /// override marker removed - a defensive sweep that clears any stale marker without
+    /// touching the database, since the marker may have drifted from its stamp in staging.
+    /// `held` is the member's current managed roles from the sweep, so this needs no role read
+    /// of its own (the `forget` path reads them itself).
+    pub async fn strip(
+        &self,
+        invoker: DiscordUserId,
+        overridden: bool,
+        held: &[Role],
+    ) -> Result<StripOutcome, MemberError> {
+        if overridden {
+            self.forget(invoker).await?;
+            return Ok(StripOutcome::Forgotten);
+        }
+        self.store.strip_roles(self.target.id, held).await?;
+        self.store.clear_override_marker(self.target.id).await?;
+        Ok(StripOutcome::Stripped)
     }
 }
 

@@ -15,6 +15,7 @@ use crate::config::BotConfig;
 use crate::error::BotError;
 use crate::guild_config::managed_role_map;
 use crate::lookup::RateLimiter;
+use crate::refresh::Cooldown;
 
 /// Shared state every command receives via `Context`.
 pub struct Data {
@@ -25,6 +26,8 @@ pub struct Data {
     pub store: Arc<PgStore>,
     pub auditor: Arc<Auditor>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// The process-wide throttle for the on-demand `/refresh-cache` command.
+    pub refresh_cooldown: Arc<Cooldown>,
     /// The gateway's shared HTTP, kept so the role-write client can be rebuilt from
     /// the current config on each write (see `role_writer`).
     pub http: Arc<Http>,
