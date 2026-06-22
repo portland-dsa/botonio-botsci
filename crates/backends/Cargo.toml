@@ -8,6 +8,9 @@ edition = "2024"
 # downstream crates (engine/cli) enable it in their dev-dependencies so their
 # orchestrator tests can mock the backends without a network.
 mock = ["dep:mockall"]
+# Hand-written, state-based fakes of each `*Client` trait for offline tests.
+# No dependency - just plain code gated off production builds.
+fakes = []
 # Per-backend gates for the live integration tests under `tests/*_live.rs`.
 live-discord = []
 live-solidarity-tech = []

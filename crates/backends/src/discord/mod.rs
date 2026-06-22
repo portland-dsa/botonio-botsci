@@ -24,3 +24,9 @@ pub use roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
 
 #[cfg(feature = "mock")]
 pub use client::MockDiscordClient;
+
+#[cfg(feature = "fakes")]
+mod fakes;
+
+#[cfg(feature = "fakes")]
+pub use fakes::{DiscordOp, FakeDiscord};
