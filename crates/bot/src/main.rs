@@ -12,6 +12,7 @@ mod lookup;
 mod moderator;
 mod notify;
 mod ping;
+mod refresh;
 mod render;
 
 use std::sync::Arc;
@@ -108,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
         cfg.audit_key_id.clone(),
     ));
     let rate_limiter = Arc::new(crate::lookup::RateLimiter::new(cfg.lookup_rate_per_min));
+    // The /refresh-cache throttle: a single process-wide window, shared by all moderators.
+    // Built here and moved into Data; nothing else needs it.
+    let refresh_cooldown = Arc::new(refresh::Cooldown::new(refresh::REFRESH_COOLDOWN));
 
     // First roster load before serving. A fresh, non-empty sweep is written; a failed or
     // empty initial sweep no longer hard-fails startup - the durable cache may already hold
@@ -224,6 +228,7 @@ async fn main() -> anyhow::Result<()> {
                     store,
                     auditor,
                     rate_limiter,
+                    refresh_cooldown,
                     guild_config,
                     http: ctx.http.clone(),
                     solidarity_tech,
@@ -355,26 +360,9 @@ fn spawn_refresh_loop(
         ticker.tick().await; // consume the immediate first tick (i.e. if the index is already fresh)
         loop {
             ticker.tick().await;
-            match sweep_roster(solidarity_tech.as_ref(), &list_id).await {
-                // An empty sweep is almost always an upstream glitch, not a real membership
-                // of zero - keep the last good roster rather than wiping it.
-                Ok(records) if records.is_empty() => {
-                    tracing::warn!(
-                        "solidarity tech sweep returned zero members; keeping last good roster"
-                    );
-                }
-                Ok(records) => match store.replace_roster(records).await {
-                    Ok(()) => tracing::info!("member roster refreshed"),
-                    // Keep the last good roster on a write failure - do not clear it.
-                    Err(e) => tracing::error!(
-                        error = %e,
-                        "member roster refresh failed to write; keeping last good roster"
-                    ),
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "member index refresh failed; keeping last good index");
-                }
-            }
+            // The sweep-and-replace step (and its keep-last-good logging) is shared with the
+            // on-demand /refresh-cache command; the report is for that command, not the loop.
+            let _ = refresh::refresh_once(store.as_ref(), solidarity_tech.as_ref(), &list_id).await;
         }
     });
 }

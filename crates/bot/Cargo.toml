@@ -60,6 +60,12 @@ harness = false
 name = "wizard_dispatch"
 harness = false
 
+# Behavior suite for the /refresh-cache cooldown (`src/refresh.rs`). Offline, Cucumber, no
+# database or gateway - drives the pure Cooldown over a hand-advanced clock. Cast: Sonic.
+[[test]]
+name = "refresh_cache"
+harness = false
+
 # `sd-notify` is a Unix-datagram-socket protocol and is meaningless off Linux; gating
 # it here keeps non-Linux development builds from pulling or compiling it.
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -37,3 +37,10 @@ harness = false
 [[test]]
 name = "bulk"
 harness = false
+
+# Behaviour suite for the staging `/strip-roles` reset (`Member::strip`). Offline,
+# Cucumber, mocks only. Cast: Sonic (the moderator), Knuckles (hand-approved), Tails
+# (a plain member the cache knows), Shadow (a stale override marker, no stamp).
+[[test]]
+name = "strip"
+harness = false
