@@ -15,6 +15,7 @@ mod notify;
 mod ping;
 mod refresh;
 mod render;
+mod scan;
 
 use std::sync::Arc;
 
@@ -156,12 +157,22 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // The framework setup closure below moves `store`, `auditor`, and `rate_limiter`
-    // into Data; clone the handles the watchdog needs before that happens.
+    // into Data; clone the handles the watchdog and scan loop need before that happens.
     let watchdog_store = store.clone();
     let setup_auditor = auditor.clone();
     let setup_rate_limiter = rate_limiter.clone();
     let setup_solidarity_tech = solidarity_tech.clone();
     let setup_guild_config = guild_config.clone();
+    let scan_store = store.clone();
+    let scan_auditor = auditor.clone();
+    let scan_solidarity_tech = solidarity_tech.clone();
+    let scan_guild_config = guild_config.clone();
+    let scan_interval = cfg.scan_interval;
+    let scan_threshold = engine::scan::ScanThreshold {
+        percent: cfg.scan_tripwire_percent,
+        floor: cfg.scan_tripwire_floor,
+    };
+    let scan_pace = cfg.scan_pace;
 
     let guild_id = cfg.guild_id;
     let token = secrecy::ExposeSecret::expose_secret(&cfg.token).to_owned();
@@ -225,6 +236,18 @@ async fn main() -> anyhow::Result<()> {
                 let gid = serenity::all::GuildId::new(guild_id);
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, gid).await?;
                 tracing::info!("commands registered; bot is ready to serve");
+                crate::scan::spawn_scan_loop(
+                    ctx.http.clone(),
+                    scan_store,
+                    scan_auditor,
+                    scan_solidarity_tech,
+                    scan_guild_config,
+                    guild_id,
+                    engine::backends::util::DiscordUserId(ready.user.id.get()),
+                    scan_interval,
+                    scan_threshold,
+                    scan_pace,
+                );
                 // The first index build already finished before `client.start()`, so
                 // reaching this point means gateway-ready AND index-built - exactly the
                 // condition systemd should treat as READY=1.

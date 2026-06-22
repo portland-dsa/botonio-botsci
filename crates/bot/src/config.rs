@@ -39,20 +39,12 @@ pub struct BotConfig {
     /// Per-moderator ceiling on member-card lookups of *other* members, per minute.
     pub lookup_rate_per_min: u32,
     /// How often the scheduled scan runs (when enabled in /setup).
-    // Read by the scan loop added in a later task.
-    #[allow(dead_code)]
     pub scan_interval: Duration,
     /// Tripwire: abort a pass when demotions reach this percentage of scanned members.
-    // Read by the scan loop added in a later task.
-    #[allow(dead_code)]
     pub scan_tripwire_percent: u8,
     /// Tripwire: ...and reach this absolute floor (so small guilds don't trip on churn).
-    // Read by the scan loop added in a later task.
-    #[allow(dead_code)]
     pub scan_tripwire_floor: usize,
-    /// Pause between role writes during the apply phase, to respect Discord rate limits.
-    // Read by the scan loop added in a later task.
-    #[allow(dead_code)]
+    /// Pause between role writes during the scan's apply phase.
     pub scan_pace: Duration,
 }
 
