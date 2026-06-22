@@ -305,6 +305,7 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
         mod_approval_channel: Some(DiscordChannelId(5)),
         unverified_channel: Some(DiscordChannelId(6)),
         dues_expired_channel: Some(DiscordChannelId(7)),
+        scan_enabled: true,
     };
     store.save_config(guild, &full).await.unwrap();
     assert_eq!(store.load_config(guild).await.unwrap(), full);

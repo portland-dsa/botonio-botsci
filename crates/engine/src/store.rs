@@ -198,6 +198,9 @@ pub struct GuildConfig {
     pub mod_approval_channel: Option<DiscordChannelId>,
     pub unverified_channel: Option<DiscordChannelId>,
     pub dues_expired_channel: Option<DiscordChannelId>,
+    /// Whether the scheduled membership scan runs for this guild. Off by default - the
+    /// scan reconciles roles and can demote, so it is opt-in via /setup.
+    pub scan_enabled: bool,
 }
 
 /// Reverse lookup from a Discord id to a [`MemberRecord`]. Async and fallible from
