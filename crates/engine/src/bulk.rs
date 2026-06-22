@@ -22,11 +22,27 @@ fn stale_after() -> Duration {
 }
 
 /// Whether a roster member is in the chosen sweep population.
+///
+/// "Unmanaged" treats a bare `Unverified` the same as no role at all: the population is
+/// everyone not yet sorted into a real membership status, i.e. holding neither `Member`
+/// nor `DuesExpired`. That way a member left (or skipped) at `Unverified` is re-picked-up
+/// by the next unmanaged sweep instead of being stranded.
 pub fn in_scope(member: &DiscordRosterMember, scope: BulkScope) -> bool {
     match scope {
         BulkScope::WholeGuild => true,
-        BulkScope::UnmanagedOnly => member.held.is_empty(),
+        BulkScope::UnmanagedOnly => !member
+            .held
+            .iter()
+            .any(|r| matches!(r, Role::Member | Role::DuesExpired)),
     }
+}
+
+/// Whether a member already holds exactly `role` and nothing else managed - so verifying
+/// them would be a no-op role write. The whole-server resync uses this (in the preview and
+/// the apply) to count and skip members whose role does not change; only the identity heal
+/// still runs for them.
+pub fn already_in_role(held: &[Role], role: Role) -> bool {
+    held.len() == 1 && held[0] == role
 }
 
 /// Drain the whole guild roster (via [`DiscordClient::members_page`]) and keep the
@@ -48,13 +64,19 @@ pub async fn enumerate<Dc: DiscordClient>(
         .collect())
 }
 
-/// The read-only preview tally: matched counts broken down by role, plus the miss and
-/// conflict counts. Computed from the captured population and the cache, no writes.
+/// The read-only preview tally: the role changes a sweep would make, plus the already-
+/// correct, miss, and conflict counts. Computed from the captured population and the
+/// cache, no writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PreviewTally {
     pub scanned: usize,
-    /// Counts in `Role::ALL` order: (Member, n), (DuesExpired, n), (Unverified, n).
+    /// Counts in `Role::ALL` order: matched members whose role WILL CHANGE to each role.
+    /// A member already holding exactly their earned role is not counted here (see
+    /// [`unchanged`](Self::unchanged)) so the confirmation lists only real writes.
     pub matched: Vec<(Role, usize)>,
+    /// Matched members already holding exactly their earned role: no write, only a
+    /// best-effort identity heal at apply time.
+    pub unchanged: usize,
     /// Members the cache does not know - the wizard queue estimate.
     pub misses: usize,
     /// Handle hits bound to another account - left for a manual `/verify`.
@@ -62,13 +84,16 @@ pub struct PreviewTally {
 }
 
 /// Partition `members` by running the pure `match_member` decision over cache reads
-/// (id first, then handle), tallying matched-by-role, misses, and conflicts. A fresh
-/// decision at apply time is authoritative; this is the moderator's count-check.
+/// (id first, then handle), tallying role changes, already-correct members, misses, and
+/// conflicts. A matched member already holding exactly their earned role counts as
+/// `unchanged`, not a change. A fresh decision at apply time is authoritative; this is the
+/// moderator's count-check.
 pub async fn preview<S: MemberStore>(
     store: &S,
     members: &[DiscordRosterMember],
 ) -> Result<PreviewTally, S::Error> {
     let mut counts = [0usize; Role::ALL.len()];
+    let mut unchanged = 0usize;
     let mut misses = 0usize;
     let mut conflicts = 0usize;
     for m in members {
@@ -80,11 +105,15 @@ pub async fn preview<S: MemberStore>(
         match match_member(by_id, by_handle, m.id, &m.handle) {
             MatchOutcome::Matched { record, .. } => {
                 let role = record.role();
-                let idx = Role::ALL
-                    .iter()
-                    .position(|&r| r == role)
-                    .expect("role in ALL");
-                counts[idx] += 1;
+                if already_in_role(&m.held, role) {
+                    unchanged += 1;
+                } else {
+                    let idx = Role::ALL
+                        .iter()
+                        .position(|&r| r == role)
+                        .expect("role in ALL");
+                    counts[idx] += 1;
+                }
             }
             MatchOutcome::Miss => misses += 1,
             MatchOutcome::Conflict => conflicts += 1,
@@ -94,6 +123,7 @@ pub async fn preview<S: MemberStore>(
     Ok(PreviewTally {
         scanned: members.len(),
         matched,
+        unchanged,
         misses,
         conflicts,
     })
@@ -158,5 +188,17 @@ mod tests {
         assert!(!miss_still_pending(true, &[Role::Member]));
         assert!(!miss_still_pending(true, &[Role::DuesExpired]));
         assert!(!miss_still_pending(false, &[]));
+    }
+
+    #[test]
+    fn already_in_role_only_when_holding_exactly_that_role() {
+        assert!(already_in_role(&[Role::Member], Role::Member));
+        // Holding nothing, a different role, or extra managed roles all count as a change.
+        assert!(!already_in_role(&[], Role::Member));
+        assert!(!already_in_role(&[Role::DuesExpired], Role::Member));
+        assert!(!already_in_role(
+            &[Role::Member, Role::Unverified],
+            Role::Member
+        ));
     }
 }

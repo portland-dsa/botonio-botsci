@@ -16,7 +16,7 @@ use engine::backends::discord::{DiscordClient, DiscordError};
 use engine::backends::util::{DiscordHandle, DiscordUserId};
 use engine::bulk::{self, miss_still_pending};
 use engine::store::{BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, MissState};
-use engine::verify::{self, VerifyOutcome};
+use engine::verify::{self, ResyncOutcome};
 
 use crate::commands::verify::{StepOutcome, verify_step};
 use crate::data::{Context, Error};
@@ -296,7 +296,7 @@ pub async fn bulk_verify(
     let mut role_tally: Vec<(Role, usize)> = Role::ALL.into_iter().map(|r| (r, 0)).collect();
 
     for (i, m) in members.iter().enumerate() {
-        let outcome = verify::verify(
+        let outcome = verify::resync_member(
             &*data.solidarity_tech,
             &discord,
             &*data.store,
@@ -304,32 +304,40 @@ pub async fn bulk_verify(
             invoker,
             m.id,
             m.handle.clone(),
+            &m.held,
         )
         .await;
 
-        match outcome {
-            Ok(VerifyOutcome::Verified(role)) => {
+        // Pace only the members we actually wrote to: a role change, or a miss that was not
+        // already Unverified. Untouched (already-correct) members fly past with no sleep.
+        let wrote = match outcome {
+            Ok(ResyncOutcome::Changed(role)) => {
                 if let Some(entry) = role_tally.iter_mut().find(|(r, _)| *r == role) {
                     entry.1 += 1;
                 }
+                true
             }
-            Ok(VerifyOutcome::Unverified) | Ok(VerifyOutcome::NotFound) => {
+            Ok(ResyncOutcome::Unchanged(_)) => false,
+            Ok(ResyncOutcome::Miss) => {
                 queue.push(BulkMiss {
                     discord_user_id: m.id,
                     handle: Some(m.handle.clone()),
                     position: queue.len() as i32,
                     state: MissState::Pending,
                 });
+                !bulk::already_in_role(&m.held, Role::Unverified)
             }
-            Ok(VerifyOutcome::Conflict) => {
-                // Conflicts are audited by verify and left for individual /verify; not queued.
+            Ok(ResyncOutcome::Conflict) => {
+                // Conflicts are audited by resync and left for individual /verify; not queued.
                 tracing::debug!(user = %m.id, "bulk-verify: conflict, leaving for /verify");
+                false
             }
             Err(e) => {
                 // One member's error never aborts the run.
                 tracing::warn!(user = %m.id, error = %e, "bulk-verify: apply error, continuing");
+                false
             }
-        }
+        };
 
         if i % PROGRESS_EVERY == 0 {
             let _ = sweep_handle
@@ -341,7 +349,9 @@ pub async fn bulk_verify(
                 )
                 .await;
         }
-        tokio::time::sleep(APPLY_PACING).await;
+        if wrote {
+            tokio::time::sleep(APPLY_PACING).await;
+        }
     }
 
     let session = BulkSession {

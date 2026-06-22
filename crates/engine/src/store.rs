@@ -334,7 +334,10 @@ pub trait OverrideLog: Send + Sync {
 /// Which members `/bulk-verify` sweeps. The DB token spellings are owned here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BulkScope {
-    /// Members holding none of the managed status roles - the onboarding/repair default.
+    /// Members not yet sorted into a real membership status - they hold neither `Member`
+    /// nor `DuesExpired` (a bare `Unverified`, or no managed role at all, both count). The
+    /// onboarding/repair default; a later sweep re-picks-up anyone still here, so a skipped
+    /// member is never stranded.
     UnmanagedOnly,
     /// Every member, re-evaluated - the opt-in full resync.
     WholeGuild,

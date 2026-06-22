@@ -175,6 +175,23 @@ pub enum VerifyOutcome {
     Conflict,
 }
 
+/// What a bulk resync did to one member - finer-grained than [`VerifyOutcome`] so the
+/// sweep can tally the real role changes apart from the members it left untouched.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub enum ResyncOutcome {
+    /// Matched and the role was applied (a Discord write happened).
+    Changed(Role),
+    /// Matched and already holding exactly this role: no audit, no role write - only the
+    /// best-effort identity heal ran.
+    Unchanged(Role),
+    /// Unknown to Solidarity Tech; left for the wizard. `Unverified` was assigned unless
+    /// the member already held exactly it, in which case nothing was written.
+    Miss,
+    /// Handle bound to another account; nothing was changed.
+    Conflict,
+}
+
 /// Why a verification could not complete. The two store/audit failures are stringified
 /// (their concrete types are the store's and audit log's associated errors); the role
 /// write keeps its own message. Each maps to a generic, PII-free reply at the bot.
@@ -318,6 +335,132 @@ where
             )
             .await?;
             Ok(VerifyOutcome::Conflict)
+        }
+    }
+}
+
+/// Resync one swept member: like [`verify`], but it skips the work when nothing would
+/// change. A matched member already holding exactly their earned role gets no audit row and
+/// no role write - only the best-effort identity heal (to refresh a drifted handle). A
+/// matched member whose role differs takes the full verify path; an unknown member is
+/// assigned `Unverified` (unless they already hold exactly it) and left for the wizard.
+///
+/// `held` is the member's current managed roles from the roster sweep; it is what lets the
+/// no-op be decided without a per-member Discord read. The caller paces only the outcomes
+/// that actually wrote ([`ResyncOutcome::Changed`] / a freshly-assigned [`ResyncOutcome::Miss`]).
+#[allow(clippy::too_many_arguments)]
+pub async fn resync_member<St, Dc, S, A>(
+    solidarity_tech: &St,
+    discord: &Dc,
+    store: &S,
+    audit: &A,
+    invoker: DiscordUserId,
+    target: DiscordUserId,
+    target_handle: DiscordHandle,
+    held: &[Role],
+) -> Result<ResyncOutcome, VerifyError>
+where
+    St: SolidarityTechClient,
+    Dc: DiscordClient,
+    S: MemberStore + IdentityWrite,
+    A: AuditLog,
+{
+    let by_id = store
+        .by_discord_id(target)
+        .await
+        .map_err(|e| VerifyError::Store(e.to_string()))?;
+    let by_handle = match &by_id {
+        Some(_) => None,
+        None => store
+            .by_handle(&target_handle)
+            .await
+            .map_err(|e| VerifyError::Store(e.to_string()))?,
+    };
+
+    match match_member(by_id, by_handle, target, &target_handle) {
+        MatchOutcome::Matched { record, heal } => {
+            let role = record.role();
+            if crate::bulk::already_in_role(held, role) {
+                // Already in exactly the right role: no audit, no role write. Still refresh
+                // a drifted handle (best-effort, as in `verify`).
+                self_heal(
+                    solidarity_tech,
+                    store,
+                    &record,
+                    target,
+                    &target_handle,
+                    &heal,
+                )
+                .await;
+                Ok(ResyncOutcome::Unchanged(role))
+            } else {
+                record_outcome(
+                    audit,
+                    invoker,
+                    target,
+                    "verified",
+                    Some(role),
+                    VerifyMethod::Discord,
+                )
+                .await?;
+                assign_role_or_record_failure(
+                    discord,
+                    audit,
+                    invoker,
+                    target,
+                    role,
+                    VerifyMethod::Discord,
+                )
+                .await?;
+                self_heal(
+                    solidarity_tech,
+                    store,
+                    &record,
+                    target,
+                    &target_handle,
+                    &heal,
+                )
+                .await;
+                Ok(ResyncOutcome::Changed(role))
+            }
+        }
+        MatchOutcome::Miss => {
+            if crate::bulk::already_in_role(held, Role::Unverified) {
+                // Already Unverified and still unknown: nothing to write, just leave them
+                // for the wizard.
+                return Ok(ResyncOutcome::Miss);
+            }
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "unverified",
+                Some(Role::Unverified),
+                VerifyMethod::Discord,
+            )
+            .await?;
+            assign_role_or_record_failure(
+                discord,
+                audit,
+                invoker,
+                target,
+                Role::Unverified,
+                VerifyMethod::Discord,
+            )
+            .await?;
+            Ok(ResyncOutcome::Miss)
+        }
+        MatchOutcome::Conflict => {
+            record_outcome(
+                audit,
+                invoker,
+                target,
+                "conflict",
+                None,
+                VerifyMethod::Discord,
+            )
+            .await?;
+            Ok(ResyncOutcome::Conflict)
         }
     }
 }
@@ -790,5 +933,122 @@ mod match_tests {
             &DiscordHandle("rosy".into()),
         );
         assert!(matches!(out, EmailMatchOutcome::Matched { .. }));
+    }
+}
+
+#[cfg(test)]
+mod resync_tests {
+    use super::*;
+    use crate::backends::discord::{MemberRoles, MockDiscordClient};
+    use crate::backends::solidarity_tech::MockSolidarityTechClient;
+    use crate::store::{InMemoryStore, Index, MemberRecord};
+    use crate::testkit::ready_ok;
+    use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
+    use domain::MigsStatus;
+    use std::convert::Infallible;
+    use std::sync::Mutex;
+
+    /// An audit double that just records the action verbs written to it.
+    #[derive(Default)]
+    struct Recorder {
+        actions: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AuditLog for Recorder {
+        type Error = Infallible;
+        async fn record(
+            &self,
+            _actor: DiscordUserId,
+            _subject: DiscordUserId,
+            action: &str,
+            _detail: serde_json::Value,
+        ) -> Result<(), Infallible> {
+            self.actions.lock().unwrap().push(action.to_owned());
+            Ok(())
+        }
+    }
+
+    /// A cached member in good standing (earns `Member`), linked to `id`/`handle`.
+    fn member_in_good_standing(id: u64, handle: &str) -> MemberRecord {
+        MemberRecord {
+            st_user_id: StUserId(format!("st-{id}")),
+            discord_user_id: Some(DiscordUserId(id)),
+            discord_handle: Some(DiscordHandle(handle.into())),
+            email: Email(format!("{handle}@b.test")),
+            full_name: None,
+            standing: Some(MigsStatus::MemberInGoodStanding),
+            join_date: None,
+            expires: None,
+            membership_type: None,
+            monthly_dues: None,
+            yearly_dues: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resync_leaves_an_already_correct_member_untouched() {
+        let store = InMemoryStore::new(Index::from_records(vec![member_in_good_standing(
+            7, "rosy",
+        )]));
+        // No Discord or Solidarity Tech expectations: any write or read would panic, proving
+        // an already-correct member triggers neither (the handle matches, so the heal is a
+        // no-op too).
+        let discord = MockDiscordClient::new();
+        let st = MockSolidarityTechClient::new();
+        let audit = Recorder::default();
+
+        let outcome = resync_member(
+            &st,
+            &discord,
+            &store,
+            &audit,
+            DiscordUserId(1),
+            DiscordUserId(7),
+            DiscordHandle("rosy".into()),
+            &[Role::Member],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, ResyncOutcome::Unchanged(Role::Member));
+        assert!(
+            audit.actions.lock().unwrap().is_empty(),
+            "an unchanged member must not be audited"
+        );
+    }
+
+    #[tokio::test]
+    async fn resync_applies_the_role_when_it_differs() {
+        let store = InMemoryStore::new(Index::from_records(vec![member_in_good_standing(
+            7, "rosy",
+        )]));
+        let mut discord = MockDiscordClient::new();
+        discord
+            .expect_member_roles()
+            .returning(|_| ready_ok(MemberRoles::default()));
+        discord.expect_set_role().returning(|_, _, _| ready_ok(()));
+        let st = MockSolidarityTechClient::new();
+        let audit = Recorder::default();
+
+        let outcome = resync_member(
+            &st,
+            &discord,
+            &store,
+            &audit,
+            DiscordUserId(1),
+            DiscordUserId(7),
+            DiscordHandle("rosy".into()),
+            &[], // holds nothing - a real change to Member
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, ResyncOutcome::Changed(Role::Member));
+        assert_eq!(
+            audit.actions.lock().unwrap().as_slice(),
+            ["member_verify"],
+            "the change is audited once"
+        );
     }
 }
