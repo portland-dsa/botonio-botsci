@@ -2,8 +2,8 @@
 //! Solidarity Tech record, repair the stored identity link, and assign the role their
 //! standing earns.
 //!
-//! [`match_member`] is the pure decision - id first (the immutable key), then handle
-//! as a repair fallback, with a guard that never re-links a record already bound to a
+//! [`locate`] reads id-first then handle; [`decide`] is the pure decision over where
+//! the record was found, with a guard that never re-links a record already bound to a
 //! different account. [`verify`] is the orchestrator that executes a decision against
 //! the backends, the cache, and the audit log.
 
@@ -26,7 +26,7 @@ pub enum HealAction {
     None,
 }
 
-/// What [`match_member`] decided.
+/// What [`decide`] decided.
 ///
 /// `#[must_use]`: discarding this throws away the conflict guard and the miss decision,
 /// silently running an assignment against an unresolved member, so a caller that drops it
@@ -67,7 +67,7 @@ pub enum EmailMatchOutcome {
 /// The [`HealAction`] a successful match implies, from the stored record and the
 /// member's current identity. A record that already carries a Discord id only ever
 /// needs its handle refreshed; one with no id is backfilled. Shared by
-/// [`match_member`] (id/handle path) and [`match_by_email`] (email path) so both agree.
+/// [`decide`] (id/handle path) and [`match_by_email`] (email path) so both agree.
 fn heal_for(
     record: &MemberRecord,
     target: DiscordUserId,
@@ -85,35 +85,69 @@ fn heal_for(
     }
 }
 
-/// Decide the verification outcome from the two cache reads.
+/// Where a cache lookup found a member's record - the input to [`decide`], replacing the
+/// `(Option, Option)` pair the verbs used to thread into the old read-and-match block.
 ///
-/// An id hit is authoritative and repairs only a drifted handle. On an id miss, a
-/// handle hit either backfills a missing id or - if an id is already present, which
-/// (since the id lookup missed) must be a *different* account's - is a conflict the
-/// caller must not resolve automatically.
-pub fn match_member(
-    by_id: Option<MemberRecord>,
-    by_handle: Option<MemberRecord>,
-    target_id: DiscordUserId,
+/// [`ById`](Located::ById) is the authoritative hit on the immutable key; [`ByHandle`](Located::ByHandle)
+/// is the repair-or-conflict branch reached only after an id miss; [`Unknown`](Located::Unknown)
+/// is a miss by both. `#[must_use]`: dropping it discards the decision a verify must act on.
+#[derive(Debug)]
+#[must_use]
+pub enum Located {
+    /// Found by Discord id - authoritative; at most the stored handle drifted.
+    ById(MemberRecord),
+    /// Found by handle after the id missed - a backfill, or a conflict if the record
+    /// already carries a different id.
+    ByHandle(MemberRecord),
+    /// No record by id or handle.
+    Unknown,
+}
+
+/// Decide the verification outcome from where the record was found.
+///
+/// An [`ById`](Located::ById) hit is authoritative and repairs only a drifted handle. An
+/// [`ByHandle`](Located::ByHandle) hit either backfills a record that has no id yet or - if an
+/// id is already present, which (since the id lookup missed) must be a *different* account's -
+/// is a [`Conflict`](MatchOutcome::Conflict) the caller must not resolve automatically. The
+/// conflict guard is the security boundary against handle recycling.
+pub fn decide(
+    found: Located,
+    target: DiscordUserId,
     target_handle: &DiscordHandle,
 ) -> MatchOutcome {
-    if let Some(record) = by_id {
-        let heal = heal_for(&record, target_id, target_handle);
-        return MatchOutcome::Matched { record, heal };
-    }
-    if let Some(record) = by_handle {
-        return match record.discord_user_id {
+    match found {
+        Located::ById(record) => {
+            let heal = heal_for(&record, target, target_handle);
+            MatchOutcome::Matched { record, heal }
+        }
+        Located::ByHandle(record) => match record.discord_user_id {
             None => {
-                let heal = heal_for(&record, target_id, target_handle);
+                let heal = heal_for(&record, target, target_handle);
                 MatchOutcome::Matched { record, heal }
             }
-            // An id is present and necessarily differs from `target_id` (an equal id
-            // would have been found by the id lookup), so the handle now points at a
-            // record bound to another account.
+            // An id is present and necessarily differs from `target` (an equal id would have
+            // been found by the id lookup), so the handle points at another account's record.
             Some(_) => MatchOutcome::Conflict,
-        };
+        },
+        Located::Unknown => MatchOutcome::Miss,
     }
-    MatchOutcome::Miss
+}
+
+/// Read a member by id, then by handle on a miss, into a [`Located`]. The single definition of
+/// the id-first / handle-fallback read the verify path and the bulk preview share; the id hit
+/// wins, so the handle is read only when the id lookup misses.
+pub async fn locate<S: MemberStore>(
+    store: &S,
+    id: DiscordUserId,
+    handle: &DiscordHandle,
+) -> Result<Located, S::Error> {
+    if let Some(record) = store.by_discord_id(id).await? {
+        return Ok(Located::ById(record));
+    }
+    Ok(match store.by_handle(handle).await? {
+        Some(record) => Located::ByHandle(record),
+        None => Located::Unknown,
+    })
 }
 
 /// Decide which (if any) of the records a typed email resolved to may be claimed for
@@ -236,7 +270,7 @@ impl VerifyMethod {
 
 /// Verify `target` and assign their role, on behalf of moderator `invoker`.
 ///
-/// Reads the cache by id then handle, decides via [`match_member`], records the
+/// Reads the cache by id then handle via [`locate`], decides via [`decide`], records the
 /// decided outcome to the audit log *before* any write (so no grant is unattributable;
 /// an audit failure refuses the grant), assigns the role, and then repairs the stored
 /// identity link in Solidarity Tech and the cache. The self-heal is best-effort: once
@@ -257,20 +291,11 @@ where
     S: MemberStore + IdentityWrite,
     A: AuditLog,
 {
-    let by_id = store
-        .by_discord_id(target)
+    let located = locate(store, target, &target_handle)
         .await
         .map_err(|e| VerifyError::Store(e.to_string()))?;
-    // The id hit wins; only read by handle when it missed.
-    let by_handle = match &by_id {
-        Some(_) => None,
-        None => store
-            .by_handle(&target_handle)
-            .await
-            .map_err(|e| VerifyError::Store(e.to_string()))?,
-    };
 
-    match match_member(by_id, by_handle, target, &target_handle) {
+    match decide(located, target, &target_handle) {
         MatchOutcome::Matched { record, heal } => {
             let role = record.role();
             record_outcome(
@@ -365,19 +390,11 @@ where
     S: MemberStore + IdentityWrite,
     A: AuditLog,
 {
-    let by_id = store
-        .by_discord_id(target)
+    let located = locate(store, target, &target_handle)
         .await
         .map_err(|e| VerifyError::Store(e.to_string()))?;
-    let by_handle = match &by_id {
-        Some(_) => None,
-        None => store
-            .by_handle(&target_handle)
-            .await
-            .map_err(|e| VerifyError::Store(e.to_string()))?,
-    };
 
-    match match_member(by_id, by_handle, target, &target_handle) {
+    match decide(located, target, &target_handle) {
         MatchOutcome::Matched { record, heal } => {
             let role = record.role();
             if crate::bulk::already_in_role(held, role) {
@@ -860,13 +877,22 @@ mod match_tests {
             monthly_dues: None,
             yearly_dues: None,
         };
-        let out = match_member(
-            None,
-            Some(record),
+        let out = decide(
+            Located::ByHandle(record),
             DiscordUserId(9),
             &DiscordHandle("rosy".into()),
         );
         assert!(matches!(out, MatchOutcome::Conflict));
+    }
+
+    #[test]
+    fn id_hit_is_authoritative_and_matches() {
+        let out = decide(
+            Located::ById(rec("st-1", Some(9), "rosy")),
+            DiscordUserId(9),
+            &DiscordHandle("rosy".into()),
+        );
+        assert!(matches!(out, MatchOutcome::Matched { .. }));
     }
 
     #[test]
