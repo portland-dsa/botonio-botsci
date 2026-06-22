@@ -23,6 +23,15 @@ Environment=RUST_LOG=info,botonio_botsci=debug
 Environment=AUDIT_KEY_ID=v1
 Environment=BOT_LOOKUP_RATE_PER_MIN=10
 
+# Scheduled membership scan (role sync + orphan sweep). OFF until enabled per-guild in
+# /setup (scan_enabled); these only tune it once it is on. Staging uses the short floor
+# interval for a quick test loop; the tripwire aborts a pass that would demote at least
+# PERCENT% of scanned members AND at least FLOOR members.
+Environment=BOT_SCAN_INTERVAL_SECS=300
+Environment=BOT_SCAN_TRIPWIRE_PERCENT=20
+Environment=BOT_SCAN_TRIPWIRE_FLOOR=5
+Environment=BOT_SCAN_PACE_MS=250
+
 # Local membership cache (Postgres). The runtime connection authenticates by peer over
 # the Unix socket - no password (the long-running process holds no DB secret). The
 # migrate phase (ExecStartPre) uses the migration credential below over TCP loopback.
