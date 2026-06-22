@@ -47,4 +47,9 @@ Environment=SOLIDARITY_TECH_MOCK_PERSONAS=${good_standing_id}=good_standing,${ex
 # staging compromise can't reach real member PII - and with only this, real ST 401s anyway.
 Environment=SOLIDARITY_TECH_TOKEN=mock
 
+# Staging-only testing affordances, each gated on its own env var (absent in production):
+# BOT_FORGET_COMMAND registers /forget (reset one member); BOT_STRIP_ROLES_COMMAND registers
+# /strip-roles (clear the managed roles server-wide so /bulk-verify can be retested). The
+# forget-of-overridden members /strip-roles runs also relies on the staging DELETE grant.
 Environment=BOT_FORGET_COMMAND=1
+Environment=BOT_STRIP_ROLES_COMMAND=1
