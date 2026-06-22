@@ -27,6 +27,7 @@ const SET_STATUS_ROLES_ID: &str = "setup_set_status_roles";
 const SET_MODERATOR_ID: &str = "setup_set_moderator";
 const SET_CHANNELS_ID: &str = "setup_set_channels";
 const BACK_ID: &str = "setup_back";
+const SCAN_TOGGLE_ID: &str = "setup_scan_toggle";
 
 // Per-setting select-menu custom ids.
 const MOD_ROLE_ID: &str = "setup_role_moderator";
@@ -122,6 +123,22 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
             BACK_ID => {
                 update_panel(&ctx, &interaction, accent, panel_buttons(), None).await;
             }
+            SCAN_TOGGLE_ID => {
+                if !ack(&ctx, &interaction).await {
+                    continue;
+                }
+                let guild = DiscordGuildId(data.config.guild_id);
+                let mut cfg = GuildConfig::clone(&data.guild_config.load());
+                cfg.scan_enabled = !cfg.scan_enabled;
+                let note = if let Err(e) = data.store.save_config(guild, &cfg).await {
+                    tracing::error!(error = %e, "setup: failed to save guild config");
+                    Some("Something went wrong saving that - please try again.".to_owned())
+                } else {
+                    data.guild_config.store(std::sync::Arc::new(cfg));
+                    None
+                };
+                edit_panel(&ctx, &interaction, accent, panel_buttons(), note.as_deref()).await;
+            }
             MEMBER_ROLE_ID | DUES_ROLE_ID | UNVERIFIED_ROLE_ID | OVERRIDE_ROLE_ID => {
                 // Acknowledge first so the persist + audit below can't blow Discord's
                 // 3-second response deadline; the panel is then edited in place.
@@ -183,6 +200,9 @@ fn panel_buttons() -> Vec<CreateActionRow> {
             .style(ButtonStyle::Secondary),
         CreateButton::new(SET_CHANNELS_ID)
             .label("Set channels")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new(SCAN_TOGGLE_ID)
+            .label("Toggle scheduled scan")
             .style(ButtonStyle::Secondary),
     ])]
 }

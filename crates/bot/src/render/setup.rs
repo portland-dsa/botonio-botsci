@@ -46,6 +46,11 @@ pub fn config_embed(cfg: &GuildConfig, accent: u32) -> CreateEmbed {
             channel_line(cfg.dues_expired_channel),
             false,
         )
+        .field(
+            "Scheduled scan",
+            if cfg.scan_enabled { "On" } else { "Off" },
+            false,
+        )
 }
 
 #[cfg(test)]
