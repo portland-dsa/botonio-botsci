@@ -1,4 +1,4 @@
-//! The object-safe `DiscordClient` trait (with a `mockall` mock under the `mock` feature).
+//! The object-safe `DiscordClient` trait (with a hand-written fake under the `fakes` feature).
 
 use async_trait::async_trait;
 
@@ -10,14 +10,13 @@ use super::roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
 
 /// Async, object-safe interface for the bot's guild role operations.
 ///
-/// `mockall` generates a mock under the `mock` feature so callers can be tested
-/// without a live bot token; the production implementation is
-/// [`DiscordHttp`](super::DiscordHttp).
+/// A hand-written, state-based fake is available under the `fakes` feature so
+/// callers can be tested without a live bot token; the production implementation
+/// is [`DiscordHttp`](super::DiscordHttp).
 ///
 /// These are the guild-state writes - plus the reads that inform them - that the
 /// bot's role-verification and scheduled-scan work drives.
 #[async_trait]
-#[cfg_attr(feature = "mock", mockall::automock)]
 pub trait DiscordClient: Send + Sync {
     /// Returns the guild's [`DiscordGuildId`], as resolved during construction.
     fn guild_id(&self) -> DiscordGuildId;

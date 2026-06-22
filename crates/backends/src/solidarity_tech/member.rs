@@ -67,14 +67,14 @@ pub struct SolidarityTechMember {
 /// a fixture can set only the fields it cares about and spread the rest with
 /// `..Default::default()`.
 ///
-/// Gated to test and `mock` builds on purpose. A `Default` is normally an
+/// Gated to test and `fakes` builds on purpose. A `Default` is normally an
 /// unconditional impl, but this one is a foot-gun in production: the empty
 /// `StUserId`/`Email` it builds bypass the non-empty invariant those newtypes
 /// enforce on [`FromStr`](std::str::FromStr), and a member with an empty `id`
 /// would `PUT /users/` (trailing slash). It exists solely for fixture ergonomics
-/// (the test and `mock` builds where every fixture sets `id`/`email` anyway), so
+/// (the test and `fakes` builds where every fixture sets `id`/`email` anyway), so
 /// keeping it out of production code is correct, not arbitrary.
-#[cfg(any(test, feature = "mock"))]
+#[cfg(any(test, feature = "fakes"))]
 impl Default for SolidarityTechMember {
     fn default() -> Self {
         Self {

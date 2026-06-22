@@ -4,10 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-# Generate the mockall mocks of each `*Client` trait. Off by default; the
-# downstream crates (engine/cli) enable it in their dev-dependencies so their
-# orchestrator tests can mock the backends without a network.
-mock = ["dep:mockall"]
 # Hand-written, state-based fakes of each `*Client` trait for offline tests.
 # No dependency - just plain code gated off production builds.
 fakes = []
@@ -19,7 +15,6 @@ live-solidarity-tech = []
 domain = { path = "../domain" }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-mockall = { version = "0.13", optional = true }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
