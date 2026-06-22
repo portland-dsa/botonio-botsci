@@ -295,13 +295,13 @@ pub async fn bulk_verify(
     let mut queue: Vec<BulkMiss> = Vec::new();
     let mut role_tally: Vec<(Role, usize)> = Role::ALL.into_iter().map(|r| (r, 0)).collect();
 
+    let store = DataStore::new(
+        &*data.solidarity_tech,
+        &discord,
+        &*data.store,
+        &*data.auditor,
+    );
     for (i, m) in members.iter().enumerate() {
-        let store = DataStore::new(
-            &*data.solidarity_tech,
-            &discord,
-            &*data.store,
-            &*data.auditor,
-        );
         let outcome = Member::new(
             &store,
             Target {

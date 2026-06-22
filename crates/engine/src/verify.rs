@@ -6,8 +6,8 @@
 //! the record was found, with a guard that never re-links a record already bound to a
 //! different account. [`Member`] is the facade handle the verbs hang off: build a
 //! [`DataStore`] from the four backends, wrap it with [`Member::new`], and call the
-//! verb (`verify`, `resync`, `verify_by_email`, `override_approve`, `clear_override`,
-//! `forget`). [`MemberError`] is the one concrete error the verbs surface.
+//! verb (`verify`, `resync`, `verify_by_email`, `override_approve`, `forget`).
+//! [`MemberError`] is the one concrete error the verbs surface.
 
 use domain::Role;
 
@@ -161,7 +161,7 @@ pub async fn locate<S: MemberStore>(
 /// exactly one already carries `target`'s id (an idempotent re-verify); otherwise it is a
 /// [`Conflict`], because the code never guesses which of several records to bind.
 ///
-/// This is the email key's form of Part 1's impersonation guard: never bind an account to
+/// This is the email key's form of the id/handle path's impersonation guard: never bind an account to
 /// a record that already belongs to a different one.
 ///
 /// [`Miss`]: EmailMatchOutcome::Miss
