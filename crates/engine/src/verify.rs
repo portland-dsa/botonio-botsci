@@ -562,8 +562,9 @@ where
 }
 
 /// How a verification was initiated, written to the audit row's `method` field so a query
-/// or operator can tell the automatic id/handle path ([`verify`]) from the manual email
-/// path ([`verify_by_email`]) from the hand-approval path ([`override_approve`]). A closed
+/// or operator can tell the automatic id/handle path ([`verify`](Member::verify)) from the
+/// manual email path ([`verify_by_email`](Member::verify_by_email)) from the hand-approval
+/// path ([`override_approve`](Member::override_approve)). A closed
 /// set, so a call site cannot record a typo'd value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerifyMethod {
