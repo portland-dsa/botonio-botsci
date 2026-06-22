@@ -8,6 +8,7 @@ mod data;
 mod error;
 mod guild_config;
 mod guild_guard;
+mod join;
 mod lookup;
 mod moderator;
 mod notify;
@@ -202,6 +203,11 @@ async fn main() -> anyhow::Result<()> {
                                 &*ctx.http, guild.id, home, *is_new,
                             )
                             .await;
+                        }
+                        // A member joined: auto-verify them against Solidarity Tech and
+                        // assign their earned role (silent - no member-facing message).
+                        serenity::all::FullEvent::GuildMemberAddition { new_member } => {
+                            crate::join::on_guild_member_add(ctx, new_member, data).await?;
                         }
                         _ => {}
                     }
