@@ -107,6 +107,34 @@ where
     }
 }
 
+/// The card-read facade: resolve a present member to the [`CardView`] to show, through one
+/// trait method instead of two raw store handles. A combiner over the two backing reads -
+/// [`MemberStore`] for the Solidarity Tech record, [`OverrideLog`] for the hand-approval stamp -
+/// with [`card_view`](CardRead::card_view) a defaulted method, mirroring [`crate::verify::Heal`].
+/// The blanket impl makes the production `PgStore` and the test `InMemoryStore` both `CardRead`
+/// with no glue, so a caller reads cards through `store.card_view(..)` rather than wiring
+/// [`resolve_view`] up by hand.
+#[async_trait::async_trait]
+pub trait CardRead: MemberStore + OverrideLog {
+    /// Resolve `subject` to its card view by Discord user id only (record > override > unknown).
+    /// The default delegates to [`resolve_view`], so the id-only rule (never match on handle)
+    /// holds for every implementor. Bounded `Self: Sized` because the delegation hands `self` to
+    /// the generic [`resolve_view`]; every implementor is a concrete store, so this never bites.
+    async fn card_view(
+        &self,
+        subject: &PresentMember,
+    ) -> Result<CardView, ResolveError<<Self as MemberStore>::Error, <Self as OverrideLog>::Error>>
+    where
+        Self: Sized,
+    {
+        resolve_view(self, self, subject).await
+    }
+}
+
+// Empty blanket impl: every store that can read records and overrides gets `card_view` from the
+// trait default. No method bodies, so no `#[async_trait]`.
+impl<T: MemberStore + OverrideLog> CardRead for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +216,20 @@ mod tests {
         let store = InMemoryStore::new(Index::default_for_test());
         let view = resolve_view(&store, &store, &subject(7)).await.unwrap();
         assert!(matches!(view, CardView::Unknown));
+    }
+
+    #[tokio::test]
+    async fn card_view_trait_method_matches_resolve_view() {
+        // The CardRead blanket impl gives any store `card_view`, delegating to resolve_view:
+        // a present member resolves to their record, a stranger to Unknown.
+        let store = InMemoryStore::new(Index::build(vec![member("zoop", 42)]));
+        assert!(matches!(
+            store.card_view(&subject(42)).await.unwrap(),
+            CardView::Member(_)
+        ));
+        assert!(matches!(
+            store.card_view(&subject(999)).await.unwrap(),
+            CardView::Unknown
+        ));
     }
 }

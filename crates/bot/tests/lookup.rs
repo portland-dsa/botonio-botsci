@@ -145,7 +145,6 @@ impl LookupWorld {
         self.last_subject = Some(target);
         let outcome = lookup(
             &store,
-            &store,
             &self.audit,
             &limiter,
             invoker,
@@ -206,7 +205,7 @@ async fn looks_up_eleven(world: &mut LookupWorld, actor: String, target: String)
     world.last_subject = Some(t);
     let mut last = None;
     for _ in 0..11 {
-        last = Some(lookup(&store, &store, &world.audit, &limiter, a, t, is_mod).await);
+        last = Some(lookup(&store, &world.audit, &limiter, a, t, is_mod).await);
     }
     world.last = last;
 }
