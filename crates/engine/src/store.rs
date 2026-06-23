@@ -180,7 +180,7 @@ impl Index {
 
 /// The per-guild runtime configuration set through the bot's `/setup` command:
 /// the moderator role, the three managed status roles, the additive Manual Override
-/// marker, and the three verification channels. Every field is optional - a freshly
+/// marker, and the verification channels. Every field is optional - a freshly
 /// deployed guild has nothing set until a moderator configures it. Built from id
 /// newtypes so a store maps it to a single nullable-column row with no nesting, exactly
 /// like [`MemberRecord`].
@@ -197,6 +197,10 @@ pub struct GuildConfig {
     pub mod_approval_channel: Option<DiscordChannelId>,
     pub unverified_channel: Option<DiscordChannelId>,
     pub dues_expired_channel: Option<DiscordChannelId>,
+    /// The moderator-private channel that logs every successful self-service
+    /// verification - the member and the email that matched. Unset by default;
+    /// when unset the grant still happens and only the log post is skipped.
+    pub verification_log_channel: Option<DiscordChannelId>,
     /// Whether the scheduled membership scan runs for this guild. Off by default - the
     /// scan reconciles roles and can demote, so it is opt-in via /setup.
     pub scan_enabled: bool,
