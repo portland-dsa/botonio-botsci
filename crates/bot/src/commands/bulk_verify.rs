@@ -15,7 +15,9 @@ use domain::{DiscordGuildId, Role};
 use engine::backends::discord::{DiscordClient, DiscordError};
 use engine::backends::util::{DiscordHandle, DiscordUserId};
 use engine::bulk::{self, miss_still_pending};
-use engine::store::{BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, MissState};
+use engine::store::{
+    BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus, MissState,
+};
 use engine::verify::{DataStore, Member, ResyncOutcome, Target};
 
 use crate::commands::verify::{StepOutcome, verify_step};
@@ -292,7 +294,7 @@ pub async fn bulk_verify(
 
     // --- Apply ---
     let now = Utc::now();
-    let mut queue: Vec<BulkMiss> = Vec::new();
+    let mut queue: Vec<BulkQueueEntry> = Vec::new();
     let mut role_tally: Vec<(Role, usize)> = Role::ALL.into_iter().map(|r| (r, 0)).collect();
 
     let store = DataStore::new(
@@ -323,11 +325,12 @@ pub async fn bulk_verify(
             }
             Ok(ResyncOutcome::Unchanged(_)) => false,
             Ok(ResyncOutcome::Miss) => {
-                queue.push(BulkMiss {
+                queue.push(BulkQueueEntry {
                     discord_user_id: m.id,
                     handle: Some(m.handle.clone()),
                     position: queue.len() as i32,
                     state: MissState::Pending,
+                    kind: BulkQueueKind::Miss,
                 });
                 !bulk::already_in_role(&m.held, Role::Unverified)
             }

@@ -17,8 +17,9 @@ use chrono::NaiveDate;
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::store::{
-    BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, IdentityWrite, InMemoryStore,
-    Index, MemberRecord, MemberStore, MissState, OverrideLog, RosterWrite,
+    BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
+    IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, MissState, OverrideLog,
+    RosterWrite,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use persistence::PgStore;
@@ -460,12 +461,13 @@ fn session(guild: u64) -> BulkSession {
     }
 }
 
-fn miss(id: u64, pos: i32) -> BulkMiss {
-    BulkMiss {
+fn miss(id: u64, pos: i32) -> BulkQueueEntry {
+    BulkQueueEntry {
         discord_user_id: DiscordUserId(id),
         handle: Some(DiscordHandle(format!("u{id}"))),
         position: pos,
         state: MissState::Pending,
+        kind: BulkQueueKind::Miss,
     }
 }
 

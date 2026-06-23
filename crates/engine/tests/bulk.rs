@@ -9,8 +9,8 @@ use cucumber::{World as _, given, then, when};
 use engine::backends::discord::{DiscordRosterMember, FakeDiscord, Role};
 use engine::bulk::{self, PreviewTally, miss_still_pending};
 use engine::store::{
-    BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, InMemoryStore, Index,
-    MemberRecord, MissState,
+    BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
+    InMemoryStore, Index, MemberRecord, MissState,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -77,14 +77,15 @@ fn bot_member(name: &str) -> DiscordRosterMember {
     }
 }
 
-/// Build a `BulkMiss` at `position` for `name`, all Pending.
-fn bulk_miss(name: &str, position: i32) -> BulkMiss {
+/// Build a `BulkQueueEntry` at `position` for `name`, all Pending.
+fn bulk_miss(name: &str, position: i32) -> BulkQueueEntry {
     let (id, handle) = actor(name);
-    BulkMiss {
+    BulkQueueEntry {
         discord_user_id: id,
         handle: Some(handle),
         position,
         state: MissState::Pending,
+        kind: BulkQueueKind::Miss,
     }
 }
 
@@ -111,8 +112,8 @@ struct BulkWorld {
     tally: Option<PreviewTally>,
     /// Persistent store for session-lifecycle scenarios.
     store: InMemoryStore,
-    /// The last `next_pending` result (Some(Some(miss)) or Some(None)).
-    next: Option<Option<BulkMiss>>,
+    /// The last `next_pending` result (Some(Some(entry)) or Some(None)).
+    next: Option<Option<BulkQueueEntry>>,
 }
 
 impl std::fmt::Debug for BulkWorld {

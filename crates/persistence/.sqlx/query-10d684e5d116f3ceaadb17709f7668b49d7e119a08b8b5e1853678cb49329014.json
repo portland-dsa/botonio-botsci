@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT discord_user_id, handle, position, state\n               FROM bulk_verify_miss\n               WHERE guild_id = $1 AND state = 'pending'\n               ORDER BY position ASC LIMIT 1",
+  "query": "SELECT discord_user_id, handle, position, state, kind\n               FROM bulk_verify_miss\n               WHERE guild_id = $1 AND state = 'pending'\n               ORDER BY position ASC LIMIT 1",
   "describe": {
     "columns": [
       {
@@ -46,6 +46,17 @@
             "name": "state"
           }
         }
+      },
+      {
+        "ordinal": 4,
+        "name": "kind",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "bulk_verify_miss",
+            "name": "kind"
+          }
+        }
       }
     ],
     "parameters": {
@@ -57,8 +68,9 @@
       false,
       true,
       false,
+      false,
       false
     ]
   },
-  "hash": "11665de5b8021dffbe016f463ba5c01e3063cd78deb41b47348249cb9b9724e2"
+  "hash": "10d684e5d116f3ceaadb17709f7668b49d7e119a08b8b5e1853678cb49329014"
 }

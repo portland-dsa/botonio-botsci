@@ -433,15 +433,43 @@ pub struct BulkSession {
     pub updated_at: DateTime<Utc>,
 }
 
-/// One member in a session's frozen miss queue. `handle` is a display snapshot
-/// captured at sweep time and is never read back for matching - every wizard action
-/// keys on `discord_user_id`.
+/// Why a member sits in the bulk-verify wizard queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkQueueKind {
+    /// Solidarity Tech does not know them (the email/override flow).
+    Miss,
+    /// A record matched but has no usable standing (override-only flow).
+    Malformed,
+}
+
+impl BulkQueueKind {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            BulkQueueKind::Miss => "miss",
+            BulkQueueKind::Malformed => "malformed",
+        }
+    }
+
+    /// Decode a stored token; `None` for any other value (the caller turns that into a
+    /// typed `PersistenceError::BadToken`, exactly like `MissState::from_token`).
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s {
+            "miss" => Some(BulkQueueKind::Miss),
+            "malformed" => Some(BulkQueueKind::Malformed),
+            _ => None,
+        }
+    }
+}
+
+/// One member in a session's frozen wizard queue. `handle` is a display snapshot
+/// captured at sweep time and is never read back for matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BulkMiss {
+pub struct BulkQueueEntry {
     pub discord_user_id: DiscordUserId,
     pub handle: Option<DiscordHandle>,
     pub position: i32,
     pub state: MissState,
+    pub kind: BulkQueueKind,
 }
 
 /// The pending/verified/skipped tally for the resume prompt and final summary.
@@ -470,12 +498,15 @@ pub trait BulkSessionStore: Send + Sync {
     async fn start_session(
         &self,
         session: &BulkSession,
-        misses: &[BulkMiss],
+        misses: &[BulkQueueEntry],
     ) -> Result<(), Self::Error>;
 
-    /// The lowest-position still-`Pending` miss for the guild, or `None` when the
+    /// The lowest-position still-`Pending` entry for the guild, or `None` when the
     /// queue is exhausted.
-    async fn next_pending(&self, guild: DiscordGuildId) -> Result<Option<BulkMiss>, Self::Error>;
+    async fn next_pending(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<BulkQueueEntry>, Self::Error>;
 
     /// Set one queued member's state (keyed on the id), and touch the session's
     /// `updated_at`. A member not in the queue is a silent no-op.
@@ -507,9 +538,9 @@ pub struct InMemoryStore {
     /// in-memory analogue of the `manual_override` table, insert-once just like it.
     overrides: RwLock<HashMap<u64, OverrideRecord>>,
     /// The single per-guild bulk session + its queue (in-memory analogue of the
-    /// bulk_verify_session/miss tables). `BTreeMap<position, BulkMiss>` keeps the
+    /// bulk_verify_session/miss tables). `BTreeMap<position, BulkQueueEntry>` keeps the
     /// queue ordered; the option is the at-most-one session.
-    bulk: RwLock<Option<(BulkSession, std::collections::BTreeMap<i32, BulkMiss>)>>,
+    bulk: RwLock<Option<(BulkSession, std::collections::BTreeMap<i32, BulkQueueEntry>)>>,
 }
 
 impl InMemoryStore {
@@ -696,14 +727,17 @@ impl BulkSessionStore for InMemoryStore {
     async fn start_session(
         &self,
         session: &BulkSession,
-        misses: &[BulkMiss],
+        misses: &[BulkQueueEntry],
     ) -> Result<(), Infallible> {
         let queue = misses.iter().map(|m| (m.position, m.clone())).collect();
         *self.bulk.write().expect("bulk lock poisoned") = Some((session.clone(), queue));
         Ok(())
     }
 
-    async fn next_pending(&self, _guild: DiscordGuildId) -> Result<Option<BulkMiss>, Infallible> {
+    async fn next_pending(
+        &self,
+        _guild: DiscordGuildId,
+    ) -> Result<Option<BulkQueueEntry>, Infallible> {
         Ok(self
             .bulk
             .read()
