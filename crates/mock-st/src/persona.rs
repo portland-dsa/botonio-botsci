@@ -137,6 +137,8 @@ mod tests {
     use backends::solidarity_tech::fixtures::decode_user;
     use domain::{MembershipStatus, MigsStatus, Role};
 
+    /// Replicate the standing-to-role chain locally so the guard test does not
+    /// depend on the engine crate, keeping the mock-st crate independent.
     fn role_of(standing: Option<MigsStatus>) -> Role {
         let status = standing
             .map(MembershipStatus::from)

@@ -9,6 +9,7 @@
 
 use crate::store::{MemberRecord, MemberStore, OverrideLog, OverrideRecord};
 use crate::util::DiscordUserId;
+use domain::MembershipStatus;
 
 /// The identity key a card lookup needs, carried as proof that the subject is a
 /// member the caller holds. The Discord **user id** - an immutable snowflake - is
@@ -94,7 +95,17 @@ where
     O: OverrideLog,
 {
     match resolve(store, subject).await {
-        Ok(rec) => Ok(CardView::Member(rec)),
+        Ok(rec) if rec.membership() != MembershipStatus::Malformed => Ok(CardView::Member(rec)),
+        // Present but malformed: an override stamp (if any) wins so the card stays coherent
+        // with the role the override granted; with no stamp, the blank record still shows.
+        Ok(rec) => match overrides
+            .get_override(subject.id)
+            .await
+            .map_err(ResolveError::Override)?
+        {
+            Some(stamp) => Ok(CardView::Override(stamp)),
+            None => Ok(CardView::Member(rec)),
+        },
         Err(CardError::NoRecord) => match overrides
             .get_override(subject.id)
             .await
@@ -141,6 +152,7 @@ mod tests {
     use crate::backends::solidarity_tech::SolidarityTechMember;
     use crate::store::{InMemoryStore, Index};
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
+    use domain::MigsStatus;
 
     fn member(handle: &str, id: u64) -> SolidarityTechMember {
         SolidarityTechMember {
@@ -188,7 +200,18 @@ mod tests {
 
     #[tokio::test]
     async fn view_prefers_member_record_over_override() {
-        let store = InMemoryStore::new(Index::build(vec![member("zoop", 42)]));
+        // A usable (good-standing) record must win over an override stamp.
+        // A malformed record would instead yield to the stamp - this test uses a
+        // good-standing record so it still asserts "a usable record beats an override".
+        let good_standing = SolidarityTechMember {
+            id: StUserId("42".into()),
+            email: Email("m@b.test".into()),
+            discord_handle: Some(DiscordHandle("zoop".into())),
+            discord_user_id: Some(DiscordUserId(42)),
+            membership_standing: Some(MigsStatus::MemberInGoodStanding),
+            ..Default::default()
+        };
+        let store = InMemoryStore::new(Index::build(vec![good_standing]));
         store
             .stamp_override(DiscordUserId(42), DiscordUserId(1), None)
             .await

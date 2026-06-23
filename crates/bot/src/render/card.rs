@@ -3,7 +3,7 @@
 use chrono::NaiveDate;
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 
-use domain::MigsStatus;
+use domain::{MigsStatus, Role};
 use engine::store::{MemberRecord, OverrideRecord};
 
 pub const COLOR_GREEN: u32 = 0x3b_a5_5d;
@@ -87,7 +87,9 @@ pub fn override_card(display_name: &str, stamp: &OverrideRecord, show_note: bool
 }
 
 fn role_label(rec: &MemberRecord) -> &'static str {
-    rec.role().as_str()
+    Role::try_from(rec.membership())
+        .map(Role::as_str)
+        .unwrap_or("Unknown")
 }
 
 // The membership *standing* is authoritative for the status line and colour, so they
@@ -416,5 +418,14 @@ mod tests {
         assert_eq!(inline_of("Expires"), Some(true));
         assert_eq!(inline_of("Name"), Some(false));
         assert_eq!(inline_of("Role"), Some(false));
+    }
+
+    #[test]
+    fn malformed_record_role_field_reads_unknown() {
+        // A record with no standing (malformed) must show "Unknown" in the Role field,
+        // not a misleading "Unverified" from the old shim default.
+        let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let e = membership_card(&rec(None, None), "rose", None, today);
+        assert_eq!(field_value(&json(e), "Role").as_deref(), Some("Unknown"));
     }
 }

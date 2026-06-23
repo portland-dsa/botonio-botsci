@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 
-use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, MigsStatus, Role};
+use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, MigsStatus};
 
 use crate::backends::solidarity_tech::{
     DuesStatus, MembershipType, SolidarityTechClient, SolidarityTechMember,
@@ -58,13 +58,6 @@ impl MemberRecord {
         self.standing
             .map(MembershipStatus::from)
             .unwrap_or(MembershipStatus::Malformed)
-    }
-
-    /// Temporary compatibility shim during the malformed-record migration: preserves the
-    /// pre-fix mapping (a malformed record reads as `Unverified`) so callers are unchanged
-    /// until each is migrated to `membership()`. Removed in the final task.
-    pub fn role(&self) -> Role {
-        Role::try_from(self.membership()).unwrap_or(Role::Unverified)
     }
 }
 
@@ -854,7 +847,7 @@ mod tests {
         assert_eq!(r.email.as_str(), "a@b.com");
         assert_eq!(r.full_name.as_deref(), Some("zoop"));
         assert_eq!(r.standing, Some(MigsStatus::MemberInGoodStanding));
-        assert_eq!(r.role(), Role::Member);
+        assert_eq!(Role::try_from(r.membership()), Ok(Role::Member));
         assert_eq!(r.join_date, NaiveDate::from_ymd_opt(2021, 3, 15));
     }
 
@@ -871,17 +864,6 @@ mod tests {
             MemberRecord::from(st).full_name.as_deref(),
             Some("zoop goop")
         );
-    }
-
-    #[test]
-    fn record_role_defaults_to_unverified_when_standing_absent() {
-        let st = SolidarityTechMember {
-            id: StUserId("2".into()),
-            email: Email("c@d.com".into()),
-            membership_standing: None,
-            ..Default::default()
-        };
-        assert_eq!(MemberRecord::from(st).role(), Role::Unverified);
     }
 
     fn base_st() -> SolidarityTechMember {
