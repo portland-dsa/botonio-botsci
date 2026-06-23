@@ -2,9 +2,10 @@
 //!
 //! Cast: Sonic is the moderator; Tails is known only by handle (backfill), Knuckles a linked
 //! member whose handle drifted (repair), Shadow someone we do not know (Unverified), Eggman a
-//! handle claimed by a different account (conflict). The facade is a single in-memory fake the
-//! world holds across a run, so each step reads the resulting roles, markers, write-backs, and
-//! audit rows; the fake's audit can be made unavailable, so the suite runs offline.
+//! handle claimed by a different account (conflict), Rouge a matched member whose record has no
+//! usable standing (malformed). The facade is a single in-memory fake the world holds across a
+//! run, so each step reads the resulting roles, markers, write-backs, and audit rows; the fake's
+//! audit can be made unavailable, so the suite runs offline.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -30,6 +31,7 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
         "Shadow" => 4,
         "Eggman" => 5,
         "Silver" => 6,
+        "Rouge" => 7,
         other => panic!("unknown actor {other}"),
     };
     (DiscordUserId(raw), DiscordHandle(name.to_lowercase()))
@@ -698,6 +700,34 @@ async fn forget_recorded(world: &mut VerifyWorld) {
         rows.iter()
             .any(|r| r["action"] == "member_forget" && r["cache_unlinked"] == true)
     );
+}
+
+#[given(
+    regex = r"^(\w+) is in our records linked to her Discord id, but her record has no membership status$"
+)]
+async fn malformed_record(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    let mut rec = record(&name, handle, Some(id));
+    rec.standing = None; // a matched record with no usable standing
+    world.members.push(rec);
+}
+
+#[then(regex = r"^(\w+)'s record is reported as malformed$")]
+async fn reported_malformed(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert!(matches!(world.last, Some(Ok(VerifyOutcome::Malformed))));
+    assert!(
+        world.fake.as_ref().unwrap().roles_of(id).is_empty(),
+        "a malformed record grants no role"
+    );
+}
+
+#[then(regex = r"^the malformed encounter is recorded in the audit log with method (\w+)$")]
+async fn malformed_recorded(world: &mut VerifyWorld, method: String) {
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["outcome"], "malformed");
+    assert_eq!(rows[0]["method"], method);
 }
 
 #[tokio::main]

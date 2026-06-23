@@ -14,6 +14,9 @@ pub enum VerifyOutcome {
     Verified(Role),
     /// No record found; the member was assigned `Unverified`.
     Unverified,
+    /// A record matched but carries no usable standing - nothing was assigned; the
+    /// moderator is offered a hand-override.
+    Malformed,
     /// A manual email lookup found no record; nothing was changed (the member already
     /// holds `Unverified` from the automatic miss that opened the manual flow).
     NotFound,
@@ -249,21 +252,35 @@ impl<M: Heal> Member<'_, M> {
             .lookup(self.target.id, &self.target.handle)
             .await?;
         match decide(located, self.target.id, &self.target.handle) {
-            MatchOutcome::Matched { record, heal } => {
-                let role = record.role();
-                self.store
-                    .record(
-                        invoker,
-                        self.target.id,
-                        "member_verify",
-                        verify_detail("verified", Some(role), VerifyMethod::Discord),
-                    )
-                    .await?;
-                self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
-                    .await?;
-                self.heal(&record, &heal).await;
-                Ok(VerifyOutcome::Verified(role))
-            }
+            MatchOutcome::Matched { record, heal } => match Role::try_from(record.membership()) {
+                Ok(role) => {
+                    self.store
+                        .record(
+                            invoker,
+                            self.target.id,
+                            "member_verify",
+                            verify_detail("verified", Some(role), VerifyMethod::Discord),
+                        )
+                        .await?;
+                    self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
+                        .await?;
+                    self.heal(&record, &heal).await;
+                    Ok(VerifyOutcome::Verified(role))
+                }
+                Err(_) => {
+                    // Matched a record with no usable standing: assign no role, audit the encounter,
+                    // and let the caller offer a hand-override.
+                    self.store
+                        .record(
+                            invoker,
+                            self.target.id,
+                            "member_verify",
+                            verify_detail("malformed", None, VerifyMethod::Discord),
+                        )
+                        .await?;
+                    Ok(VerifyOutcome::Malformed)
+                }
+            },
             MatchOutcome::Miss => {
                 self.store
                     .record(
@@ -366,19 +383,35 @@ impl<M: Heal> Member<'_, M> {
         let records = self.store.find_by_email(&email).await?;
         match match_by_email(records, self.target.id, &self.target.handle) {
             EmailMatchOutcome::Matched { record, heal } => {
-                let role = record.role();
-                self.store
-                    .record(
-                        invoker,
-                        self.target.id,
-                        "member_verify",
-                        verify_detail("verified", Some(role), VerifyMethod::Email),
-                    )
-                    .await?;
-                self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
-                    .await?;
-                self.heal(&record, &heal).await;
-                Ok(VerifyOutcome::Verified(role))
+                match Role::try_from(record.membership()) {
+                    Ok(role) => {
+                        self.store
+                            .record(
+                                invoker,
+                                self.target.id,
+                                "member_verify",
+                                verify_detail("verified", Some(role), VerifyMethod::Email),
+                            )
+                            .await?;
+                        self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
+                            .await?;
+                        self.heal(&record, &heal).await;
+                        Ok(VerifyOutcome::Verified(role))
+                    }
+                    Err(_) => {
+                        // Matched a record with no usable standing: assign no role, audit the encounter,
+                        // and let the caller offer a hand-override.
+                        self.store
+                            .record(
+                                invoker,
+                                self.target.id,
+                                "member_verify",
+                                verify_detail("malformed", None, VerifyMethod::Email),
+                            )
+                            .await?;
+                        Ok(VerifyOutcome::Malformed)
+                    }
+                }
             }
             EmailMatchOutcome::Conflict => {
                 self.store

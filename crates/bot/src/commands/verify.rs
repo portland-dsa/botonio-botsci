@@ -148,6 +148,9 @@ pub async fn verify(
         Ok(VerifyOutcome::Unverified) | Ok(VerifyOutcome::NotFound) => {
             manual_verify_flow(ctx, &discord, &target, invoker, target_id, target_handle).await?;
         }
+        Ok(VerifyOutcome::Malformed) => {
+            malformed_flow(ctx, &discord, &target, invoker, target_id, target_handle).await?;
+        }
     }
     Ok(())
 }
@@ -214,6 +217,56 @@ async fn manual_verify_flow(
             .await?;
     }
 
+    Ok(())
+}
+
+/// One ephemeral message seeded with the malformed state and an override-only button.
+/// Reuses `verify_step` so the Override path is identical to the manual flow; the email
+/// lookup is intentionally absent (the member is already located in Solidarity Tech).
+async fn malformed_flow(
+    ctx: Context<'_>,
+    discord: &DiscordHttp,
+    target: &User,
+    invoker: DiscordUserId,
+    target_id: DiscordUserId,
+    target_handle: DiscordHandle,
+) -> Result<(), Error> {
+    let (display, handle, avatar) = header(target);
+    let reply = |embed: CreateEmbed, components: Vec<CreateActionRow>| {
+        poise::CreateReply::default()
+            .embed(embed)
+            .ephemeral(true)
+            .components(components)
+    };
+    let handle_msg = ctx
+        .send(reply(
+            state_embed(&display, &handle, &avatar, &VerifyState::Malformed),
+            vec![override_only_buttons(&[])],
+        ))
+        .await?;
+    let message = handle_msg.message().await?;
+    let (outcome, _) = verify_step(
+        ctx,
+        &message,
+        discord,
+        target,
+        invoker,
+        target_id,
+        target_handle,
+        &[],
+    )
+    .await?;
+    if matches!(outcome, StepOutcome::Expired) {
+        handle_msg
+            .edit(
+                ctx,
+                reply(
+                    state_embed(&display, &handle, &avatar, &VerifyState::Expired),
+                    vec![],
+                ),
+            )
+            .await?;
+    }
     Ok(())
 }
 
@@ -481,6 +534,7 @@ pub(crate) async fn verify_step(
                     Ok(VerifyOutcome::NotFound) => VerifyState::NotFound,
                     Ok(VerifyOutcome::Conflict) => VerifyState::Conflict,
                     Ok(VerifyOutcome::Unverified) => VerifyState::NotFound,
+                    Ok(VerifyOutcome::Malformed) => VerifyState::Malformed,
                     Err(e) => {
                         tracing::error!(error = %e, "manual verify by email failed");
                         VerifyState::Error
@@ -515,6 +569,19 @@ pub(crate) async fn verify_step(
         }
         // Loop: await the next button press on the same message.
     }
+}
+
+/// An override-only button row: the deliberate sole remedy for a malformed record (no
+/// email lookup, since the member is already located). Used by `/verify` and the bulk
+/// wizard's malformed step.
+pub(crate) fn override_only_buttons(extra: &[CreateButton]) -> CreateActionRow {
+    let mut buttons = vec![
+        CreateButton::new(OVERRIDE_BUTTON_ID)
+            .label("Override and approve")
+            .style(ButtonStyle::Danger),
+    ];
+    buttons.extend(extra.iter().cloned());
+    CreateActionRow::Buttons(buttons)
 }
 
 /// The button row for a given state: the lookup/retry button always, plus the red

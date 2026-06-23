@@ -30,6 +30,9 @@ pub enum VerifyState {
     Expired,
     /// Hand-approved past Solidarity Tech: granted `Member` plus the Manual Override marker.
     Overridden,
+    /// Matched a Solidarity Tech record, but it has no usable membership status, so the
+    /// member could not be verified automatically; a hand-override is offered.
+    Malformed,
     /// An unexpected backend failure.
     Error,
 }
@@ -82,6 +85,13 @@ pub fn state_embed(
             COLOR_VIOLET,
             "\u{2705} Hand approved, not matched with any Solidarity Tech member record.\n\n\
              Your approval has been logged, along with the time of approval for future review"
+                .to_string(),
+        ),
+        VerifyState::Malformed => (
+            COLOR_AMBER,
+            "\u{26a0}\u{fe0f} I found them in Solidarity Tech, but their membership record is \
+             incomplete - it has no membership status - so I couldn't verify them automatically. \
+             You can hand-approve them with the button below."
                 .to_string(),
         ),
         VerifyState::Error => (
@@ -154,6 +164,7 @@ mod tests {
             VerifyState::InvalidEmail,
             VerifyState::Expired,
             VerifyState::Overridden,
+            VerifyState::Malformed,
             VerifyState::Error,
         ] {
             assert!(desc(&json(state)).contains("@rosytherascal"));
@@ -166,5 +177,12 @@ mod tests {
         assert_eq!(color(&v), COLOR_VIOLET as u64);
         assert!(desc(&v).contains("Hand approved"));
         assert!(desc(&v).contains("logged"));
+    }
+
+    #[test]
+    fn malformed_is_amber_and_offers_override() {
+        let v = json(VerifyState::Malformed);
+        assert_eq!(color(&v), COLOR_AMBER as u64);
+        assert!(desc(&v).contains("incomplete"));
     }
 }
