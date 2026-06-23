@@ -84,6 +84,24 @@ impl VerifyMethod {
     }
 }
 
+/// The outcome of an email verify, carrying the matched record on success so a
+/// caller can render details the role alone cannot (the self-service log post and
+/// its name double-check). [`verify_by_email`](Member::verify_by_email) maps this
+/// down to a [`VerifyOutcome`] for callers that do not need the record.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use]
+pub enum EmailGrant {
+    /// Matched and the role was assigned; the matched record is returned.
+    Verified { role: Role, record: MemberRecord },
+    /// Matched a record that carries no usable standing - no role was assigned.
+    Malformed,
+    /// The email belongs to a different account, or to several records none of
+    /// which is already this account's - nothing was changed.
+    Conflict,
+    /// No Solidarity Tech record carries this email.
+    NotFound,
+}
+
 /// The non-identifying audit detail for a verify-family outcome: the outcome verb, the method,
 /// and (when a role is granted) its name - never PII or the conflicting account.
 fn verify_detail(outcome: &str, role: Option<Role>, method: VerifyMethod) -> serde_json::Value {
@@ -388,71 +406,101 @@ impl<M: Heal> Member<'_, M> {
         }
     }
 
-    /// Verify from a moderator-supplied membership `email`, the manual fallback when the automatic
-    /// id/handle match misses. Reads Solidarity Tech live by email, decides via [`match_by_email`],
-    /// and otherwise mirrors [`verify`](Member::verify). Every outcome is audited with
-    /// `method: "email"`, never the email itself.
+    /// Shared core of the two email-verify entry points: read Solidarity Tech by
+    /// `email`, decide via [`match_by_email`], grant on a clean match, and audit every
+    /// outcome with `method: "email"` (never the email itself).
+    async fn email_grant(
+        &self,
+        invoker: DiscordUserId,
+        email: Email,
+    ) -> Result<EmailGrant, MemberError> {
+        let records = self.store.find_by_email(&email).await?;
+        Ok(
+            match match_by_email(records, self.target.id, &self.target.handle) {
+                EmailMatchOutcome::Matched { record, heal } => {
+                    match Role::try_from(record.membership()) {
+                        Ok(role) => {
+                            self.store
+                                .record(
+                                    invoker,
+                                    self.target.id,
+                                    "member_verify",
+                                    verify_detail("verified", Some(role), VerifyMethod::Email),
+                                )
+                                .await?;
+                            self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
+                                .await?;
+                            self.heal(&record, &heal).await;
+                            EmailGrant::Verified { role, record }
+                        }
+                        Err(_) => {
+                            // Matched a record with no usable standing: assign no role, audit the
+                            // encounter, and let the caller offer a hand-override.
+                            self.store
+                                .record(
+                                    invoker,
+                                    self.target.id,
+                                    "member_verify",
+                                    verify_detail("malformed", None, VerifyMethod::Email),
+                                )
+                                .await?;
+                            EmailGrant::Malformed
+                        }
+                    }
+                }
+                EmailMatchOutcome::Conflict => {
+                    self.store
+                        .record(
+                            invoker,
+                            self.target.id,
+                            "member_verify",
+                            verify_detail("conflict", None, VerifyMethod::Email),
+                        )
+                        .await?;
+                    EmailGrant::Conflict
+                }
+                EmailMatchOutcome::Miss => {
+                    self.store
+                        .record(
+                            invoker,
+                            self.target.id,
+                            "member_verify",
+                            verify_detail("not_found", None, VerifyMethod::Email),
+                        )
+                        .await?;
+                    EmailGrant::NotFound
+                }
+            },
+        )
+    }
+
+    /// Verify from a moderator-supplied membership `email`, the manual fallback when
+    /// the automatic id/handle match misses. Reads Solidarity Tech live by email,
+    /// decides via [`match_by_email`], and otherwise mirrors [`verify`](Member::verify).
+    /// Every outcome is audited with `method: "email"`, never the email itself.
     pub async fn verify_by_email(
         &self,
         invoker: DiscordUserId,
         email: Email,
     ) -> Result<VerifyOutcome, MemberError> {
-        let records = self.store.find_by_email(&email).await?;
-        match match_by_email(records, self.target.id, &self.target.handle) {
-            EmailMatchOutcome::Matched { record, heal } => {
-                match Role::try_from(record.membership()) {
-                    Ok(role) => {
-                        self.store
-                            .record(
-                                invoker,
-                                self.target.id,
-                                "member_verify",
-                                verify_detail("verified", Some(role), VerifyMethod::Email),
-                            )
-                            .await?;
-                        self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
-                            .await?;
-                        self.heal(&record, &heal).await;
-                        Ok(VerifyOutcome::Verified(role))
-                    }
-                    Err(_) => {
-                        // Matched a record with no usable standing: assign no role, audit the encounter,
-                        // and let the caller offer a hand-override.
-                        self.store
-                            .record(
-                                invoker,
-                                self.target.id,
-                                "member_verify",
-                                verify_detail("malformed", None, VerifyMethod::Email),
-                            )
-                            .await?;
-                        Ok(VerifyOutcome::Malformed)
-                    }
-                }
-            }
-            EmailMatchOutcome::Conflict => {
-                self.store
-                    .record(
-                        invoker,
-                        self.target.id,
-                        "member_verify",
-                        verify_detail("conflict", None, VerifyMethod::Email),
-                    )
-                    .await?;
-                Ok(VerifyOutcome::Conflict)
-            }
-            EmailMatchOutcome::Miss => {
-                self.store
-                    .record(
-                        invoker,
-                        self.target.id,
-                        "member_verify",
-                        verify_detail("not_found", None, VerifyMethod::Email),
-                    )
-                    .await?;
-                Ok(VerifyOutcome::NotFound)
-            }
-        }
+        Ok(match self.email_grant(invoker, email).await? {
+            EmailGrant::Verified { role, .. } => VerifyOutcome::Verified(role),
+            EmailGrant::Malformed => VerifyOutcome::Malformed,
+            EmailGrant::Conflict => VerifyOutcome::Conflict,
+            EmailGrant::NotFound => VerifyOutcome::NotFound,
+        })
+    }
+
+    /// As [`verify_by_email`](Member::verify_by_email), but returns the matched
+    /// [`MemberRecord`] on success so the caller can render details that the role
+    /// alone cannot carry (the self-service verification log and its name check). The
+    /// decision and the writes are identical; only what is surfaced differs.
+    pub async fn verify_by_email_with_record(
+        &self,
+        invoker: DiscordUserId,
+        email: Email,
+    ) -> Result<EmailGrant, MemberError> {
+        self.email_grant(invoker, email).await
     }
 
     /// Best-effort identity repair shared by the granting verbs: run `self_heal` and log (never

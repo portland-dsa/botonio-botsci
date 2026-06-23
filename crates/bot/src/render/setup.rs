@@ -47,6 +47,11 @@ pub fn config_embed(cfg: &GuildConfig, accent: u32) -> CreateEmbed {
             false,
         )
         .field(
+            "Verification-log channel",
+            channel_line(cfg.verification_log_channel),
+            false,
+        )
+        .field(
             "Scheduled scan",
             if cfg.scan_enabled { "On" } else { "Off" },
             false,

@@ -38,6 +38,9 @@ pub struct BotConfig {
     pub audit_key_id: String,
     /// Per-moderator ceiling on member-card lookups of *other* members, per minute.
     pub lookup_rate_per_min: u32,
+    /// Per-member ceiling on self-service verification attempts, per minute.
+    /// Generous - it bounds abuse and Solidarity Tech read volume, not real members.
+    pub self_verify_rate_per_min: u32,
     /// How often the scheduled scan runs (when enabled in /setup).
     pub scan_interval: Duration,
     /// Tripwire: abort a pass when demotions reach this percentage of scanned members.
@@ -83,6 +86,11 @@ impl BotConfig {
         let audit_key_id = std::env::var("AUDIT_KEY_ID").unwrap_or_else(|_| "v1".to_owned());
         let lookup_rate_per_min =
             parse_lookup_rate(std::env::var("BOT_LOOKUP_RATE_PER_MIN").ok().as_deref());
+        let self_verify_rate_per_min = parse_self_verify_rate(
+            std::env::var("BOT_SELF_VERIFY_RATE_PER_MIN")
+                .ok()
+                .as_deref(),
+        );
         let scan_interval =
             parse_scan_interval(std::env::var("BOT_SCAN_INTERVAL_SECS").ok().as_deref());
         let scan_tripwire_percent =
@@ -100,6 +108,7 @@ impl BotConfig {
             audit_hash_key,
             audit_key_id,
             lookup_rate_per_min,
+            self_verify_rate_per_min,
             scan_interval,
             scan_tripwire_percent,
             scan_tripwire_floor,
@@ -124,6 +133,16 @@ fn parse_accent(s: &str) -> Result<u32, String> {
 /// Default per-moderator lookup ceiling when `BOT_LOOKUP_RATE_PER_MIN` is
 /// unset or invalid.
 const DEFAULT_LOOKUP_RATE: u32 = 10;
+
+/// Default per-member self-verify ceiling when `BOT_SELF_VERIFY_RATE_PER_MIN` is
+/// unset or invalid.
+const DEFAULT_SELF_VERIFY_RATE: u32 = 5;
+
+fn parse_self_verify_rate(raw: Option<&str>) -> u32 {
+    raw.and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_SELF_VERIFY_RATE)
+}
 
 /// Parse the per-minute lookup ceiling, falling back to [`DEFAULT_LOOKUP_RATE`].
 /// A `0` is clamped up to 1: a ceiling of zero would refuse every moderator lookup,
@@ -208,6 +227,13 @@ mod tests {
         // 0 would panic `tokio::time::interval`; sub-minute values would hammer the API.
         assert_eq!(parse_refresh_secs(Some("0")), MIN_REFRESH);
         assert_eq!(parse_refresh_secs(Some("5")), MIN_REFRESH);
+    }
+
+    #[test]
+    fn self_verify_rate_defaults_and_rejects_zero() {
+        assert_eq!(parse_self_verify_rate(None), DEFAULT_SELF_VERIFY_RATE);
+        assert_eq!(parse_self_verify_rate(Some("0")), DEFAULT_SELF_VERIFY_RATE);
+        assert_eq!(parse_self_verify_rate(Some("20")), 20);
     }
 
     #[test]

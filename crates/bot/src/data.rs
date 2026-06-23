@@ -25,6 +25,8 @@ pub struct Data {
     pub store: Arc<PgStore>,
     pub auditor: Arc<Auditor>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// Per-member throttle for the self-service verification flow.
+    pub self_verify_limiter: Arc<RateLimiter>,
     /// The process-wide throttle for the on-demand `/refresh-cache` command.
     pub refresh_cooldown: Arc<Cooldown>,
     /// The gateway's shared HTTP, kept so the role-write client can be rebuilt from
