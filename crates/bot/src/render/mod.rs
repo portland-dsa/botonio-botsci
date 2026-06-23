@@ -3,5 +3,6 @@ pub mod card;
 pub mod help;
 pub mod modal;
 pub mod scan;
+pub mod self_verify;
 pub mod setup;
 pub mod verify;

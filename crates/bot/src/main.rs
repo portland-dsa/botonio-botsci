@@ -16,6 +16,7 @@ mod ping;
 mod refresh;
 mod render;
 mod scan;
+mod self_verify;
 
 use std::sync::Arc;
 
