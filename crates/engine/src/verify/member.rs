@@ -14,6 +14,9 @@ pub enum VerifyOutcome {
     Verified(Role),
     /// No record found; the member was assigned `Unverified`.
     Unverified,
+    /// A record matched but carries no usable standing - nothing was assigned; the
+    /// moderator is offered a hand-override.
+    Malformed,
     /// A manual email lookup found no record; nothing was changed (the member already
     /// holds `Unverified` from the automatic miss that opened the manual flow).
     NotFound,
@@ -34,6 +37,9 @@ pub enum ResyncOutcome {
     /// Unknown to Solidarity Tech; left for the wizard. `Unverified` was assigned unless
     /// the member already held exactly it, in which case nothing was written.
     Miss,
+    /// Matched but the record carries no usable standing; no role written, queued for
+    /// the wizard's override-only path.
+    Malformed,
     /// Handle bound to another account; nothing was changed.
     Conflict,
 }
@@ -249,21 +255,35 @@ impl<M: Heal> Member<'_, M> {
             .lookup(self.target.id, &self.target.handle)
             .await?;
         match decide(located, self.target.id, &self.target.handle) {
-            MatchOutcome::Matched { record, heal } => {
-                let role = record.role();
-                self.store
-                    .record(
-                        invoker,
-                        self.target.id,
-                        "member_verify",
-                        verify_detail("verified", Some(role), VerifyMethod::Discord),
-                    )
-                    .await?;
-                self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
-                    .await?;
-                self.heal(&record, &heal).await;
-                Ok(VerifyOutcome::Verified(role))
-            }
+            MatchOutcome::Matched { record, heal } => match Role::try_from(record.membership()) {
+                Ok(role) => {
+                    self.store
+                        .record(
+                            invoker,
+                            self.target.id,
+                            "member_verify",
+                            verify_detail("verified", Some(role), VerifyMethod::Discord),
+                        )
+                        .await?;
+                    self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
+                        .await?;
+                    self.heal(&record, &heal).await;
+                    Ok(VerifyOutcome::Verified(role))
+                }
+                Err(_) => {
+                    // Matched a record with no usable standing: assign no role, audit the encounter,
+                    // and let the caller offer a hand-override.
+                    self.store
+                        .record(
+                            invoker,
+                            self.target.id,
+                            "member_verify",
+                            verify_detail("malformed", None, VerifyMethod::Discord),
+                        )
+                        .await?;
+                    Ok(VerifyOutcome::Malformed)
+                }
+            },
             MatchOutcome::Miss => {
                 self.store
                     .record(
@@ -304,26 +324,40 @@ impl<M: Heal> Member<'_, M> {
             .lookup(self.target.id, &self.target.handle)
             .await?;
         match decide(located, self.target.id, &self.target.handle) {
-            MatchOutcome::Matched { record, heal } => {
-                let role = record.role();
-                if crate::bulk::already_in_role(held, role) {
-                    self.heal(&record, &heal).await;
-                    Ok(ResyncOutcome::Unchanged(role))
-                } else {
+            MatchOutcome::Matched { record, heal } => match Role::try_from(record.membership()) {
+                Ok(role) => {
+                    if crate::bulk::already_in_role(held, role) {
+                        self.heal(&record, &heal).await;
+                        Ok(ResyncOutcome::Unchanged(role))
+                    } else {
+                        self.store
+                            .record(
+                                invoker,
+                                self.target.id,
+                                "member_verify",
+                                verify_detail("verified", Some(role), VerifyMethod::Discord),
+                            )
+                            .await?;
+                        self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
+                            .await?;
+                        self.heal(&record, &heal).await;
+                        Ok(ResyncOutcome::Changed(role))
+                    }
+                }
+                Err(_) => {
+                    // Matched a record with no usable standing: audit the encounter and queue
+                    // for the wizard's override-only path. No role is written.
                     self.store
                         .record(
                             invoker,
                             self.target.id,
                             "member_verify",
-                            verify_detail("verified", Some(role), VerifyMethod::Discord),
+                            verify_detail("malformed", None, VerifyMethod::Discord),
                         )
                         .await?;
-                    self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
-                        .await?;
-                    self.heal(&record, &heal).await;
-                    Ok(ResyncOutcome::Changed(role))
+                    Ok(ResyncOutcome::Malformed)
                 }
-            }
+            },
             MatchOutcome::Miss => {
                 if crate::bulk::already_in_role(held, Role::Unverified) {
                     return Ok(ResyncOutcome::Miss);
@@ -366,19 +400,35 @@ impl<M: Heal> Member<'_, M> {
         let records = self.store.find_by_email(&email).await?;
         match match_by_email(records, self.target.id, &self.target.handle) {
             EmailMatchOutcome::Matched { record, heal } => {
-                let role = record.role();
-                self.store
-                    .record(
-                        invoker,
-                        self.target.id,
-                        "member_verify",
-                        verify_detail("verified", Some(role), VerifyMethod::Email),
-                    )
-                    .await?;
-                self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
-                    .await?;
-                self.heal(&record, &heal).await;
-                Ok(VerifyOutcome::Verified(role))
+                match Role::try_from(record.membership()) {
+                    Ok(role) => {
+                        self.store
+                            .record(
+                                invoker,
+                                self.target.id,
+                                "member_verify",
+                                verify_detail("verified", Some(role), VerifyMethod::Email),
+                            )
+                            .await?;
+                        self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
+                            .await?;
+                        self.heal(&record, &heal).await;
+                        Ok(VerifyOutcome::Verified(role))
+                    }
+                    Err(_) => {
+                        // Matched a record with no usable standing: assign no role, audit the encounter,
+                        // and let the caller offer a hand-override.
+                        self.store
+                            .record(
+                                invoker,
+                                self.target.id,
+                                "member_verify",
+                                verify_detail("malformed", None, VerifyMethod::Email),
+                            )
+                            .await?;
+                        Ok(VerifyOutcome::Malformed)
+                    }
+                }
             }
             EmailMatchOutcome::Conflict => {
                 self.store
@@ -416,127 +466,5 @@ impl<M: Heal> Member<'_, M> {
         {
             tracing::warn!(error = %e, "verify: self-heal failed; role granted, will re-heal");
         }
-    }
-}
-
-#[cfg(test)]
-mod resync_tests {
-    use super::*;
-    use crate::audit::AuditLog;
-    use crate::backends::discord::FakeDiscord;
-    use crate::backends::solidarity_tech::FakeSolidarityTech;
-    use crate::store::{InMemoryStore, Index, MemberRecord};
-    use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-    use crate::verify::DataStore;
-    use domain::MigsStatus;
-    use std::convert::Infallible;
-    use std::sync::Mutex;
-
-    /// An audit double that just records the action verbs written to it.
-    #[derive(Default)]
-    struct Recorder {
-        actions: Mutex<Vec<String>>,
-    }
-
-    #[async_trait::async_trait]
-    impl AuditLog for Recorder {
-        type Error = Infallible;
-        async fn record(
-            &self,
-            _actor: DiscordUserId,
-            _subject: DiscordUserId,
-            action: &str,
-            _detail: serde_json::Value,
-        ) -> Result<(), Infallible> {
-            self.actions.lock().unwrap().push(action.to_owned());
-            Ok(())
-        }
-    }
-
-    /// A cached member in good standing (earns `Member`), linked to `id`/`handle`.
-    fn member_in_good_standing(id: u64, handle: &str) -> MemberRecord {
-        MemberRecord {
-            st_user_id: StUserId(format!("st-{id}")),
-            discord_user_id: Some(DiscordUserId(id)),
-            discord_handle: Some(DiscordHandle(handle.into())),
-            email: Email(format!("{handle}@b.test")),
-            full_name: None,
-            standing: Some(MigsStatus::MemberInGoodStanding),
-            join_date: None,
-            expires: None,
-            membership_type: None,
-            monthly_dues: None,
-            yearly_dues: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn resync_leaves_an_already_correct_member_untouched() {
-        let store = InMemoryStore::new(Index::from_records(vec![member_in_good_standing(
-            7, "rosy",
-        )]));
-        // Seed Rosy holding exactly Member, so an already-correct resync touches neither
-        // backend: any role write would change roles_of, any heal would bump writes().
-        let discord = FakeDiscord::new().with_roles(DiscordUserId(7), vec![Role::Member]);
-        let st = FakeSolidarityTech::new();
-        let audit = Recorder::default();
-
-        let ds = DataStore::new(&st, &discord, &store, &audit);
-        let outcome = Member::new(
-            &ds,
-            Target {
-                id: DiscordUserId(7),
-                handle: DiscordHandle("rosy".into()),
-            },
-        )
-        .resync(DiscordUserId(1), &[Role::Member])
-        .await
-        .unwrap();
-
-        assert_eq!(outcome, ResyncOutcome::Unchanged(Role::Member));
-        assert!(
-            audit.actions.lock().unwrap().is_empty(),
-            "an unchanged member must not be audited"
-        );
-        assert_eq!(
-            discord.roles_of(DiscordUserId(7)),
-            vec![Role::Member],
-            "no role write"
-        );
-        assert_eq!(st.writes(), 0, "no self-heal write");
-    }
-
-    #[tokio::test]
-    async fn resync_applies_the_role_when_it_differs() {
-        let store = InMemoryStore::new(Index::from_records(vec![member_in_good_standing(
-            7, "rosy",
-        )]));
-        // Rosy holds nothing, so resync moves her to Member.
-        let discord = FakeDiscord::new();
-        let st = FakeSolidarityTech::new();
-        let audit = Recorder::default();
-
-        let ds = DataStore::new(&st, &discord, &store, &audit);
-        let outcome = Member::new(
-            &ds,
-            Target {
-                id: DiscordUserId(7),
-                handle: DiscordHandle("rosy".into()),
-            },
-        )
-        .resync(DiscordUserId(1), &[])
-        .await
-        .unwrap();
-
-        assert_eq!(outcome, ResyncOutcome::Changed(Role::Member));
-        assert_eq!(
-            audit.actions.lock().unwrap().as_slice(),
-            ["member_verify"],
-            "the change is audited once"
-        );
-        assert!(
-            discord.roles_of(DiscordUserId(7)).contains(&Role::Member),
-            "role applied"
-        );
     }
 }

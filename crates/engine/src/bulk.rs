@@ -65,8 +65,8 @@ pub async fn enumerate<Dc: DiscordClient>(
 }
 
 /// The read-only preview tally: the role changes a sweep would make, plus the already-
-/// correct, miss, and conflict counts. Computed from the captured population and the
-/// cache, no writes.
+/// correct, miss, malformed, and conflict counts. Computed from the captured population
+/// and the cache, no writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PreviewTally {
     pub scanned: usize,
@@ -79,6 +79,9 @@ pub struct PreviewTally {
     pub unchanged: usize,
     /// Members the cache does not know - the wizard queue estimate.
     pub misses: usize,
+    /// Matched members whose record carries no usable standing - queued for the wizard's
+    /// override-only path. No role is written for these during the apply phase.
+    pub malformed: usize,
     /// Handle hits bound to another account - left for a manual `/verify`.
     pub conflicts: usize,
 }
@@ -95,22 +98,25 @@ pub async fn preview<S: MemberStore>(
     let mut counts = [0usize; Role::ALL.len()];
     let mut unchanged = 0usize;
     let mut misses = 0usize;
+    let mut malformed = 0usize;
     let mut conflicts = 0usize;
     for m in members {
         let located = locate(store, m.id, &m.handle).await?;
         match decide(located, m.id, &m.handle) {
-            MatchOutcome::Matched { record, .. } => {
-                let role = record.role();
-                if already_in_role(&m.held, role) {
-                    unchanged += 1;
-                } else {
-                    let idx = Role::ALL
-                        .iter()
-                        .position(|&r| r == role)
-                        .expect("role in ALL");
-                    counts[idx] += 1;
+            MatchOutcome::Matched { record, .. } => match Role::try_from(record.membership()) {
+                Ok(role) => {
+                    if already_in_role(&m.held, role) {
+                        unchanged += 1;
+                    } else {
+                        let idx = Role::ALL
+                            .iter()
+                            .position(|&r| r == role)
+                            .expect("role in ALL");
+                        counts[idx] += 1;
+                    }
                 }
-            }
+                Err(_) => malformed += 1,
+            },
             MatchOutcome::Miss => misses += 1,
             MatchOutcome::Conflict => conflicts += 1,
         }
@@ -121,6 +127,7 @@ pub async fn preview<S: MemberStore>(
         matched,
         unchanged,
         misses,
+        malformed,
         conflicts,
     })
 }

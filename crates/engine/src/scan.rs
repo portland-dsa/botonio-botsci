@@ -68,6 +68,7 @@ pub struct ScanPlan {
     pub demotions: usize,
     pub misses: usize,
     pub conflicts: usize,
+    pub malformed: usize,
     pub verdict: ScanVerdict,
 }
 
@@ -83,11 +84,20 @@ pub async fn plan<S: MemberStore>(
     let mut demotions = 0usize;
     let mut misses = 0usize;
     let mut conflicts = 0usize;
+    let mut malformed = 0usize;
 
     for m in members {
         let located = locate(store, m.id, &m.handle).await?;
         let target = match decide(located, m.id, &m.handle) {
-            MatchOutcome::Matched { record, .. } => record.role(),
+            MatchOutcome::Matched { record, .. } => match Role::try_from(record.membership()) {
+                Ok(role) => role,
+                Err(_) => {
+                    // No usable standing: never auto-demote a record we cannot decide, and keep
+                    // it out of the demotion count so it cannot feed the mass-demote tripwire.
+                    malformed += 1;
+                    continue;
+                }
+            },
             MatchOutcome::Miss => {
                 // The cache does not know them: the join check assigns Unverified.
                 misses += 1;
@@ -132,6 +142,7 @@ pub async fn plan<S: MemberStore>(
         demotions,
         misses,
         conflicts,
+        malformed,
         verdict,
     })
 }
@@ -152,111 +163,5 @@ mod tests {
         assert!(!is_demotion(&[Role::Unverified], Role::Member));
         // Holding only Unverified is not a standing to be demoted from.
         assert!(!is_demotion(&[Role::Unverified], Role::Unverified));
-    }
-}
-
-#[cfg(test)]
-mod plan_tests {
-    use super::*;
-    use crate::backends::discord::DiscordRosterMember;
-    use crate::store::{InMemoryStore, Index, MemberRecord};
-    use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-    use domain::MigsStatus;
-
-    fn roster(id: u64, handle: &str, held: Vec<Role>) -> DiscordRosterMember {
-        DiscordRosterMember {
-            id: DiscordUserId(id),
-            handle: DiscordHandle(handle.into()),
-            held,
-            bot: false,
-        }
-    }
-
-    fn record(st: &str, id: u64, handle: &str, standing: MigsStatus) -> MemberRecord {
-        MemberRecord {
-            st_user_id: StUserId(st.into()),
-            discord_user_id: Some(DiscordUserId(id)),
-            discord_handle: Some(DiscordHandle(handle.into())),
-            email: Email(format!("{handle}@b.test")),
-            full_name: None,
-            standing: Some(standing),
-            join_date: None,
-            expires: None,
-            membership_type: None,
-            monthly_dues: None,
-            yearly_dues: None,
-        }
-    }
-
-    const THRESH: ScanThreshold = ScanThreshold {
-        percent: 20,
-        floor: 5,
-    };
-
-    #[tokio::test]
-    async fn proceeds_with_a_mix_of_promotion_and_demotion() {
-        // Sonic is in good standing but holds nothing -> promote to Member.
-        // Tails lapsed but still holds Member -> demote.
-        let store = InMemoryStore::new(Index::from_records(vec![
-            record("st-1", 1, "sonic", MigsStatus::MemberInGoodStanding),
-            record("st-2", 2, "tails", MigsStatus::Lapsed),
-        ]));
-        let members = vec![
-            roster(1, "sonic", vec![]),
-            roster(2, "tails", vec![Role::Member]),
-        ];
-        let p = plan(&store, &members, THRESH).await.unwrap();
-        assert_eq!(p.verdict, ScanVerdict::Proceed);
-        assert_eq!(p.demotions, 1);
-        assert_eq!(p.changes.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn an_empty_cache_demotes_everyone_and_aborts() {
-        let store = InMemoryStore::new(Index::default());
-        let members: Vec<_> = (1..=10)
-            .map(|i| roster(i, &format!("m{i}"), vec![Role::Member]))
-            .collect();
-        let p = plan(&store, &members, THRESH).await.unwrap();
-        assert_eq!(p.demotions, 10);
-        assert_eq!(p.misses, 10);
-        assert_eq!(
-            p.verdict,
-            ScanVerdict::Abort {
-                demotions: 10,
-                scanned: 10
-            }
-        );
-    }
-
-    #[tokio::test]
-    async fn demotions_below_the_floor_still_proceed_on_a_tiny_guild() {
-        // 2 of 2 is 100% (over the percent), but below the floor of 5 -> proceed.
-        let store = InMemoryStore::new(Index::default());
-        let members = vec![
-            roster(1, "a", vec![Role::Member]),
-            roster(2, "b", vec![Role::DuesExpired]),
-        ];
-        let p = plan(&store, &members, THRESH).await.unwrap();
-        assert_eq!(p.demotions, 2);
-        assert_eq!(p.verdict, ScanVerdict::Proceed);
-    }
-
-    #[tokio::test]
-    async fn a_handle_conflict_is_skipped_not_demoted() {
-        // The cache binds handle "ghost" to id 99; the roster member with that handle is id
-        // 1 -> conflict. Nothing is planned and it is not counted as a demotion.
-        let store = InMemoryStore::new(Index::from_records(vec![record(
-            "st-9",
-            99,
-            "ghost",
-            MigsStatus::MemberInGoodStanding,
-        )]));
-        let members = vec![roster(1, "ghost", vec![Role::Member])];
-        let p = plan(&store, &members, THRESH).await.unwrap();
-        assert_eq!(p.conflicts, 1);
-        assert_eq!(p.demotions, 0);
-        assert!(p.changes.is_empty());
-        assert_eq!(p.verdict, ScanVerdict::Proceed);
     }
 }

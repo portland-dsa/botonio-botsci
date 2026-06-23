@@ -75,6 +75,13 @@ pub fn preview_embed(scope: BulkScope, tally: &PreviewTally) -> CreateEmbed {
 
     lines.push(format!("Not matched (wizard queue): {}", tally.misses));
 
+    if tally.malformed > 0 {
+        lines.push(format!(
+            "Malformed records (wizard queue): {}",
+            tally.malformed
+        ));
+    }
+
     if tally.conflicts > 0 {
         lines.push(format!(
             "Conflicts: {} \u{2014} resolve these with /verify",
@@ -82,7 +89,7 @@ pub fn preview_embed(scope: BulkScope, tally: &PreviewTally) -> CreateEmbed {
         ));
     }
 
-    let color = if tally.misses > 0 || tally.conflicts > 0 {
+    let color = if tally.misses > 0 || tally.malformed > 0 || tally.conflicts > 0 {
         COLOR_AMBER
     } else {
         COLOR_GREEN
@@ -121,6 +128,26 @@ pub fn wizard_embed(
             "`@{handle}`\n\n\
              **{display_name}** is not matched in our records.\n\
              Use the buttons below to verify them by email or skip.",
+        ))
+}
+
+/// Build the wizard card for a malformed-record member: matched in Solidarity Tech but
+/// carrying no usable standing, so the only action offered is a hand-override.
+pub fn wizard_malformed_embed(
+    display_name: &str,
+    handle: &str,
+    avatar_url: &str,
+    position: usize,
+    total: usize,
+) -> CreateEmbed {
+    CreateEmbed::new()
+        .colour(COLOR_AMBER)
+        .title(format!("Bulk verify \u{2022} {position} of {total}"))
+        .thumbnail(avatar_url)
+        .description(format!(
+            "`@{handle}`\n\n\
+             **{display_name}** has a Solidarity Tech record with no membership status, \
+             so it can't be verified automatically. Hand-approve them or skip.",
         ))
 }
 
@@ -209,6 +236,7 @@ mod tests {
             ],
             unchanged: 6,
             misses: 3,
+            malformed: 0,
             conflicts: 1,
         };
         let v = json(preview_embed(BulkScope::WholeGuild, &tally));
@@ -238,6 +266,7 @@ mod tests {
             ],
             unchanged: 0,
             misses: 0,
+            malformed: 0,
             conflicts: 0,
         };
         let v = json(preview_embed(BulkScope::UnmanagedOnly, &tally));
@@ -249,6 +278,29 @@ mod tests {
         assert!(
             !desc(&v).contains("Already in the right role"),
             "no unchanged line when zero"
+        );
+    }
+
+    #[test]
+    fn preview_embed_malformed_line_appears_and_triggers_amber() {
+        let tally = PreviewTally {
+            scanned: 3,
+            matched: vec![
+                (Role::Member, 2),
+                (Role::DuesExpired, 0),
+                (Role::Unverified, 0),
+            ],
+            unchanged: 0,
+            misses: 0,
+            malformed: 1,
+            conflicts: 0,
+        };
+        let v = json(preview_embed(BulkScope::WholeGuild, &tally));
+        assert_eq!(color(&v), COLOR_AMBER as u64, "malformed alone makes amber");
+        let d = desc(&v);
+        assert!(
+            d.contains("Malformed records (wizard queue): 1"),
+            "malformed line present"
         );
     }
 

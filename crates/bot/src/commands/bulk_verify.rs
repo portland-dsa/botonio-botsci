@@ -15,7 +15,9 @@ use domain::{DiscordGuildId, Role};
 use engine::backends::discord::{DiscordClient, DiscordError};
 use engine::backends::util::{DiscordHandle, DiscordUserId};
 use engine::bulk::{self, miss_still_pending};
-use engine::store::{BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, MissState};
+use engine::store::{
+    BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus, MissState,
+};
 use engine::verify::{DataStore, Member, ResyncOutcome, Target};
 
 use crate::commands::verify::{StepOutcome, verify_step};
@@ -292,7 +294,7 @@ pub async fn bulk_verify(
 
     // --- Apply ---
     let now = Utc::now();
-    let mut queue: Vec<BulkMiss> = Vec::new();
+    let mut queue: Vec<BulkQueueEntry> = Vec::new();
     let mut role_tally: Vec<(Role, usize)> = Role::ALL.into_iter().map(|r| (r, 0)).collect();
 
     let store = DataStore::new(
@@ -323,13 +325,24 @@ pub async fn bulk_verify(
             }
             Ok(ResyncOutcome::Unchanged(_)) => false,
             Ok(ResyncOutcome::Miss) => {
-                queue.push(BulkMiss {
+                queue.push(BulkQueueEntry {
                     discord_user_id: m.id,
                     handle: Some(m.handle.clone()),
                     position: queue.len() as i32,
                     state: MissState::Pending,
+                    kind: BulkQueueKind::Miss,
                 });
                 !bulk::already_in_role(&m.held, Role::Unverified)
+            }
+            Ok(ResyncOutcome::Malformed) => {
+                queue.push(BulkQueueEntry {
+                    discord_user_id: m.id,
+                    handle: Some(m.handle.clone()),
+                    position: queue.len() as i32,
+                    state: MissState::Pending,
+                    kind: BulkQueueKind::Malformed,
+                });
+                true // needs follow-up; pace like a write
             }
             Ok(ResyncOutcome::Conflict) => {
                 // Conflicts are audited by resync and left for individual /verify; not queued.
@@ -483,26 +496,37 @@ async fn run_wizard(
         // and buttons, then hands the message to verify_step which drives the collector
         // from there. The edit goes through the interaction token (handle.edit), never
         // Message::edit, because the host message is ephemeral.
-        handle
-            .edit(
-                ctx,
-                reply(
-                    embeds::wizard_embed(
-                        &display_name,
-                        &target.name,
-                        &avatar,
-                        position,
-                        total_queue,
-                    ),
-                    vec![CreateActionRow::Buttons(vec![
-                        CreateButton::new(LOOKUP_BUTTON_ID)
-                            .label("Look up by email")
-                            .style(ButtonStyle::Primary),
-                        skip_btn.clone(),
-                        stop_btn.clone(),
-                    ])],
+        //
+        // The embed and button row depend on the queue entry kind: a Miss gets the
+        // email-lookup button; a Malformed entry gets override-only buttons (the member
+        // is already located in Solidarity Tech, so email lookup is not offered).
+        let (initial_embed, initial_row) = match miss.kind {
+            BulkQueueKind::Miss => (
+                embeds::wizard_embed(&display_name, &target.name, &avatar, position, total_queue),
+                CreateActionRow::Buttons(vec![
+                    CreateButton::new(LOOKUP_BUTTON_ID)
+                        .label("Look up by email")
+                        .style(ButtonStyle::Primary),
+                    skip_btn.clone(),
+                    stop_btn.clone(),
+                ]),
+            ),
+            BulkQueueKind::Malformed => (
+                embeds::wizard_malformed_embed(
+                    &display_name,
+                    &target.name,
+                    &avatar,
+                    position,
+                    total_queue,
                 ),
-            )
+                crate::commands::verify::override_only_buttons(&[
+                    skip_btn.clone(),
+                    stop_btn.clone(),
+                ]),
+            ),
+        };
+        handle
+            .edit(ctx, reply(initial_embed, vec![initial_row]))
             .await?;
 
         let (outcome, extra_press) = verify_step(

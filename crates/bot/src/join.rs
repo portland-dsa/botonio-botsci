@@ -84,6 +84,9 @@ pub async fn on_guild_member_add(
         Ok(VerifyOutcome::Unverified | VerifyOutcome::NotFound) => {
             tracing::info!("joining member not in Solidarity Tech; assigned Unverified");
         }
+        Ok(VerifyOutcome::Malformed) => {
+            tracing::warn!("joining member's record has no usable standing; no role assigned");
+        }
         Ok(VerifyOutcome::Conflict) => {
             tracing::warn!(
                 "joining member's handle is on record for a different account; no role assigned"

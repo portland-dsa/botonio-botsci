@@ -55,3 +55,10 @@ Feature: Bulk verify sweep and resumable miss queue
   Scenario: A queued member already verified elsewhere is skipped on liveness
     Given Shadow is queued but has since been given the Member role
     Then the wizard skips Shadow on the liveness check
+
+  Scenario: A malformed record is its own partition, not a role change
+    Given Tails is in the roster holding no managed role, known to us but with no membership status
+    When Sonic previews a whole-server sweep
+    Then the sweep scans 1 member
+    And the sweep matches 0 members as Member
+    And the sweep counts 1 malformed record

@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 
-use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, MigsStatus, Role};
+use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, MigsStatus};
 
 use crate::backends::solidarity_tech::{
     DuesStatus, MembershipType, SolidarityTechClient, SolidarityTechMember,
@@ -51,14 +51,13 @@ pub struct MemberRecord {
 }
 
 impl MemberRecord {
-    /// The Discord [`Role`] this record's standing grants. Absent standing is
-    /// `Unverified`, via the shared `MigsStatus -> MembershipStatus -> Role` chain.
-    pub fn role(&self) -> Role {
-        Role::from(
-            self.standing
-                .map(MembershipStatus::from)
-                .unwrap_or_default(),
-        )
+    /// The computed membership status for this record. An absent standing is
+    /// [`Malformed`](MembershipStatus::Malformed) - a matched record we cannot decide
+    /// a role from - distinct from the live good-standing/lapsed values.
+    pub fn membership(&self) -> MembershipStatus {
+        self.standing
+            .map(MembershipStatus::from)
+            .unwrap_or(MembershipStatus::Malformed)
     }
 }
 
@@ -427,15 +426,43 @@ pub struct BulkSession {
     pub updated_at: DateTime<Utc>,
 }
 
-/// One member in a session's frozen miss queue. `handle` is a display snapshot
-/// captured at sweep time and is never read back for matching - every wizard action
-/// keys on `discord_user_id`.
+/// Why a member sits in the bulk-verify wizard queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BulkQueueKind {
+    /// Solidarity Tech does not know them (the email/override flow).
+    Miss,
+    /// A record matched but has no usable standing (override-only flow).
+    Malformed,
+}
+
+impl BulkQueueKind {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            BulkQueueKind::Miss => "miss",
+            BulkQueueKind::Malformed => "malformed",
+        }
+    }
+
+    /// Decode a stored token; `None` for any other value (the caller turns that into a
+    /// typed `PersistenceError::BadToken`, exactly like `MissState::from_token`).
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s {
+            "miss" => Some(BulkQueueKind::Miss),
+            "malformed" => Some(BulkQueueKind::Malformed),
+            _ => None,
+        }
+    }
+}
+
+/// One member in a session's frozen wizard queue. `handle` is a display snapshot
+/// captured at sweep time and is never read back for matching.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BulkMiss {
+pub struct BulkQueueEntry {
     pub discord_user_id: DiscordUserId,
     pub handle: Option<DiscordHandle>,
     pub position: i32,
     pub state: MissState,
+    pub kind: BulkQueueKind,
 }
 
 /// The pending/verified/skipped tally for the resume prompt and final summary.
@@ -464,12 +491,15 @@ pub trait BulkSessionStore: Send + Sync {
     async fn start_session(
         &self,
         session: &BulkSession,
-        misses: &[BulkMiss],
+        misses: &[BulkQueueEntry],
     ) -> Result<(), Self::Error>;
 
-    /// The lowest-position still-`Pending` miss for the guild, or `None` when the
+    /// The lowest-position still-`Pending` entry for the guild, or `None` when the
     /// queue is exhausted.
-    async fn next_pending(&self, guild: DiscordGuildId) -> Result<Option<BulkMiss>, Self::Error>;
+    async fn next_pending(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<BulkQueueEntry>, Self::Error>;
 
     /// Set one queued member's state (keyed on the id), and touch the session's
     /// `updated_at`. A member not in the queue is a silent no-op.
@@ -501,9 +531,9 @@ pub struct InMemoryStore {
     /// in-memory analogue of the `manual_override` table, insert-once just like it.
     overrides: RwLock<HashMap<u64, OverrideRecord>>,
     /// The single per-guild bulk session + its queue (in-memory analogue of the
-    /// bulk_verify_session/miss tables). `BTreeMap<position, BulkMiss>` keeps the
+    /// bulk_verify_session/miss tables). `BTreeMap<position, BulkQueueEntry>` keeps the
     /// queue ordered; the option is the at-most-one session.
-    bulk: RwLock<Option<(BulkSession, std::collections::BTreeMap<i32, BulkMiss>)>>,
+    bulk: RwLock<Option<(BulkSession, std::collections::BTreeMap<i32, BulkQueueEntry>)>>,
 }
 
 impl InMemoryStore {
@@ -690,14 +720,17 @@ impl BulkSessionStore for InMemoryStore {
     async fn start_session(
         &self,
         session: &BulkSession,
-        misses: &[BulkMiss],
+        misses: &[BulkQueueEntry],
     ) -> Result<(), Infallible> {
         let queue = misses.iter().map(|m| (m.position, m.clone())).collect();
         *self.bulk.write().expect("bulk lock poisoned") = Some((session.clone(), queue));
         Ok(())
     }
 
-    async fn next_pending(&self, _guild: DiscordGuildId) -> Result<Option<BulkMiss>, Infallible> {
+    async fn next_pending(
+        &self,
+        _guild: DiscordGuildId,
+    ) -> Result<Option<BulkQueueEntry>, Infallible> {
         Ok(self
             .bulk
             .read()
@@ -781,7 +814,7 @@ mod tests {
     use crate::backends::solidarity_tech::SolidarityTechMember;
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
     use chrono::NaiveDate;
-    use domain::{MigsStatus, Role};
+    use domain::{MembershipStatus, MigsStatus, Role};
 
     use crate::backends::solidarity_tech::FakeSolidarityTech;
 
@@ -814,7 +847,7 @@ mod tests {
         assert_eq!(r.email.as_str(), "a@b.com");
         assert_eq!(r.full_name.as_deref(), Some("zoop"));
         assert_eq!(r.standing, Some(MigsStatus::MemberInGoodStanding));
-        assert_eq!(r.role(), Role::Member);
+        assert_eq!(Role::try_from(r.membership()), Ok(Role::Member));
         assert_eq!(r.join_date, NaiveDate::from_ymd_opt(2021, 3, 15));
     }
 
@@ -833,15 +866,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn record_role_defaults_to_unverified_when_standing_absent() {
-        let st = SolidarityTechMember {
-            id: StUserId("2".into()),
-            email: Email("c@d.com".into()),
-            membership_standing: None,
+    fn base_st() -> SolidarityTechMember {
+        SolidarityTechMember {
+            id: StUserId("base".into()),
+            email: Email("base@test.com".into()),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn membership_is_malformed_when_standing_absent() {
+        let st = SolidarityTechMember {
+            membership_standing: None,
+            ..base_st()
         };
-        assert_eq!(MemberRecord::from(st).role(), Role::Unverified);
+        assert_eq!(
+            MemberRecord::from(st).membership(),
+            MembershipStatus::Malformed
+        );
     }
 
     fn st(handle: &str, id: u64, name: &str) -> SolidarityTechMember {

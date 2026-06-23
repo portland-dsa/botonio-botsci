@@ -2,9 +2,10 @@
 //!
 //! Cast: Sonic is the moderator; Tails is known only by handle (backfill), Knuckles a linked
 //! member whose handle drifted (repair), Shadow someone we do not know (Unverified), Eggman a
-//! handle claimed by a different account (conflict). The facade is a single in-memory fake the
-//! world holds across a run, so each step reads the resulting roles, markers, write-backs, and
-//! audit rows; the fake's audit can be made unavailable, so the suite runs offline.
+//! handle claimed by a different account (conflict), Rouge a matched member whose record has no
+//! usable standing (malformed). The facade is a single in-memory fake the world holds across a
+//! run, so each step reads the resulting roles, markers, write-backs, and audit rows; the fake's
+//! audit can be made unavailable, so the suite runs offline.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -15,7 +16,8 @@ use engine::backends::discord::Role;
 use engine::store::MemberRecord;
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use engine::verify::{
-    HealAction, Located, Member, MemberError, MemberRead, MemberWrite, Target, VerifyOutcome,
+    HealAction, Located, Member, MemberError, MemberRead, MemberWrite, ResyncOutcome, Target,
+    VerifyOutcome,
 };
 
 use domain::MigsStatus;
@@ -30,6 +32,7 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
         "Shadow" => 4,
         "Eggman" => 5,
         "Silver" => 6,
+        "Rouge" => 7,
         other => panic!("unknown actor {other}"),
     };
     (DiscordUserId(raw), DiscordHandle(name.to_lowercase()))
@@ -281,6 +284,7 @@ struct VerifyWorld {
     discord_fails: bool,
     marker_fails: bool,
     last: Option<Result<VerifyOutcome, MemberError>>,
+    last_resync: Option<Result<ResyncOutcome, MemberError>>,
     forget_result: Option<Result<(), MemberError>>,
     last_target: Option<DiscordUserId>,
     fake: Option<FakeMembers>,
@@ -304,6 +308,7 @@ impl VerifyWorld {
             discord_fails: false,
             marker_fails: false,
             last: None,
+            last_resync: None,
             forget_result: None,
             last_target: None,
             fake: None,
@@ -366,6 +371,16 @@ impl VerifyWorld {
                 .forget(DiscordUserId(SONIC))
                 .await,
         );
+        self.fake = Some(fake);
+    }
+
+    async fn run_resync(&mut self, target: DiscordUserId, handle: DiscordHandle) {
+        self.last_target = Some(target);
+        let fake = self.build_fake(target);
+        let result = Member::new(&fake, Target { id: target, handle })
+            .resync(DiscordUserId(SONIC), &self.held_roles)
+            .await;
+        self.last_resync = Some(result);
         self.fake = Some(fake);
     }
 }
@@ -697,6 +712,122 @@ async fn forget_recorded(world: &mut VerifyWorld) {
     assert!(
         rows.iter()
             .any(|r| r["action"] == "member_forget" && r["cache_unlinked"] == true)
+    );
+}
+
+#[given(
+    regex = r"^(\w+) is in our records linked to her Discord id, but her record has no membership status$"
+)]
+async fn malformed_record(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    let mut rec = record(&name, handle, Some(id));
+    rec.standing = None; // a matched record with no usable standing
+    world.members.push(rec);
+}
+
+#[then(regex = r"^(\w+)'s record is reported as malformed$")]
+async fn reported_malformed(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert!(matches!(world.last, Some(Ok(VerifyOutcome::Malformed))));
+    assert!(
+        world.fake.as_ref().unwrap().roles_of(id).is_empty(),
+        "a malformed record grants no role"
+    );
+}
+
+#[then(regex = r"^the malformed encounter is recorded in the audit log with method (\w+)$")]
+async fn malformed_recorded(world: &mut VerifyWorld, method: String) {
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["outcome"], "malformed");
+    assert_eq!(rows[0]["method"], method);
+}
+
+#[when(regex = r"^Sonic resyncs (\w+)$")]
+async fn sonic_resyncs(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    world.run_resync(id, handle).await;
+}
+
+#[then(regex = r"^(\w+)'s resync is reported as malformed$")]
+async fn resync_malformed(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert!(
+        matches!(world.last_resync, Some(Ok(ResyncOutcome::Malformed))),
+        "expected Malformed resync outcome"
+    );
+    assert!(
+        world.fake.as_ref().unwrap().roles_of(id).is_empty(),
+        "a malformed resync writes no role"
+    );
+}
+
+#[then(regex = r"^(\w+) is resynced to (\w+)$")]
+async fn resynced_to_role(world: &mut VerifyWorld, name: String, role: String) {
+    let (id, _) = actor(&name);
+    let expected = role_by_name(&role);
+    assert!(
+        matches!(world.last_resync, Some(Ok(ResyncOutcome::Changed(_)))),
+        "expected Changed resync outcome"
+    );
+    assert!(
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .roles_of(id)
+            .contains(&expected),
+        "{name} should hold {role} after resync"
+    );
+}
+
+#[then(regex = r"^(\w+) is left unchanged at (\w+)$")]
+async fn resync_unchanged_at(world: &mut VerifyWorld, name: String, role: String) {
+    let (id, _) = actor(&name);
+    let expected = role_by_name(&role);
+    assert!(
+        matches!(world.last_resync, Some(Ok(ResyncOutcome::Unchanged(_)))),
+        "expected Unchanged resync outcome"
+    );
+    assert!(
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .roles_of(id)
+            .contains(&expected),
+        "{name} should still hold {role}"
+    );
+}
+
+#[then("no audit row is written for the resync")]
+async fn resync_no_audit(world: &mut VerifyWorld) {
+    assert!(
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .audit_rows
+            .lock()
+            .unwrap()
+            .is_empty(),
+        "an unchanged resync must not be audited"
+    );
+}
+
+#[then("the resync is audited once")]
+async fn resync_audited_once(world: &mut VerifyWorld) {
+    assert_eq!(
+        world
+            .fake
+            .as_ref()
+            .unwrap()
+            .audit_rows
+            .lock()
+            .unwrap()
+            .len(),
+        1,
+        "expected exactly one audit row"
     );
 }
 

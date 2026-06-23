@@ -16,3 +16,10 @@ Feature: Looking up a manually-verified member
     Then the override card is shown
     And the override card hides the reason
     And no audit row is written
+
+  Scenario: A malformed record with a hand-approval shows the override card
+    Given Sonic is a moderator
+    And Tails is a member with a record
+    And Tails is a manually-verified member approved by Knuckles
+    When Sonic looks up Tails
+    Then the override card is shown

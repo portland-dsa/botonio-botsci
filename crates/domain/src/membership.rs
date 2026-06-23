@@ -10,29 +10,34 @@
 use crate::role::Role;
 
 /// The verification outcome for a member - the role decision the bot acts on.
-///
-/// Distinct from any backend's raw status enum; this is the *computed* result
-/// that maps onto a [`Role`]. Each good-standing source converts into this.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// A closed set of exactly three computed results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MembershipStatus {
     /// In good standing - qualifies for the `Member` role.
     Member,
     /// A known not-in-good-standing status (e.g. lapsed) - gets `Dues Expired`.
     DuesExpired,
-    /// No usable status to decide from - left for manual verification.
-    #[default]
-    Unverified,
+    /// A matched record with no usable standing - no role can be decided from it,
+    /// so it is resolved by hand rather than auto-assigned.
+    Malformed,
 }
 
-/// The [`Role`] each verification outcome grants - the durable half of the
-/// `source status -> MembershipStatus -> Role` chain, kept with the vocabulary so
-/// the role decision never lives in a front-end.
-impl From<MembershipStatus> for Role {
-    fn from(status: MembershipStatus) -> Self {
+/// Why a [`MembershipStatus`] could not be converted to a [`Role`]: it is
+/// [`Malformed`](MembershipStatus::Malformed) and has no role to grant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("membership status is malformed: no usable standing to assign a role")]
+pub struct MalformedMembership;
+
+/// The durable half of the `source status -> MembershipStatus -> Role` chain, kept
+/// with the vocabulary so the role decision never lives in a front-end. Fallible:
+/// a `Malformed` status has no role, and the type system now forbids inventing one.
+impl TryFrom<MembershipStatus> for Role {
+    type Error = MalformedMembership;
+    fn try_from(status: MembershipStatus) -> Result<Self, Self::Error> {
         match status {
-            MembershipStatus::Member => Role::Member,
-            MembershipStatus::DuesExpired => Role::DuesExpired,
-            MembershipStatus::Unverified => Role::Unverified,
+            MembershipStatus::Member => Ok(Role::Member),
+            MembershipStatus::DuesExpired => Ok(Role::DuesExpired),
+            MembershipStatus::Malformed => Err(MalformedMembership),
         }
     }
 }
@@ -42,14 +47,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn membership_status_maps_to_matching_role() {
-        assert_eq!(Role::from(MembershipStatus::Member), Role::Member);
-        assert_eq!(Role::from(MembershipStatus::DuesExpired), Role::DuesExpired);
-        assert_eq!(Role::from(MembershipStatus::Unverified), Role::Unverified);
-    }
-
-    #[test]
-    fn default_is_unverified() {
-        assert_eq!(MembershipStatus::default(), MembershipStatus::Unverified);
+    fn membership_status_converts_to_matching_role() {
+        assert_eq!(Role::try_from(MembershipStatus::Member), Ok(Role::Member));
+        assert_eq!(
+            Role::try_from(MembershipStatus::DuesExpired),
+            Ok(Role::DuesExpired)
+        );
+        assert_eq!(
+            Role::try_from(MembershipStatus::Malformed),
+            Err(MalformedMembership)
+        );
     }
 }

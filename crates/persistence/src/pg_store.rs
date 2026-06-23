@@ -27,9 +27,9 @@ use sqlx::postgres::PgPoolOptions;
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::store::{
-    BulkMiss, BulkScope, BulkSession, BulkSessionStore, BulkStatus, ConfigStore, GuildConfig,
-    IdentityWrite, MemberRecord, MemberStore, MissCounts, MissState, OverrideLog, OverrideRecord,
-    RosterWrite, dedup_records,
+    BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
+    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, MissCounts, MissState,
+    OverrideLog, OverrideRecord, RosterWrite, dedup_records,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -595,7 +595,7 @@ impl BulkSessionStore for PgStore {
     async fn start_session(
         &self,
         session: &BulkSession,
-        misses: &[BulkMiss],
+        misses: &[BulkQueueEntry],
     ) -> Result<(), PersistenceError> {
         let mut tx = self.pool.begin().await?;
         // Wholesale replace: the CASCADE clears any prior queue with the session row.
@@ -623,20 +623,23 @@ impl BulkSessionStore for PgStore {
             let mut handles: Vec<Option<String>> = Vec::with_capacity(cap);
             let mut positions: Vec<i32> = Vec::with_capacity(cap);
             let mut states: Vec<String> = Vec::with_capacity(cap);
+            let mut kinds: Vec<String> = Vec::with_capacity(cap);
             for m in misses {
                 ids.push(m.discord_user_id.0 as i64);
                 handles.push(m.handle.as_ref().map(|h| h.0.clone()));
                 positions.push(m.position);
                 states.push(m.state.as_token().to_owned());
+                kinds.push(m.kind.as_token().to_owned());
             }
             sqlx::query!(
-                r#"INSERT INTO bulk_verify_miss (guild_id, discord_user_id, handle, position, state)
-                   SELECT $1, * FROM UNNEST($2::bigint[], $3::text[], $4::int[], $5::text[])"#,
+                r#"INSERT INTO bulk_verify_miss (guild_id, discord_user_id, handle, position, state, kind)
+                   SELECT $1, * FROM UNNEST($2::bigint[], $3::text[], $4::int[], $5::text[], $6::text[])"#,
                 session.guild.0 as i64,
                 &ids,
                 &handles as &[Option<String>],
                 &positions,
                 &states,
+                &kinds,
             )
             .execute(&mut *tx)
             .await?;
@@ -648,9 +651,9 @@ impl BulkSessionStore for PgStore {
     async fn next_pending(
         &self,
         guild: DiscordGuildId,
-    ) -> Result<Option<BulkMiss>, PersistenceError> {
+    ) -> Result<Option<BulkQueueEntry>, PersistenceError> {
         let row = sqlx::query!(
-            r#"SELECT discord_user_id, handle, position, state
+            r#"SELECT discord_user_id, handle, position, state, kind
                FROM bulk_verify_miss
                WHERE guild_id = $1 AND state = 'pending'
                ORDER BY position ASC LIMIT 1"#,
@@ -661,11 +664,14 @@ impl BulkSessionStore for PgStore {
         let Some(r) = row else { return Ok(None) };
         let state = MissState::from_token(&r.state)
             .ok_or_else(|| PersistenceError::BadToken(format!("miss state {:?}", r.state)))?;
-        Ok(Some(BulkMiss {
+        let kind = BulkQueueKind::from_token(&r.kind)
+            .ok_or_else(|| PersistenceError::BadToken(format!("queue kind {:?}", r.kind)))?;
+        Ok(Some(BulkQueueEntry {
             discord_user_id: DiscordUserId(r.discord_user_id as u64),
             handle: r.handle.map(DiscordHandle),
             position: r.position,
             state,
+            kind,
         }))
     }
 
