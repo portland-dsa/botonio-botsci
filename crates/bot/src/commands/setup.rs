@@ -38,6 +38,8 @@ const OVERRIDE_ROLE_ID: &str = "setup_role_manual_override";
 const MOD_CHAN_ID: &str = "setup_chan_mod_approval";
 const UNVERIFIED_CHAN_ID: &str = "setup_chan_unverified";
 const DUES_CHAN_ID: &str = "setup_chan_dues_expired";
+const VERIFY_LOG_CHAN_ID: &str = "setup_chan_verify_log";
+const POST_PROMPT_ID: &str = "setup_post_prompt";
 
 const NAV_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -171,6 +173,37 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 };
                 edit_panel(&ctx, &interaction, accent, panel_buttons(), note.as_deref()).await;
             }
+            POST_PROMPT_ID => {
+                if !ack(&ctx, &interaction).await {
+                    continue;
+                }
+                let note = match data.guild_config.load().unverified_channel {
+                    None => Some(
+                        "Set an unverified channel first (under Set channels), then post the prompt."
+                            .to_owned(),
+                    ),
+                    Some(ch) => {
+                        let msg = crate::render::self_verify::verify_prompt(accent);
+                        match serenity::all::ChannelId::new(ch.0)
+                            .send_message(ctx.serenity_context().http.clone(), msg)
+                            .await
+                        {
+                            Ok(_) => Some(
+                                "Posted the verification prompt to the unverified channel."
+                                    .to_owned(),
+                            ),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "setup: failed to post the verification prompt");
+                                Some(
+                                    "Couldn't post the prompt there - check my permissions on that channel."
+                                        .to_owned(),
+                                )
+                            }
+                        }
+                    }
+                };
+                edit_panel(&ctx, &interaction, accent, panel_buttons(), note.as_deref()).await;
+            }
             MEMBER_ROLE_ID | DUES_ROLE_ID | UNVERIFIED_ROLE_ID | OVERRIDE_ROLE_ID => {
                 // Acknowledge first so the persist + audit below can't blow Discord's
                 // 3-second response deadline; the panel is then edited in place.
@@ -201,7 +234,7 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 )
                 .await;
             }
-            MOD_CHAN_ID | UNVERIFIED_CHAN_ID | DUES_CHAN_ID => {
+            MOD_CHAN_ID | UNVERIFIED_CHAN_ID | DUES_CHAN_ID | VERIFY_LOG_CHAN_ID => {
                 if !ack(&ctx, &interaction).await {
                     continue;
                 }
@@ -235,6 +268,9 @@ fn panel_buttons() -> Vec<CreateActionRow> {
             .style(ButtonStyle::Secondary),
         CreateButton::new(SCAN_TOGGLE_ID)
             .label("Toggle scheduled scan")
+            .style(ButtonStyle::Secondary),
+        CreateButton::new(POST_PROMPT_ID)
+            .label("Post verification prompt")
             .style(ButtonStyle::Secondary),
     ])]
 }
@@ -280,6 +316,11 @@ fn channel_section(cfg: &GuildConfig) -> Vec<CreateActionRow> {
             DUES_CHAN_ID,
             "Dues-expired channel",
             cfg.dues_expired_channel,
+        ),
+        channel_select(
+            VERIFY_LOG_CHAN_ID,
+            "Verification-log channel",
+            cfg.verification_log_channel,
         ),
         back_row(),
     ]
@@ -467,6 +508,10 @@ fn set_channel_field(
         MOD_CHAN_ID => ("mod-approval channel", &mut cfg.mod_approval_channel),
         UNVERIFIED_CHAN_ID => ("unverified channel", &mut cfg.unverified_channel),
         DUES_CHAN_ID => ("dues-expired channel", &mut cfg.dues_expired_channel),
+        VERIFY_LOG_CHAN_ID => (
+            "verification-log channel",
+            &mut cfg.verification_log_channel,
+        ),
         _ => return None,
     };
     let old = slot.map(|c| c.0);

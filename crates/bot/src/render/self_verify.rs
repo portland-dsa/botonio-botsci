@@ -20,8 +20,6 @@ pub const LAST_FIELD_ID: &str = "selfverify_last";
 
 /// The message posted into the unverified channel: a short explainer embed and the
 /// button that opens the verification form.
-// allow(dead_code): posted by the /setup panel's prompt action.
-#[allow(dead_code)]
 pub fn verify_prompt(accent: u32) -> CreateMessage {
     let embed = CreateEmbed::new()
         .title("Verify your membership")
