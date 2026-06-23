@@ -180,7 +180,8 @@ mod tests {
     }
 
     #[test]
-    fn malformed_is_amber_and_offers_override() {
+    fn malformed_is_amber_and_carries_incomplete_copy() {
+        // Covers color and copy only; button rendering is an integration concern.
         let v = json(VerifyState::Malformed);
         assert_eq!(color(&v), COLOR_AMBER as u64);
         assert!(desc(&v).contains("incomplete"));

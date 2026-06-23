@@ -77,16 +77,23 @@ fn bot_member(name: &str) -> DiscordRosterMember {
     }
 }
 
-/// Build a `BulkQueueEntry` at `position` for `name`, all Pending.
-fn bulk_miss(name: &str, position: i32) -> BulkQueueEntry {
+/// Build a `BulkQueueEntry` at `position` for `name`, all Pending, with the given kind.
+fn bulk_queue_entry(name: &str, position: i32, kind: BulkQueueKind) -> BulkQueueEntry {
     let (id, handle) = actor(name);
     BulkQueueEntry {
         discord_user_id: id,
         handle: Some(handle),
         position,
         state: MissState::Pending,
-        kind: BulkQueueKind::Miss,
+        kind,
     }
+}
+
+/// Build a known `MemberRecord` for `name` with no membership status (malformed).
+fn known_record_no_standing(name: &str) -> MemberRecord {
+    let mut rec = known_record(name);
+    rec.standing = None;
+    rec
 }
 
 /// A started `BulkSession` for GUILD, started by SONIC.
@@ -196,7 +203,10 @@ async fn roster_unverified_unknown(world: &mut BulkWorld, name: String) {
 #[given("a started session whose queue is Shadow then Silver")]
 async fn started_session_shadow_silver(world: &mut BulkWorld) {
     let session = started_session();
-    let misses = vec![bulk_miss("Shadow", 0), bulk_miss("Silver", 1)];
+    let misses = vec![
+        bulk_queue_entry("Shadow", 0, BulkQueueKind::Miss),
+        bulk_queue_entry("Silver", 1, BulkQueueKind::Miss),
+    ];
     world.store.start_session(&session, &misses).await.unwrap();
 }
 
@@ -204,8 +214,16 @@ async fn started_session_shadow_silver(world: &mut BulkWorld) {
 async fn shadow_queued_but_verified(world: &mut BulkWorld) {
     // Set up the session with Shadow queued.
     let session = started_session();
-    let misses = vec![bulk_miss("Shadow", 0)];
+    let misses = vec![bulk_queue_entry("Shadow", 0, BulkQueueKind::Miss)];
     world.store.start_session(&session, &misses).await.unwrap();
+}
+
+#[given(
+    regex = r"^(\w+) is in the roster holding no managed role, known to us but with no membership status$"
+)]
+async fn roster_known_malformed(world: &mut BulkWorld, name: String) {
+    world.roster.push(roster_member(&name, vec![]));
+    world.known.push(known_record_no_standing(&name));
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +304,7 @@ async fn sonic_marks_skipped(world: &mut BulkWorld, name: String) {
 #[when("Sonic starts the session over with only Tails")]
 async fn sonic_starts_over_tails(world: &mut BulkWorld) {
     let session = started_session();
-    let misses = vec![bulk_miss("Tails", 0)];
+    let misses = vec![bulk_queue_entry("Tails", 0, BulkQueueKind::Miss)];
     world.store.start_session(&session, &misses).await.unwrap();
     world.next = Some(
         world
@@ -381,6 +399,12 @@ async fn session_can_complete(world: &mut BulkWorld) {
 async fn wizard_skips_shadow(_world: &mut BulkWorld) {
     // Shadow has since been given the Member role - miss_still_pending returns false.
     assert!(!miss_still_pending(true, &[Role::Member]));
+}
+
+#[then(regex = r"^the sweep counts (\d+) malformed records?$")]
+async fn sweep_counts_malformed(world: &mut BulkWorld, count: usize) {
+    let tally = world.tally.as_ref().expect("no tally");
+    assert_eq!(tally.malformed, count, "malformed count mismatch");
 }
 
 // ---------------------------------------------------------------------------

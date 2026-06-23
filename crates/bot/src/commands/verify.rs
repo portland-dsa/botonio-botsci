@@ -47,6 +47,9 @@ pub(crate) enum StepOutcome {
     Expired,
     /// A backend error occurred.
     Errored,
+    /// The email lookup found a record but it carries no usable standing; nothing was
+    /// changed. The wizard caller marks this member Skipped.
+    Malformed,
 }
 
 /// Result of waiting on an open modal while its trigger button stays live. A modal
@@ -563,6 +566,7 @@ pub(crate) async fn verify_step(
             let outcome = match next {
                 VerifyState::Verified(role) => StepOutcome::Verified(role),
                 VerifyState::Conflict => StepOutcome::Conflict,
+                VerifyState::Malformed => StepOutcome::Malformed,
                 _ => StepOutcome::Errored,
             };
             return Ok((outcome, None));
