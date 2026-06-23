@@ -63,30 +63,42 @@ pub fn self_verify_modal() -> CreateModal {
     ])
 }
 
+/// The fields of a successful self-verification's moderator-log embed: who verified, the
+/// name they typed and the record's name (shown side by side to eyeball), the granted
+/// role, and the matched email.
+pub struct VerifyLog<'a> {
+    pub member: UserId,
+    pub handle: &'a str,
+    pub submitted_name: &'a str,
+    pub record_name: Option<&'a str>,
+    pub role: Role,
+    pub email: &'a str,
+    /// The submitted name failed `name_check` - draw the eyeball warning.
+    pub name_mismatch: bool,
+}
+
 /// The moderator-log embed for a successful self-verification: who verified, the
 /// granted role, the email that matched, and - when the submitted name does not
 /// line up with the record - a visible warning to eyeball.
-pub fn log_embed(
-    member: UserId,
-    handle: &str,
-    record_name: Option<&str>,
-    role: Role,
-    email: &str,
-    name_warning: bool,
-    accent: u32,
-) -> CreateEmbed {
+pub fn log_embed(log: &VerifyLog<'_>, accent: u32) -> CreateEmbed {
     let mut embed = CreateEmbed::new()
         .title("Self-service verification")
         .description(format!(
-            "<@{}> ({handle}) verified as {}.",
-            member.get(),
-            role.as_str()
+            "<@{}> ({}) verified as {}.",
+            log.member.get(),
+            log.handle,
+            log.role.as_str()
         ))
-        .field("Record name", record_name.unwrap_or("(none on file)"), true)
-        .field("Granted role", role.as_str(), true)
-        .field("Email", email, false)
+        .field("Submitted name", log.submitted_name, true)
+        .field(
+            "Record name",
+            log.record_name.unwrap_or("(none on file)"),
+            true,
+        )
+        .field("Granted role", log.role.as_str(), true)
+        .field("Email", log.email, false)
         .color(accent);
-    if name_warning {
+    if log.name_mismatch {
         embed = embed.field(
             "\u{26a0} Name mismatch",
             "The submitted name does not match the record name - double-check this is the right person.",
@@ -99,7 +111,13 @@ pub fn log_embed(
 /// The moderator-log embed for a self-verification that matched a record carrying no
 /// usable standing: the member is real, but no role could be granted, so a moderator may
 /// want to hand-approve them. Mirrors [`log_embed`] but names no role.
-pub fn malformed_log_embed(member: UserId, handle: &str, email: &str, accent: u32) -> CreateEmbed {
+pub fn malformed_log_embed(
+    member: UserId,
+    handle: &str,
+    submitted_name: &str,
+    email: &str,
+    accent: u32,
+) -> CreateEmbed {
     CreateEmbed::new()
         .title("Self-service verification needs review")
         .description(format!(
@@ -107,6 +125,7 @@ pub fn malformed_log_embed(member: UserId, handle: &str, email: &str, accent: u3
              role was granted. Consider verifying them by hand.",
             member.get(),
         ))
+        .field("Submitted name", submitted_name, true)
         .field("Email", email, false)
         .color(accent)
 }

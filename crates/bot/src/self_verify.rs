@@ -15,8 +15,8 @@ use engine::verify::{DataStore, EmailGrant, Member as VerifyMember, Target};
 use crate::data::{Data, Error};
 use crate::render::modal::parse_email;
 use crate::render::self_verify::{
-    EMAIL_FIELD_ID, FIRST_FIELD_ID, LAST_FIELD_ID, PROMPT_BUTTON_ID, SUBMIT_MODAL_ID, log_embed,
-    malformed_log_embed, self_verify_modal,
+    EMAIL_FIELD_ID, FIRST_FIELD_ID, LAST_FIELD_ID, PROMPT_BUTTON_ID, SUBMIT_MODAL_ID, VerifyLog,
+    log_embed, malformed_log_embed, self_verify_modal,
 };
 
 /// Whether the name a member typed lines up with their Solidarity Tech record.
@@ -152,6 +152,19 @@ fn field_value(submit: &ModalInteraction, field_id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The name the member typed, formatted for the moderator log ("First L"). Either field
+/// may arrive blank in an edge case, so the result falls back to a placeholder - Discord
+/// rejects an empty embed field value.
+fn format_submitted_name(first: &str, last_initial: &str) -> String {
+    let name = format!("{} {}", first.trim(), last_initial.trim());
+    let name = name.trim();
+    if name.is_empty() {
+        "(not given)".to_owned()
+    } else {
+        name.to_owned()
+    }
+}
+
 /// Run the self-service verification for a submitted form.
 async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Result<(), Error> {
     // Defer ephemerally first: the live Solidarity Tech read + grant below can
@@ -194,6 +207,9 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
     };
     let first = field_value(submit, FIRST_FIELD_ID);
     let last_initial = field_value(submit, LAST_FIELD_ID);
+    // Surfaced in the moderator log so a name can be eyeballed even when the record has
+    // none on file; also fed to `name_check` for the mismatch flag.
+    let submitted_name = format_submitted_name(&first, &last_initial);
 
     let store = DataStore::new(
         &*data.solidarity_tech,
@@ -214,27 +230,27 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
     match outcome {
         Ok(EmailGrant::Verified { role, record }) => {
             // `name_check` and `NameCheck` are defined above in this same module.
-            let warn = matches!(
+            let name_mismatch = matches!(
                 name_check(record.full_name.as_deref(), &first, &last_initial),
                 NameCheck::Mismatch
             );
-            post_log(
-                ctx,
-                data,
-                submit,
-                record.full_name.as_deref(),
+            let log = VerifyLog {
+                member: submit.user.id,
+                handle: &submit.user.name,
+                submitted_name: &submitted_name,
+                record_name: record.full_name.as_deref(),
                 role,
-                &email,
-                warn,
-            )
-            .await;
+                email: &email.0,
+                name_mismatch,
+            };
+            post_log(ctx, data, &log).await;
             reply(SUCCESS).await;
         }
         Ok(EmailGrant::Malformed) => {
             // A genuine member matched, but the record carries no usable standing, so no
             // role was granted. The member is told nothing distinct (no enumeration), but
             // the moderators are flagged so they can hand-approve.
-            post_malformed_log(ctx, data, submit, &email).await;
+            post_malformed_log(ctx, data, submit, &submitted_name, &email).await;
             reply(UNIFORM_FAILURE).await;
         }
         Ok(EmailGrant::Conflict) | Ok(EmailGrant::NotFound) => {
@@ -252,34 +268,25 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
 
 /// Post the success record to the configured log channel. Missing channel -> warn
 /// and skip; the grant already stands.
-async fn post_log(
-    ctx: &Context,
-    data: &Data,
-    submit: &ModalInteraction,
-    record_name: Option<&str>,
-    role: domain::Role,
-    email: &Email,
-    name_warning: bool,
-) {
-    let embed = log_embed(
-        submit.user.id,
-        &submit.user.name,
-        record_name,
-        role,
-        &email.0,
-        name_warning,
-        data.config.accent_color,
-    );
+async fn post_log(ctx: &Context, data: &Data, log: &VerifyLog<'_>) {
+    let embed = log_embed(log, data.config.accent_color);
     send_to_log(ctx, data, embed).await;
 }
 
 /// Flag a matched-but-malformed self-verification to the moderators: the member is real
 /// (their email matched), but the record carries no usable standing, so no role was
 /// granted and a moderator may want to hand-approve them.
-async fn post_malformed_log(ctx: &Context, data: &Data, submit: &ModalInteraction, email: &Email) {
+async fn post_malformed_log(
+    ctx: &Context,
+    data: &Data,
+    submit: &ModalInteraction,
+    submitted_name: &str,
+    email: &Email,
+) {
     let embed = malformed_log_embed(
         submit.user.id,
         &submit.user.name,
+        submitted_name,
         &email.0,
         data.config.accent_color,
     );
