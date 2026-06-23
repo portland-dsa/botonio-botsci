@@ -51,14 +51,20 @@ pub struct MemberRecord {
 }
 
 impl MemberRecord {
-    /// The Discord [`Role`] this record's standing grants. Absent standing is
-    /// `Unverified`, via the shared `MigsStatus -> MembershipStatus -> Role` chain.
+    /// The computed membership status for this record. An absent standing is
+    /// [`Malformed`](MembershipStatus::Malformed) - a matched record we cannot decide
+    /// a role from - distinct from the live good-standing/lapsed values.
+    pub fn membership(&self) -> MembershipStatus {
+        self.standing
+            .map(MembershipStatus::from)
+            .unwrap_or(MembershipStatus::Malformed)
+    }
+
+    /// Temporary compatibility shim during the malformed-record migration: preserves the
+    /// pre-fix mapping (a malformed record reads as `Unverified`) so callers are unchanged
+    /// until each is migrated to `membership()`. Removed in the final task.
     pub fn role(&self) -> Role {
-        Role::from(
-            self.standing
-                .map(MembershipStatus::from)
-                .unwrap_or_default(),
-        )
+        Role::try_from(self.membership()).unwrap_or(Role::Unverified)
     }
 }
 
@@ -781,7 +787,7 @@ mod tests {
     use crate::backends::solidarity_tech::SolidarityTechMember;
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
     use chrono::NaiveDate;
-    use domain::{MigsStatus, Role};
+    use domain::{MembershipStatus, MigsStatus, Role};
 
     use crate::backends::solidarity_tech::FakeSolidarityTech;
 
@@ -842,6 +848,26 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(MemberRecord::from(st).role(), Role::Unverified);
+    }
+
+    fn base_st() -> SolidarityTechMember {
+        SolidarityTechMember {
+            id: StUserId("base".into()),
+            email: Email("base@test.com".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn membership_is_malformed_when_standing_absent() {
+        let st = SolidarityTechMember {
+            membership_standing: None,
+            ..base_st()
+        };
+        assert_eq!(
+            MemberRecord::from(st).membership(),
+            MembershipStatus::Malformed
+        );
     }
 
     fn st(handle: &str, id: u64, name: &str) -> SolidarityTechMember {

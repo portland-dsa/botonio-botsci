@@ -137,10 +137,11 @@ mod tests {
     use backends::solidarity_tech::fixtures::decode_user;
     use domain::{MembershipStatus, MigsStatus, Role};
 
-    /// Replicates `MemberRecord::role()`'s `standing -> MembershipStatus -> Role`
-    /// chain without depending on the engine.
     fn role_of(standing: Option<MigsStatus>) -> Role {
-        Role::from(standing.map(MembershipStatus::from).unwrap_or_default())
+        let status = standing
+            .map(MembershipStatus::from)
+            .unwrap_or(MembershipStatus::Malformed);
+        Role::try_from(status).unwrap_or(Role::Unverified)
     }
 
     #[test]

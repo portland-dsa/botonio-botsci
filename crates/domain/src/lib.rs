@@ -19,6 +19,6 @@ pub use ids::{
     DiscordChannelId, DiscordGuildId, DiscordHandle, DiscordRoleId, DiscordUserId, Email, Phone,
     StUserId,
 };
-pub use membership::MembershipStatus;
+pub use membership::{MalformedMembership, MembershipStatus};
 pub use migs_status::{MigsStatus, MigsStatusError, RetiredMigsStatus};
 pub use role::Role;
