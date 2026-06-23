@@ -19,4 +19,4 @@ pub use decision::{
     EmailMatchOutcome, HealAction, Located, MatchOutcome, decide, locate, match_by_email,
 };
 pub use facade::{Heal, MemberError, MemberRead, MemberWrite};
-pub use member::{Member, ResyncOutcome, StripOutcome, Target, VerifyOutcome};
+pub use member::{EmailGrant, Member, ResyncOutcome, StripOutcome, Target, VerifyOutcome};
