@@ -95,3 +95,18 @@ pub fn log_embed(
     }
     embed
 }
+
+/// The moderator-log embed for a self-verification that matched a record carrying no
+/// usable standing: the member is real, but no role could be granted, so a moderator may
+/// want to hand-approve them. Mirrors [`log_embed`] but names no role.
+pub fn malformed_log_embed(member: UserId, handle: &str, email: &str, accent: u32) -> CreateEmbed {
+    CreateEmbed::new()
+        .title("Self-service verification needs review")
+        .description(format!(
+            "<@{}> ({handle}) matched a membership record with no usable standing, so no \
+             role was granted. Consider verifying them by hand.",
+            member.get(),
+        ))
+        .field("Email", email, false)
+        .color(accent)
+}

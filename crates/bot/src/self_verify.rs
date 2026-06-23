@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use serenity::all::{
     ComponentInteraction, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EditInteractionResponse, Interaction, ModalInteraction,
+    EditInteractionResponse, GuildId, Interaction, ModalInteraction,
 };
 
 use engine::backends::util::{DiscordHandle, DiscordUserId, Email};
@@ -16,15 +16,15 @@ use crate::data::{Data, Error};
 use crate::render::modal::parse_email;
 use crate::render::self_verify::{
     EMAIL_FIELD_ID, FIRST_FIELD_ID, LAST_FIELD_ID, PROMPT_BUTTON_ID, SUBMIT_MODAL_ID, log_embed,
-    self_verify_modal,
+    malformed_log_embed, self_verify_modal,
 };
 
 /// Whether the name a member typed lines up with their Solidarity Tech record.
 #[derive(Debug, PartialEq, Eq)]
 pub enum NameCheck {
-    /// First name and last initial both line up.
+    /// The submitted name lines up with the record.
     Match,
-    /// At least one does not - the log post is flagged, but the grant still stands.
+    /// It does not line up - the log post is flagged, but the grant still stands.
     Mismatch,
     /// The record has no name to compare against; not a mismatch.
     Unchecked,
@@ -32,31 +32,60 @@ pub enum NameCheck {
 
 /// Compare a submitted first name + last initial against the record's full name.
 ///
-/// Deliberately blunt - no fuzzy or nickname matching. The first whitespace token
-/// of the record name must equal the submitted first name (case-insensitive), and
-/// the first character of the record name's last token must equal the submitted
-/// last initial (case-insensitive). A record with no usable name is
-/// [`Unchecked`](NameCheck::Unchecked), never a mismatch.
+/// Deliberately blunt - no fuzzy or nickname matching - but lenient enough not to cry
+/// wolf. Comparison is case- and accent-insensitive (so `Jose` and `jose` line up, as do
+/// their accented forms). When the record name has a distinct first and last token, the
+/// submitted first name and last initial must both match. When it carries only a single
+/// token (a first name or a last name; the composed `full_name` cannot say which), the
+/// submission matches if either the first name or the last initial lines up, so a real
+/// member is not flagged merely because the record lacks the other half. A record with no
+/// usable name is [`Unchecked`](NameCheck::Unchecked), never a mismatch.
 pub fn name_check(record_name: Option<&str>, first: &str, last_initial: &str) -> NameCheck {
     let Some(name) = record_name else {
         return NameCheck::Unchecked;
     };
-    let mut tokens = name.split_whitespace();
-    let Some(rec_first) = tokens.next() else {
+    let tokens: Vec<&str> = name.split_whitespace().collect();
+    let (Some(rec_first), Some(rec_last)) = (tokens.first().copied(), tokens.last().copied())
+    else {
         return NameCheck::Unchecked;
     };
-    let rec_last = name.split_whitespace().last().unwrap_or(rec_first);
 
-    let first_ok = rec_first.eq_ignore_ascii_case(first.trim());
-    let last_ok = match (last_initial.trim().chars().next(), rec_last.chars().next()) {
-        (Some(a), Some(b)) => a.eq_ignore_ascii_case(&b),
-        _ => false,
+    let first_ok = eq_fold(rec_first, first_token(first));
+    let last_ok = initial_matches(rec_last, last_initial);
+
+    // A single-token record name is ambiguous - it could be the first or the last name -
+    // so accept the submission when either part lines up, and only warn when neither
+    // does. A name with distinct first and last tokens must match on both.
+    let matched = if tokens.len() == 1 {
+        first_ok || last_ok
+    } else {
+        first_ok && last_ok
     };
-    if first_ok && last_ok {
+    if matched {
         NameCheck::Match
     } else {
         NameCheck::Mismatch
     }
+}
+
+/// Case- and accent-insensitive string equality. Unlike `eq_ignore_ascii_case`, this
+/// folds non-ASCII letters, so an accented name is not spuriously flagged.
+fn eq_fold(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// Whether `token`'s first character equals the submitted `initial`, case- and
+/// accent-insensitively. Empty or blank inputs never match.
+fn initial_matches(token: &str, initial: &str) -> bool {
+    match (token.chars().next(), initial.trim().chars().next()) {
+        (Some(t), Some(i)) => t.to_lowercase().eq(i.to_lowercase()),
+        _ => false,
+    }
+}
+
+/// The first whitespace-separated token of `s`, or the empty string when `s` is blank.
+fn first_token(s: &str) -> &str {
+    s.split_whitespace().next().unwrap_or("")
 }
 
 /// Shown for every outcome that is not a clean grant - a miss, a conflict, a
@@ -68,9 +97,9 @@ const BACKEND_ERROR: &str = "Something went wrong on my end - please try again i
 const RATE_LIMITED: &str = "You're going a little fast - please wait a moment and try again.";
 const SUCCESS: &str = "You're verified! Welcome.";
 
-/// Route a raw gateway interaction. Acts only on the self-verify button and modal;
-/// every other interaction (poise commands, other collectors) is ignored so the
-/// framework's own dispatch is untouched.
+/// Route a raw gateway interaction. Acts only on the self-verify button and modal, and
+/// only when they arrive from the guild this bot serves; every other interaction (poise
+/// commands, other collectors) is ignored so the framework's own dispatch is untouched.
 pub async fn on_interaction(
     ctx: &Context,
     interaction: &Interaction,
@@ -78,13 +107,26 @@ pub async fn on_interaction(
 ) -> Result<(), Error> {
     match interaction {
         Interaction::Component(c) if c.data.custom_id == PROMPT_BUTTON_ID => {
+            if !in_home_guild(c.guild_id, data) {
+                return Ok(());
+            }
             open_modal(ctx, c).await
         }
         Interaction::Modal(m) if m.data.custom_id == SUBMIT_MODAL_ID => {
+            if !in_home_guild(m.guild_id, data) {
+                return Ok(());
+            }
             on_submit(ctx, m, data).await
         }
         _ => Ok(()),
     }
+}
+
+/// Whether an interaction came from the one guild this bot serves. Defence in depth
+/// beneath `guild_guard` (which already makes the bot leave any other guild), mirroring
+/// the same gate in [`crate::join`]; a DM interaction (no guild) is never ours.
+fn in_home_guild(guild_id: Option<GuildId>, data: &Data) -> bool {
+    guild_id.is_some_and(|g| g.get() == data.config.guild_id)
 }
 
 /// Open the verification form in response to the standing button.
@@ -188,9 +230,16 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
             .await;
             reply(SUCCESS).await;
         }
-        Ok(EmailGrant::Malformed) | Ok(EmailGrant::Conflict) | Ok(EmailGrant::NotFound) => {
-            // Not a clean grant (no match, a conflict, or a record with no usable
-            // standing). No detail to the member; the engine already audited the attempt.
+        Ok(EmailGrant::Malformed) => {
+            // A genuine member matched, but the record carries no usable standing, so no
+            // role was granted. The member is told nothing distinct (no enumeration), but
+            // the moderators are flagged so they can hand-approve.
+            post_malformed_log(ctx, data, submit, &email).await;
+            reply(UNIFORM_FAILURE).await;
+        }
+        Ok(EmailGrant::Conflict) | Ok(EmailGrant::NotFound) => {
+            // A conflict or a plain miss: no detail to the member; the engine already
+            // audited the attempt, and there is nothing for a moderator to act on.
             reply(UNIFORM_FAILURE).await;
         }
         Err(e) => {
@@ -212,12 +261,6 @@ async fn post_log(
     email: &Email,
     name_warning: bool,
 ) {
-    let Some(channel) = data.guild_config.load().verification_log_channel else {
-        tracing::warn!(
-            "self-verify succeeded but no verification_log_channel is set; skipping log"
-        );
-        return;
-    };
     let embed = log_embed(
         submit.user.id,
         &submit.user.name,
@@ -227,6 +270,29 @@ async fn post_log(
         name_warning,
         data.config.accent_color,
     );
+    send_to_log(ctx, data, embed).await;
+}
+
+/// Flag a matched-but-malformed self-verification to the moderators: the member is real
+/// (their email matched), but the record carries no usable standing, so no role was
+/// granted and a moderator may want to hand-approve them.
+async fn post_malformed_log(ctx: &Context, data: &Data, submit: &ModalInteraction, email: &Email) {
+    let embed = malformed_log_embed(
+        submit.user.id,
+        &submit.user.name,
+        &email.0,
+        data.config.accent_color,
+    );
+    send_to_log(ctx, data, embed).await;
+}
+
+/// Send a verification-log embed to the configured channel. No channel set -> warn and
+/// skip; whatever outcome calls this has already taken effect, so the post is best-effort.
+async fn send_to_log(ctx: &Context, data: &Data, embed: serenity::all::CreateEmbed) {
+    let Some(channel) = data.guild_config.load().verification_log_channel else {
+        tracing::warn!("self-verify needs a verification-log post but no channel is set; skipping");
+        return;
+    };
     if let Err(e) = serenity::all::ChannelId::new(channel.0)
         .send_message(&ctx.http, serenity::all::CreateMessage::new().embed(embed))
         .await
@@ -302,6 +368,50 @@ mod name_check_tests {
         assert_eq!(
             name_check(Some("Rosy Rascal"), "Rosy", "   "),
             NameCheck::Mismatch
+        );
+    }
+
+    #[test]
+    fn a_first_name_only_record_is_not_flagged_on_the_surname() {
+        // `full_name` built from a first name alone ("Rosy"): the member's real surname
+        // initial must not produce a spurious mismatch.
+        assert_eq!(name_check(Some("Rosy"), "Rosy", "S"), NameCheck::Match);
+    }
+
+    #[test]
+    fn a_last_name_only_record_matches_on_the_initial() {
+        // `full_name` built from a last name alone ("Rascal"): the lone token is the
+        // surname, so the last initial lines up even though the first name does not.
+        assert_eq!(name_check(Some("Rascal"), "Rosy", "R"), NameCheck::Match);
+    }
+
+    #[test]
+    fn a_single_token_record_matching_neither_part_is_a_mismatch() {
+        assert_eq!(
+            name_check(Some("Rascal"), "Shadow", "H"),
+            NameCheck::Mismatch
+        );
+    }
+
+    #[test]
+    fn accented_names_are_not_spuriously_flagged() {
+        // `eq_ignore_ascii_case` folds only ASCII, so it would wrongly mismatch an
+        // accented surname initial ('\u{c9}' vs '\u{e9}') and an accented given name.
+        assert_eq!(
+            name_check(Some("Amy \u{c9}lodie"), "amy", "\u{e9}"),
+            NameCheck::Match
+        );
+        assert_eq!(
+            name_check(Some("\u{c9}lodie Rascal"), "\u{e9}lodie", "R"),
+            NameCheck::Match
+        );
+    }
+
+    #[test]
+    fn a_multi_word_given_name_matches_on_its_first_token() {
+        assert_eq!(
+            name_check(Some("Amy Rose Hedgehog"), "Amy Rose", "H"),
+            NameCheck::Match
         );
     }
 }
