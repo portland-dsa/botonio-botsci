@@ -175,6 +175,7 @@ async fn run_once(
         demoted,
         misses = scan_plan.misses,
         conflicts = scan_plan.conflicts,
+        malformed = scan_plan.malformed,
         failed,
         "scheduled scan complete"
     );

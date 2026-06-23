@@ -44,3 +44,10 @@ harness = false
 [[test]]
 name = "strip"
 harness = false
+
+# Behaviour suite for the scheduled-scan plan + mass-demote tripwire (`engine::scan::plan`).
+# Offline, Cucumber, mocks only. Cast: the scan reconciles a roster of Sonic-cast members;
+# Rouge is linked but her record has no standing (malformed - left untouched).
+[[test]]
+name = "scan"
+harness = false
