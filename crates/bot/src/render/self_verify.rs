@@ -18,6 +18,20 @@ pub const EMAIL_FIELD_ID: &str = "selfverify_email";
 pub const FIRST_FIELD_ID: &str = "selfverify_first";
 pub const LAST_FIELD_ID: &str = "selfverify_last";
 
+/// The label of the embed field that carries the submitted email on a review request,
+/// read back when a moderator presses "Re-verify now".
+pub const EMAIL_FIELD_LABEL: &str = "Email";
+/// The label of the embed field that carries the submitted name on a review request.
+pub const SUBMITTED_NAME_FIELD_LABEL: &str = "Submitted name";
+
+/// The review-request button custom-id kinds. Each carries the target member id as a
+/// `kind:id` suffix so the handler works across restarts with no stored state; the
+/// override button's modal additionally carries the review message id (`kind:id:msg`).
+pub const REVIEW_REVERIFY_ID: &str = "selfverify_review_reverify";
+pub const REVIEW_OVERRIDE_ID: &str = "selfverify_review_override";
+pub const REVIEW_REJECT_ID: &str = "selfverify_review_reject";
+pub const REVIEW_MODAL_ID: &str = "selfverify_review_modal";
+
 /// The message posted into the unverified channel: a short explainer embed and the
 /// button that opens the verification form.
 pub fn verify_prompt(accent: u32) -> CreateMessage {
@@ -108,24 +122,93 @@ pub fn log_embed(log: &VerifyLog<'_>, accent: u32) -> CreateEmbed {
     embed
 }
 
-/// The moderator-log embed for a self-verification that matched a record carrying no
-/// usable standing: the member is real, but no role could be granted, so a moderator may
-/// want to hand-approve them. Mirrors [`log_embed`] but names no role.
-pub fn malformed_log_embed(
+/// Why a self-verification could not be granted automatically - shown to moderators on
+/// the review request so they can decide how to act.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewReason {
+    /// No Solidarity Tech record carried the submitted email.
+    NotFound,
+    /// The email is already linked to a different account.
+    Conflict,
+    /// A record matched but carries no usable standing.
+    Malformed,
+}
+
+impl ReviewReason {
+    /// The moderator-facing explanation of why the auto-grant did not happen.
+    fn summary(self) -> &'static str {
+        match self {
+            ReviewReason::NotFound => {
+                "No membership record matched the email they entered. If you add them to \
+                 Solidarity Tech you can press Re-verify, or hand-approve with Manual override."
+            }
+            ReviewReason::Conflict => {
+                "That email is already linked to a different account - confirm this is really \
+                 them before approving."
+            }
+            ReviewReason::Malformed => {
+                "A record matched but carries no usable standing. Fix it in Solidarity Tech \
+                 and press Re-verify, or hand-approve with Manual override."
+            }
+        }
+    }
+}
+
+/// The moderator-approval request posted when a self-verification could not be granted
+/// automatically: who tried, the name and email they submitted, why it could not be
+/// granted, and the buttons to re-check, hand-approve, or dismiss. The email rides in a
+/// labelled field so the Re-verify handler can read it back with no stored state.
+pub fn review_request(
     member: UserId,
     handle: &str,
     submitted_name: &str,
     email: &str,
+    reason: ReviewReason,
+    accent: u32,
+) -> CreateMessage {
+    let embed = CreateEmbed::new()
+        .title("Self-service verification needs a moderator")
+        .description(format!(
+            "<@{}> ({handle}) tried to verify themselves but could not be matched automatically.",
+            member.get(),
+        ))
+        .field(SUBMITTED_NAME_FIELD_LABEL, submitted_name, true)
+        .field(EMAIL_FIELD_LABEL, email, true)
+        .field("Why", reason.summary(), false)
+        .color(accent);
+    CreateMessage::new()
+        .embed(embed)
+        .components(vec![CreateActionRow::Buttons(vec![
+            CreateButton::new(format!("{REVIEW_REVERIFY_ID}:{}", member.get()))
+                .label("Re-verify now")
+                .style(ButtonStyle::Primary),
+            CreateButton::new(format!("{REVIEW_OVERRIDE_ID}:{}", member.get()))
+                .label("Manual override")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(format!("{REVIEW_REJECT_ID}:{}", member.get()))
+                .label("Reject")
+                .style(ButtonStyle::Danger),
+        ])])
+}
+
+/// The verification-log entry for a grant a moderator made by acting on a review request
+/// (a re-verify or a manual override). Mirrors [`log_embed`] for the self-service path but
+/// records who approved it and how, and carries no name double-check.
+pub fn manual_log_embed(
+    member: UserId,
+    handle: &str,
+    approver: UserId,
+    how: &str,
+    role: Role,
     accent: u32,
 ) -> CreateEmbed {
     CreateEmbed::new()
-        .title("Self-service verification needs review")
+        .title("Self-service verification - approved by a moderator")
         .description(format!(
-            "<@{}> ({handle}) matched a membership record with no usable standing, so no \
-             role was granted. Consider verifying them by hand.",
+            "<@{}> ({handle}) was verified by <@{}> ({how}).",
             member.get(),
+            approver.get(),
         ))
-        .field("Submitted name", submitted_name, true)
-        .field("Email", email, false)
+        .field("Granted role", role.as_str(), true)
         .color(accent)
 }

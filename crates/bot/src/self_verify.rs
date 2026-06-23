@@ -5,18 +5,22 @@
 use std::time::Instant;
 
 use serenity::all::{
-    ComponentInteraction, Context, CreateInteractionResponse, CreateInteractionResponseMessage,
-    EditInteractionResponse, GuildId, Interaction, ModalInteraction,
+    ChannelId, ComponentInteraction, Context, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, EditInteractionResponse,
+    EditMessage, GuildId, Interaction, Member, Message, MessageId, ModalInteraction, RoleId,
+    UserId,
 };
 
+use domain::Role;
 use engine::backends::util::{DiscordHandle, DiscordUserId, Email};
 use engine::verify::{DataStore, EmailGrant, Member as VerifyMember, Target};
 
 use crate::data::{Data, Error};
-use crate::render::modal::parse_email;
+use crate::render::modal::{REASON_FIELD_ID, override_modal, parse_email, parse_reason};
 use crate::render::self_verify::{
-    EMAIL_FIELD_ID, FIRST_FIELD_ID, LAST_FIELD_ID, PROMPT_BUTTON_ID, SUBMIT_MODAL_ID, VerifyLog,
-    log_embed, malformed_log_embed, self_verify_modal,
+    EMAIL_FIELD_ID, EMAIL_FIELD_LABEL, FIRST_FIELD_ID, LAST_FIELD_ID, PROMPT_BUTTON_ID,
+    REVIEW_MODAL_ID, REVIEW_OVERRIDE_ID, REVIEW_REJECT_ID, REVIEW_REVERIFY_ID, ReviewReason,
+    SUBMIT_MODAL_ID, VerifyLog, log_embed, manual_log_embed, review_request, self_verify_modal,
 };
 
 /// Whether the name a member typed lines up with their Solidarity Tech record.
@@ -88,10 +92,11 @@ fn first_token(s: &str) -> &str {
     s.split_whitespace().next().unwrap_or("")
 }
 
-/// Shown for every outcome that is not a clean grant - a miss, a conflict, a
-/// malformed email, an unusable record. Deliberately gives no detail (no membership
-/// enumeration); a real member can simply retry.
-const UNIFORM_FAILURE: &str = "We couldn't find you. You can try to verify again at any time.";
+/// Shown for every outcome that is not a clean grant - a miss, a conflict, a malformed
+/// email, an unusable record - all identical so a probe cannot tell members from
+/// non-members (no enumeration). The matching cases post a moderator review request out
+/// of band, which is what "a moderator will review" refers to.
+const UNIFORM_FAILURE: &str = "We couldn't verify you automatically. A moderator will review your request and follow up shortly.";
 /// The only distinct failure: verification could not run (backend down / unconfigured).
 const BACKEND_ERROR: &str = "Something went wrong on my end - please try again in a moment.";
 const RATE_LIMITED: &str = "You're going a little fast - please wait a moment and try again.";
@@ -106,20 +111,52 @@ pub async fn on_interaction(
     data: &Data,
 ) -> Result<(), Error> {
     match interaction {
-        Interaction::Component(c) if c.data.custom_id == PROMPT_BUTTON_ID => {
-            if !in_home_guild(c.guild_id, data) {
-                return Ok(());
-            }
-            open_modal(ctx, c).await
-        }
-        Interaction::Modal(m) if m.data.custom_id == SUBMIT_MODAL_ID => {
-            if !in_home_guild(m.guild_id, data) {
-                return Ok(());
-            }
-            on_submit(ctx, m, data).await
-        }
+        Interaction::Component(c) => on_component(ctx, c, data).await,
+        Interaction::Modal(m) => on_modal(ctx, m, data).await,
         _ => Ok(()),
     }
+}
+
+/// Route a button press: the standing prompt opens the form; the review buttons (which
+/// carry the target member id as a `kind:id` suffix) drive the moderator approval flow.
+async fn on_component(ctx: &Context, c: &ComponentInteraction, data: &Data) -> Result<(), Error> {
+    if !in_home_guild(c.guild_id, data) {
+        return Ok(());
+    }
+    let id = c.data.custom_id.as_str();
+    if id == PROMPT_BUTTON_ID {
+        return open_modal(ctx, c).await;
+    }
+    let Some((kind, arg)) = id.split_once(':') else {
+        return Ok(());
+    };
+    if kind == REVIEW_REVERIFY_ID {
+        review_reverify(ctx, c, data, arg).await
+    } else if kind == REVIEW_OVERRIDE_ID {
+        review_open_override(ctx, c, data, arg).await
+    } else if kind == REVIEW_REJECT_ID {
+        review_reject(ctx, c, data).await
+    } else {
+        Ok(())
+    }
+}
+
+/// Route a modal submission: the self-verify form, or the manual-override reason modal
+/// opened from a review request (its custom id carries `{member_id}:{message_id}`).
+async fn on_modal(ctx: &Context, m: &ModalInteraction, data: &Data) -> Result<(), Error> {
+    if !in_home_guild(m.guild_id, data) {
+        return Ok(());
+    }
+    let id = m.data.custom_id.as_str();
+    if id == SUBMIT_MODAL_ID {
+        return on_submit(ctx, m, data).await;
+    }
+    if let Some((kind, rest)) = id.split_once(':')
+        && kind == REVIEW_MODAL_ID
+    {
+        return review_override_submit(ctx, m, data, rest).await;
+    }
+    Ok(())
 }
 
 /// Whether an interaction came from the one guild this bot serves. Defence in depth
@@ -246,16 +283,44 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
             post_log(ctx, data, &log).await;
             reply(SUCCESS).await;
         }
+        // Could not auto-grant. The member sees the same no-detail message in every case
+        // (anti-enumeration), while a moderator review request goes out of band so a human
+        // can re-check, hand-approve, or dismiss. The reason rides only in the (private)
+        // mod post.
         Ok(EmailGrant::Malformed) => {
-            // A genuine member matched, but the record carries no usable standing, so no
-            // role was granted. The member is told nothing distinct (no enumeration), but
-            // the moderators are flagged so they can hand-approve.
-            post_malformed_log(ctx, data, submit, &submitted_name, &email).await;
+            post_review_request(
+                ctx,
+                data,
+                submit,
+                &submitted_name,
+                &email,
+                ReviewReason::Malformed,
+            )
+            .await;
             reply(UNIFORM_FAILURE).await;
         }
-        Ok(EmailGrant::Conflict) | Ok(EmailGrant::NotFound) => {
-            // A conflict or a plain miss: no detail to the member; the engine already
-            // audited the attempt, and there is nothing for a moderator to act on.
+        Ok(EmailGrant::Conflict) => {
+            post_review_request(
+                ctx,
+                data,
+                submit,
+                &submitted_name,
+                &email,
+                ReviewReason::Conflict,
+            )
+            .await;
+            reply(UNIFORM_FAILURE).await;
+        }
+        Ok(EmailGrant::NotFound) => {
+            post_review_request(
+                ctx,
+                data,
+                submit,
+                &submitted_name,
+                &email,
+                ReviewReason::NotFound,
+            )
+            .await;
             reply(UNIFORM_FAILURE).await;
         }
         Err(e) => {
@@ -273,24 +338,37 @@ async fn post_log(ctx: &Context, data: &Data, log: &VerifyLog<'_>) {
     send_to_log(ctx, data, embed).await;
 }
 
-/// Flag a matched-but-malformed self-verification to the moderators: the member is real
-/// (their email matched), but the record carries no usable standing, so no role was
-/// granted and a moderator may want to hand-approve them.
-async fn post_malformed_log(
+/// Post a moderator-approval request for a self-verification that could not be granted
+/// automatically. No mod-approval channel set -> warn and skip. The member-facing reply
+/// is uniform regardless of `reason`; only this (private) post names it.
+async fn post_review_request(
     ctx: &Context,
     data: &Data,
     submit: &ModalInteraction,
     submitted_name: &str,
     email: &Email,
+    reason: ReviewReason,
 ) {
-    let embed = malformed_log_embed(
+    let Some(channel) = data.guild_config.load().mod_approval_channel else {
+        tracing::warn!(
+            "self-verify needs a moderator review but no mod-approval channel is set; skipping"
+        );
+        return;
+    };
+    let message = review_request(
         submit.user.id,
         &submit.user.name,
         submitted_name,
         &email.0,
+        reason,
         data.config.accent_color,
     );
-    send_to_log(ctx, data, embed).await;
+    if let Err(e) = ChannelId::new(channel.0)
+        .send_message(&ctx.http, message)
+        .await
+    {
+        tracing::warn!(error = %e, "self-verify: failed to post the moderator review request");
+    }
 }
 
 /// Send a verification-log embed to the configured channel. No channel set -> warn and
@@ -306,6 +384,339 @@ async fn send_to_log(ctx: &Context, data: &Data, embed: serenity::all::CreateEmb
     {
         tracing::warn!(error = %e, "self-verify: failed to post the verification log");
     }
+}
+
+// --- Moderator review of a failed self-verification -------------------------------------
+
+/// Re-run verification for a pending request (a moderator may have just added the member
+/// to Solidarity Tech). On a clean grant, resolve the post; otherwise leave it open and
+/// tell the moderator privately. The moderator is the audit actor for this re-check.
+async fn review_reverify(
+    ctx: &Context,
+    c: &ComponentInteraction,
+    data: &Data,
+    arg: &str,
+) -> Result<(), Error> {
+    if !clicker_is_moderator(c.member.as_ref(), data) {
+        return deny_non_moderator(ctx, c).await;
+    }
+    let Some(target) = parse_target(arg) else {
+        return Ok(());
+    };
+    let Some(email) = field_from_post(&c.message, EMAIL_FIELD_LABEL).and_then(parse_email) else {
+        return deny(
+            ctx,
+            c,
+            "Couldn't read the email off this request - approve by hand instead.",
+        )
+        .await;
+    };
+    // Acknowledge as a deferred message update: the Solidarity Tech read can exceed the
+    // 3-second deadline. A clean grant edits the post; anything else leaves it open.
+    c.create_response(ctx, CreateInteractionResponse::Acknowledge)
+        .await?;
+
+    let Some(discord) = data.role_writer() else {
+        followup(ctx, c, BACKEND_ERROR).await;
+        return Ok(());
+    };
+    let Some(handle) = fetch_handle(ctx, target).await else {
+        followup(ctx, c, "Couldn't load that member - try again.").await;
+        return Ok(());
+    };
+    let store = DataStore::new(
+        &*data.solidarity_tech,
+        &discord,
+        &*data.store,
+        &*data.auditor,
+    );
+    let invoker = DiscordUserId(c.user.id.get());
+    let outcome = VerifyMember::new(
+        &store,
+        Target {
+            id: target,
+            handle: handle.clone(),
+        },
+    )
+    .verify_by_email_with_record(invoker, email)
+    .await;
+    match outcome {
+        Ok(EmailGrant::Verified { role, .. }) => {
+            // Keep the request post (signal approval, drop the buttons) and log the grant
+            // to the verification channel, like an automatic self-verify.
+            resolve_post(
+                ctx,
+                data,
+                c.message.id.get(),
+                c.user.id,
+                "Approved by re-verify",
+            )
+            .await;
+            post_manual_log(ctx, data, target, &handle.0, c.user.id, "re-verify", role).await;
+            followup(ctx, c, &format!("Verified - granted {}.", role.as_str())).await;
+        }
+        Ok(_) => {
+            followup(
+                ctx,
+                c,
+                "Still no match for that email - the record may not be in Solidarity Tech yet, \
+                 or it needs a manual override.",
+            )
+            .await;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "self-verify review: re-verify failed");
+            followup(ctx, c, BACKEND_ERROR).await;
+        }
+    }
+    Ok(())
+}
+
+/// Open the manual-override reason modal in response to the "Manual override" button. The
+/// modal custom id carries the target member id and the review message id so the submit
+/// handler can grant and then resolve the same post.
+async fn review_open_override(
+    ctx: &Context,
+    c: &ComponentInteraction,
+    data: &Data,
+    arg: &str,
+) -> Result<(), Error> {
+    if !clicker_is_moderator(c.member.as_ref(), data) {
+        return deny_non_moderator(ctx, c).await;
+    }
+    let Some(target) = parse_target(arg) else {
+        return Ok(());
+    };
+    // Hand-approval grants the Manual Override marker, so refuse before collecting a reason
+    // when that role is unset (mirrors the /verify override gate).
+    if data.guild_config.load().manual_override_role.is_none() {
+        return deny(
+            ctx,
+            c,
+            "No Manual Override role is configured - set one in /setup first.",
+        )
+        .await;
+    }
+    let display = fetch_handle(ctx, target)
+        .await
+        .map_or_else(|| "the member".to_owned(), |h| h.0);
+    let modal_id = format!("{REVIEW_MODAL_ID}:{}:{}", target.0, c.message.id.get());
+    c.create_response(
+        ctx,
+        CreateInteractionResponse::Modal(override_modal(&modal_id, &display)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Dismiss a review request: keep the post, drop its buttons, and add a "Rejected by"
+/// banner so it cannot be actioned again.
+async fn review_reject(ctx: &Context, c: &ComponentInteraction, data: &Data) -> Result<(), Error> {
+    if !clicker_is_moderator(c.member.as_ref(), data) {
+        return deny_non_moderator(ctx, c).await;
+    }
+    // Acknowledge without changing the message, then resolve it in place.
+    c.create_response(ctx, CreateInteractionResponse::Acknowledge)
+        .await?;
+    resolve_post(ctx, data, c.message.id.get(), c.user.id, "Rejected").await;
+    Ok(())
+}
+
+/// Grant a manual override from the review reason modal, then resolve the request post.
+async fn review_override_submit(
+    ctx: &Context,
+    m: &ModalInteraction,
+    data: &Data,
+    rest: &str,
+) -> Result<(), Error> {
+    // Defer ephemerally: the grant below can exceed the 3-second deadline.
+    m.create_response(
+        ctx,
+        CreateInteractionResponse::Defer(CreateInteractionResponseMessage::new().ephemeral(true)),
+    )
+    .await?;
+    let reply = |text: &str| {
+        let text = text.to_owned();
+        async move {
+            let _ = m
+                .edit_response(ctx, EditInteractionResponse::new().content(text))
+                .await;
+        }
+    };
+    if !clicker_is_moderator(m.member.as_ref(), data) {
+        reply("Only moderators can act on a verification request.").await;
+        return Ok(());
+    }
+    // `rest` is "{member_id}:{message_id}".
+    let (Some(target), Some(message_id)) = rest.split_once(':').map_or((None, None), |(t, msg)| {
+        (parse_target(t), msg.parse::<u64>().ok())
+    }) else {
+        return Ok(());
+    };
+    let Some(discord) = data.role_writer() else {
+        reply(BACKEND_ERROR).await;
+        return Ok(());
+    };
+    let Some(handle) = fetch_handle(ctx, target).await else {
+        reply("Couldn't load that member - try again.").await;
+        return Ok(());
+    };
+    let reason = parse_reason(&field_value(m, REASON_FIELD_ID));
+    let store = DataStore::new(
+        &*data.solidarity_tech,
+        &discord,
+        &*data.store,
+        &*data.auditor,
+    );
+    let invoker = DiscordUserId(m.user.id.get());
+    match VerifyMember::new(
+        &store,
+        Target {
+            id: target,
+            handle: handle.clone(),
+        },
+    )
+    .override_approve(invoker, reason)
+    .await
+    {
+        Ok(()) => {
+            // Keep the request post (signal approval, drop the buttons) and log the manual
+            // verification to the verification channel.
+            resolve_post(
+                ctx,
+                data,
+                message_id,
+                m.user.id,
+                "Approved by manual override",
+            )
+            .await;
+            post_manual_log(
+                ctx,
+                data,
+                target,
+                &handle.0,
+                m.user.id,
+                "manual override",
+                Role::Member,
+            )
+            .await;
+            reply("Approved - they now hold the Member role and the Manual Override marker.").await;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "self-verify review: manual override failed");
+            reply(BACKEND_ERROR).await;
+        }
+    }
+    Ok(())
+}
+
+/// Whether the member who pressed a review button holds the configured moderator role.
+/// The review buttons live in the (mod-only) approval channel, but this is the real gate.
+fn clicker_is_moderator(member: Option<&Member>, data: &Data) -> bool {
+    let Some(role) = data.guild_config.load().moderator_role else {
+        return false;
+    };
+    let role_id = RoleId::new(role.0);
+    member.is_some_and(|m| m.roles.contains(&role_id))
+}
+
+/// Parse the `kind:id` suffix of a review custom id into the target member id.
+fn parse_target(arg: &str) -> Option<DiscordUserId> {
+    arg.parse::<u64>().ok().map(DiscordUserId)
+}
+
+/// Read a labelled field's value back off a posted review embed (e.g. the submitted email).
+fn field_from_post<'a>(message: &'a Message, label: &str) -> Option<&'a str> {
+    message
+        .embeds
+        .iter()
+        .flat_map(|e| &e.fields)
+        .find(|f| f.name == label)
+        .map(|f| f.value.as_str())
+}
+
+/// The target member's current handle, fetched live (the clicker is a moderator, not the
+/// subject). `None` when the user cannot be loaded.
+async fn fetch_handle(ctx: &Context, id: DiscordUserId) -> Option<DiscordHandle> {
+    match ctx.http.get_user(UserId::new(id.0)).await {
+        Ok(user) => Some(DiscordHandle(user.name)),
+        Err(e) => {
+            tracing::warn!(error = %e, "self-verify review: could not load the target member");
+            None
+        }
+    }
+}
+
+/// Reply ephemerally to the moderator who pressed a review button (a refusal or error),
+/// leaving the request post untouched.
+async fn deny(ctx: &Context, c: &ComponentInteraction, text: &str) -> Result<(), Error> {
+    c.create_response(
+        ctx,
+        CreateInteractionResponse::Message(
+            CreateInteractionResponseMessage::new()
+                .ephemeral(true)
+                .content(text),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn deny_non_moderator(ctx: &Context, c: &ComponentInteraction) -> Result<(), Error> {
+    deny(ctx, c, "Only moderators can act on a verification request.").await
+}
+
+/// Send an ephemeral follow-up to the moderator after a deferred review action.
+async fn followup(ctx: &Context, c: &ComponentInteraction, text: &str) {
+    let _ = c
+        .create_followup(
+            ctx,
+            CreateInteractionResponseFollowup::new()
+                .ephemeral(true)
+                .content(text),
+        )
+        .await;
+}
+
+/// Resolve a review request in place: keep the original request embed, drop the buttons,
+/// and add a one-line status banner so it cannot be actioned twice. The post lives in the
+/// configured mod-approval channel. `content` + cleared `components` is a partial edit, so
+/// the embed is left intact.
+async fn resolve_post(ctx: &Context, data: &Data, message_id: u64, resolver: UserId, status: &str) {
+    let Some(channel) = data.guild_config.load().mod_approval_channel else {
+        return;
+    };
+    let edit = EditMessage::new()
+        .content(format!("{status} by <@{}>.", resolver.get()))
+        .components(vec![]);
+    if let Err(e) = ChannelId::new(channel.0)
+        .edit_message(&ctx.http, MessageId::new(message_id), edit)
+        .await
+    {
+        tracing::warn!(error = %e, "self-verify review: failed to resolve the request post");
+    }
+}
+
+/// Log a moderator-driven grant (re-verify or manual override) to the verification channel,
+/// the same place automatic self-verifications are recorded.
+async fn post_manual_log(
+    ctx: &Context,
+    data: &Data,
+    member: DiscordUserId,
+    handle: &str,
+    approver: UserId,
+    how: &str,
+    role: Role,
+) {
+    let embed = manual_log_embed(
+        UserId::new(member.0),
+        handle,
+        approver,
+        how,
+        role,
+        data.config.accent_color,
+    );
+    send_to_log(ctx, data, embed).await;
 }
 
 #[cfg(test)]
