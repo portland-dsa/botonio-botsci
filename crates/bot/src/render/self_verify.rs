@@ -2,10 +2,6 @@
 //! unverified channel, the email modal it opens, and the moderator-log embed for a
 //! successful grant. No gateway - serialized in unit tests to lock their shape.
 
-// allow(dead_code): these builders have no in-binary caller of their own - the
-// self-service interaction handler that uses them is wired in the bot's gateway layer.
-#![allow(dead_code)]
-
 use serenity::all::{
     ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateInputText, CreateMessage,
     CreateModal, InputTextStyle, UserId,
@@ -24,6 +20,8 @@ pub const LAST_FIELD_ID: &str = "selfverify_last";
 
 /// The message posted into the unverified channel: a short explainer embed and the
 /// button that opens the verification form.
+// allow(dead_code): posted by the /setup panel's prompt action.
+#[allow(dead_code)]
 pub fn verify_prompt(accent: u32) -> CreateMessage {
     let embed = CreateEmbed::new()
         .title("Verify your membership")

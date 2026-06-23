@@ -112,6 +112,9 @@ async fn main() -> anyhow::Result<()> {
         cfg.audit_key_id.clone(),
     ));
     let rate_limiter = Arc::new(crate::lookup::RateLimiter::new(cfg.lookup_rate_per_min));
+    let self_verify_limiter = Arc::new(crate::lookup::RateLimiter::new(
+        cfg.self_verify_rate_per_min,
+    ));
     // The /refresh-cache throttle: a single process-wide window, shared by all moderators.
     // Built here and moved into Data; nothing else needs it.
     let refresh_cooldown = Arc::new(refresh::Cooldown::new(refresh::REFRESH_COOLDOWN));
@@ -162,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
     let watchdog_store = store.clone();
     let setup_auditor = auditor.clone();
     let setup_rate_limiter = rate_limiter.clone();
+    let setup_self_verify_limiter = self_verify_limiter.clone();
     let setup_solidarity_tech = solidarity_tech.clone();
     let setup_guild_config = guild_config.clone();
     let scan_store = store.clone();
@@ -221,6 +225,9 @@ async fn main() -> anyhow::Result<()> {
                         serenity::all::FullEvent::GuildMemberAddition { new_member } => {
                             crate::join::on_guild_member_add(ctx, new_member, data).await?;
                         }
+                        serenity::all::FullEvent::InteractionCreate { interaction } => {
+                            crate::self_verify::on_interaction(ctx, interaction, data).await?;
+                        }
                         _ => {}
                     }
                     Ok(())
@@ -231,6 +238,7 @@ async fn main() -> anyhow::Result<()> {
         .setup(move |ctx, ready, framework| {
             let auditor = setup_auditor;
             let rate_limiter = setup_rate_limiter;
+            let self_verify_limiter = setup_self_verify_limiter;
             let solidarity_tech = setup_solidarity_tech;
             let guild_config = setup_guild_config;
             Box::pin(async move {
@@ -258,6 +266,7 @@ async fn main() -> anyhow::Result<()> {
                     store,
                     auditor,
                     rate_limiter,
+                    self_verify_limiter,
                     refresh_cooldown,
                     guild_config,
                     http: ctx.http.clone(),
