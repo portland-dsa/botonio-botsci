@@ -570,12 +570,6 @@ async fn run_wizard(
                 // Interaction idle window closed - leave in_progress, resumable.
                 return Ok(());
             }
-            StepOutcome::Malformed => {
-                // The email lookup returned a malformed record - left for manual override.
-                data.store
-                    .mark_miss(guild_id, miss.discord_user_id, MissState::Skipped)
-                    .await?;
-            }
             StepOutcome::Conflict | StepOutcome::Errored => {
                 // Conflict is left for /verify; a backend error keeps the wizard moving.
                 data.store

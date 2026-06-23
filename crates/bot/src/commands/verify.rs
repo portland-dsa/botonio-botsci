@@ -47,9 +47,6 @@ pub(crate) enum StepOutcome {
     Expired,
     /// A backend error occurred.
     Errored,
-    /// The email lookup found a record but it carries no usable standing; nothing was
-    /// changed. The wizard caller marks this member Skipped.
-    Malformed,
 }
 
 /// Result of waiting on an open modal while its trigger button stays live. A modal
@@ -546,27 +543,32 @@ pub(crate) async fn verify_step(
             }
         };
 
-        // Retry stays open on a recoverable state; everything else is terminal. On a
-        // not-found, `buttons_for` also surfaces the override button as the last resort.
-        let keep_button = matches!(next, VerifyState::NotFound | VerifyState::InvalidEmail);
+        // What stays on the message decides whether this step is done. A recoverable miss
+        // or invalid email keeps the lookup button (and, once missed, the override button);
+        // a malformed record keeps an override-only row - no lookup, since the member is
+        // already located in Solidarity Tech - so the moderator can still hand-approve them.
+        // Every other state is terminal and clears the buttons.
+        let components = match next {
+            VerifyState::NotFound | VerifyState::InvalidEmail => {
+                vec![buttons_for(&next, extra_buttons)]
+            }
+            VerifyState::Malformed => vec![override_only_buttons(extra_buttons)],
+            _ => vec![],
+        };
+        let keep_live = !components.is_empty();
         submit
             .edit_response(
                 sctx,
                 EditInteractionResponse::new()
                     .embed(state_embed(&display, &handle, &avatar, &next))
-                    .components(if keep_button {
-                        vec![buttons_for(&next, extra_buttons)]
-                    } else {
-                        vec![]
-                    }),
+                    .components(components),
             )
             .await?;
 
-        if !keep_button {
+        if !keep_live {
             let outcome = match next {
                 VerifyState::Verified(role) => StepOutcome::Verified(role),
                 VerifyState::Conflict => StepOutcome::Conflict,
-                VerifyState::Malformed => StepOutcome::Malformed,
                 _ => StepOutcome::Errored,
             };
             return Ok((outcome, None));
