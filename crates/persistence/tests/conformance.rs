@@ -471,17 +471,27 @@ fn miss(id: u64, pos: i32) -> BulkQueueEntry {
     }
 }
 
+fn malformed(id: u64, pos: i32) -> BulkQueueEntry {
+    BulkQueueEntry {
+        kind: BulkQueueKind::Malformed,
+        ..miss(id, pos)
+    }
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn bulk_session_round_trips_and_resumes(pool: sqlx::PgPool) {
     let pg = PgStore::new(pool);
     let g = domain::DiscordGuildId(7);
-    pg.start_session(&session(7), &[miss(10, 0), miss(11, 1)])
+    // The first entry is a malformed-record kind, so the round-trip also proves the
+    // `kind` column persists 'malformed' and decodes back (and the CHECK accepts it).
+    pg.start_session(&session(7), &[malformed(10, 0), miss(11, 1)])
         .await
         .unwrap();
 
-    // Resume picks the lowest-position pending member.
+    // Resume picks the lowest-position pending member, kind intact.
     let next = pg.next_pending(g).await.unwrap().unwrap();
     assert_eq!(next.discord_user_id, DiscordUserId(10));
+    assert_eq!(next.kind, BulkQueueKind::Malformed);
 
     // Marking it verified advances the queue and the counts.
     pg.mark_miss(g, DiscordUserId(10), MissState::Verified)
