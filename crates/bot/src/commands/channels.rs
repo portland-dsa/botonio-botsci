@@ -151,6 +151,10 @@ fn ephemeral_text(content: &str) -> poise::CreateReply {
 /// Show which channels are out of sync with their category overwrites.
 #[poise::command(slash_command)]
 pub async fn check(ctx: Context<'_>) -> Result<(), Error> {
+    // Defer first: reading the guild's channels + roles can exceed Discord's 3-second
+    // initial-response deadline on a large guild, which would expire the interaction and
+    // fail the reply. Deferring buys the followup window.
+    ctx.defer_ephemeral().await?;
     let discord = channels_http(&ctx);
     let data = ctx.data();
     let channels = engine::channels::Channels::new(&discord, &*data.store);
@@ -193,6 +197,9 @@ fn format_desync_report(report: &DesyncReport) -> String {
 /// Snapshot the current channel overwrites so they can be restored later.
 #[poise::command(slash_command)]
 pub async fn save(ctx: Context<'_>) -> Result<(), Error> {
+    // Defer first: snapshotting reads the whole guild, which can exceed Discord's
+    // 3-second initial-response deadline on a large guild (see `check`).
+    ctx.defer_ephemeral().await?;
     let discord = channels_http(&ctx);
     let data = ctx.data();
     let channels = engine::channels::Channels::new(&discord, &*data.store);
@@ -581,6 +588,21 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
             .await?;
         return Ok(());
     }
+
+    // Show immediate progress: the apply re-reads the guild, takes an auto-snapshot, and
+    // writes each channel sequentially, which can run for several seconds on a large guild.
+    // Without this the moderator sees the unchanged preview after submitting and assumes
+    // nothing happened (and if the apply ever stalls, it stays visibly on this message).
+    submit
+        .edit_response(
+            sctx,
+            EditInteractionResponse::new()
+                .content(format!(
+                    "Applying the channel terraform to {expected_writes} channel(s) - this can take a moment...",
+                ))
+                .components(vec![]),
+        )
+        .await?;
 
     // Apply.
     let outcome: ApplyOutcome = match channels.apply(&cfg, typed, &NoProgress).await {
