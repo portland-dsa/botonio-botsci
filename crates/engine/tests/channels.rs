@@ -2,17 +2,16 @@
 //!
 //! Cast: Tails is the protagonist moderator running the channel terraform.
 //! The scenarios cover classification, the verification guard, validation,
-//! the write-count gate, drift-skip, and the check/save/restore verbs.
+//! the write-count gate, and the check/save/restore verbs.
 
 use cucumber::{World as _, given, then, when};
 
 use engine::backends::discord::{
-    ChannelKind, DiscordChannel, DiscordClient, FakeDiscord, OverwriteTarget, PermOverwrite,
-    Permissions,
+    ChannelKind, DiscordChannel, FakeDiscord, OverwriteTarget, PermOverwrite, Permissions,
 };
 use engine::channels::{
     ChannelAction, ChannelPlan, ChannelSnapshot, Channels, ChannelsError, DesyncReport,
-    PlannedChannel, SetupConfig, resolve_plan, verification_breaches,
+    PlannedChannel, SNAPSHOT_FORMAT_VERSION, SetupConfig, resolve_plan, verification_breaches,
 };
 use engine::seam::NoProgress;
 use engine::store::{InMemoryStore, Index};
@@ -31,7 +30,7 @@ const UNVERIFIED_ROLE: u64 = 12;
 const MODERATOR_ROLE: u64 = 40;
 const BOT_USER: u64 = 99;
 
-// Channel ids used in multi-channel drift scenario.
+// Channel ids used in scenarios.
 const GENERAL_ID: u64 = 100;
 const DUES_DESK_ID: u64 = 101;
 const WELCOME_ID: u64 = 102;
@@ -151,9 +150,6 @@ fn unverified_can_view(planned: &PlannedChannel) -> bool {
 struct TailsWorld {
     /// Channels seeded in FakeDiscord.
     channels: Vec<DiscordChannel>,
-    /// Original channel list before any drift mutation - used by the drift scenario
-    /// to build a plan from the pre-edit state, then apply against the post-edit state.
-    channels_pre_drift: Option<Vec<DiscordChannel>>,
     /// Whether @everyone base-view is on for this scenario.
     everyone_base_view: bool,
     /// Config built for the scenario.
@@ -187,7 +183,6 @@ impl TailsWorld {
     async fn new() -> Self {
         Self {
             channels: Vec::new(),
-            channels_pre_drift: None,
             everyone_base_view: true, // default: @everyone can view (most scenarios are public)
             cfg: None,
             plan: None,
@@ -342,6 +337,7 @@ async fn given_frozen_plan_breach(world: &mut TailsWorld) {
         channels: vec![wrong],
         counts: Default::default(),
         resolved_at: chrono::Utc::now(),
+        everyone_base_view: true,
     };
     world.plan = Some(plan);
     world.cfg = Some(cfg);
@@ -382,32 +378,6 @@ async fn given_plan_write_3(world: &mut TailsWorld) {
     world.everyone_base_view = true;
     let cfg = make_cfg([WELCOME_ID], [], []);
     world.cfg = Some(cfg);
-}
-
-#[given(r#"a plan that will write channels "general", "dues-desk", and "welcome""#)]
-async fn given_plan_three_channels(world: &mut TailsWorld) {
-    world.channels.push(public_chan(GENERAL_ID, "general"));
-    world.channels.push(public_chan(DUES_DESK_ID, "dues-desk"));
-    world.channels.push(public_chan(WELCOME_ID, "welcome"));
-    world.everyone_base_view = true;
-    let cfg = make_cfg([WELCOME_ID], [DUES_DESK_ID], []);
-    world.cfg = Some(cfg);
-}
-
-#[given(r#""general" has been edited since the plan was frozen"#)]
-async fn given_general_edited(world: &mut TailsWorld) {
-    // Save the channel list as it was BEFORE the edit (this is what the plan will be built from).
-    world.channels_pre_drift = Some(world.channels.clone());
-    // Now mutate "general" to simulate a manual Discord edit that happened after the preview.
-    for ch in &mut world.channels {
-        if ch.name == "general" {
-            ch.overwrites = vec![PermOverwrite {
-                target: OverwriteTarget::Role(DiscordRoleId(EVERYONE)),
-                allow: Permissions::VIEW_CHANNEL,
-                deny: Permissions::empty(),
-            }];
-        }
-    }
 }
 
 // check/save/restore given steps
@@ -500,9 +470,8 @@ async fn given_snapshot_for_general(world: &mut TailsWorld) {
     });
     world.everyone_base_view = true;
     // Build the snapshot directly (as if "save" was already called at a prior state).
-    // format_version=1 matches SNAPSHOT_FORMAT_VERSION in snapshot.rs.
     world.snapshot = Some(ChannelSnapshot {
-        format_version: 1,
+        format_version: SNAPSHOT_FORMAT_VERSION,
         guild_id: DiscordGuildId(GUILD),
         saved_at: chrono::Utc::now(),
         channels: vec![engine::channels::SavedChannel {
@@ -571,64 +540,6 @@ async fn when_tails_applies_wrong_count(world: &mut TailsWorld, expected: usize)
         Ok(_) => {}
         Err(e) => world.apply_err = Some(e),
     }
-}
-
-#[when("Tails executes the permission plan")]
-async fn when_tails_executes_plan(world: &mut TailsWorld) {
-    // Drift scenario: the plan was previewed before "general" was edited. We model
-    // this by resolving the plan from the pre-edit channel list, then applying
-    // against a fake seeded with the post-edit (mutated) channel list. The facade's
-    // apply() reads live channels, builds a fresh plan (with the mutated state as
-    // current_overwrites), then compares live to current_overwrites - they match, so
-    // the drift guard fires based on current_overwrites vs. the plan's snapshot.
-    //
-    // To make the drift guard actually fire, we drive the write loop manually:
-    // - Plan is resolved from pre-drift channels (current_overwrites = empty for general).
-    // - Live fake holds the post-drift channels (general's overwrites = mutated).
-    // - For each planned write, if live[id].overwrites != plan.current_overwrites => drifted.
-    let cfg = world.cfg.as_ref().expect("cfg not set").clone();
-
-    // Resolve plan from the pre-drift state (before the external edit).
-    let pre_drift_channels = world
-        .channels_pre_drift
-        .as_deref()
-        .unwrap_or(&world.channels);
-    let plan = resolve_plan(
-        pre_drift_channels,
-        &cfg,
-        world.everyone_base_view,
-        chrono::Utc::now(),
-    );
-    world.plan = Some(plan.clone());
-
-    // Build the fake from the post-drift state (general is mutated).
-    let fake = world.build_fake();
-
-    // Run the write loop manually, applying the drift guard.
-    // live_channels is the post-drift state the fake holds.
-    let live_read = engine::backends::discord::DiscordClient::read_channels(&fake)
-        .await
-        .expect("read_channels should succeed");
-    let live: std::collections::HashMap<DiscordChannelId, Vec<PermOverwrite>> = live_read
-        .channels
-        .iter()
-        .map(|c| (c.id, c.overwrites.clone()))
-        .collect();
-
-    for p in plan.writes() {
-        let live_ows = live.get(&p.id).cloned().unwrap_or_default();
-        // Drift: live state differs from what the plan recorded as current.
-        let drifted = live_ows != p.current_overwrites;
-        if !drifted {
-            // Would write - call set_channel_overwrites.
-            fake.set_channel_overwrites(p.id, &p.final_overwrites)
-                .await
-                .expect("set_channel_overwrites should succeed for non-drifted channel");
-        }
-        // Drifted channels are skipped (no write call).
-    }
-
-    world.fake = Some(fake);
 }
 
 #[when("Tails checks whether channels are synchronized")]
@@ -810,55 +721,6 @@ async fn then_fails_plan_changed(world: &mut TailsWorld) {
     );
 }
 
-#[then(regex = r#"^"([^"]+)" is skipped as drifted$"#)]
-async fn then_channel_skipped_drifted(world: &mut TailsWorld, name: String) {
-    // The plan must record "general" as a write candidate; if no overwrites were
-    // written for it, the drift guard fired.
-    let plan = world.plan.as_ref().expect("no plan");
-    let p = plan
-        .channels
-        .iter()
-        .find(|p| p.name == name)
-        .unwrap_or_else(|| panic!("no planned channel named {name}"));
-    // In the drift scenario, "general" is classified as MemberOnly (a write action)
-    // but the drift guard skips writing it.
-    assert!(
-        p.action.is_write_action(),
-        "{name} must be a write-action channel (so the drift guard is relevant), got {:?}",
-        p.action
-    );
-}
-
-#[then(regex = r#"^no overwrite is written to "([^"]+)"$"#)]
-async fn then_no_overwrite_for(world: &mut TailsWorld, name: String) {
-    let id = channel_id_for_name(&name);
-    let fake = world.fake.as_ref().expect("no fake (apply not run)");
-    let written_ids: Vec<DiscordChannelId> = fake
-        .written_overwrites()
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
-    assert!(
-        !written_ids.contains(&DiscordChannelId(id)),
-        "{name} (id={id}) must not appear in the write log, but got: {written_ids:?}"
-    );
-}
-
-#[then(regex = r#"^"([^"]+)" is written$"#)]
-async fn then_channel_is_written(world: &mut TailsWorld, name: String) {
-    let id = channel_id_for_name(&name);
-    let fake = world.fake.as_ref().expect("no fake (apply not run)");
-    let written_ids: Vec<DiscordChannelId> = fake
-        .written_overwrites()
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
-    assert!(
-        written_ids.contains(&DiscordChannelId(id)),
-        "{name} (id={id}) must appear in the write log, but got: {written_ids:?}"
-    );
-}
-
 // check/save/restore then steps
 
 #[then(regex = r#"^"([^"]+)" is reported as out of sync with its category$"#)]
@@ -949,23 +811,6 @@ fn category_id_for_name(name: &str) -> u64 {
     match name {
         "staff" => 200,
         other => panic!("unknown category name {other}"),
-    }
-}
-
-// Expose the `is_write_action` check used in then_channel_skipped_drifted.
-trait ChannelActionExt {
-    fn is_write_action(&self) -> bool;
-}
-
-impl ChannelActionExt for ChannelAction {
-    fn is_write_action(&self) -> bool {
-        matches!(
-            self,
-            ChannelAction::MemberOnly
-                | ChannelAction::UnverifiedOnly
-                | ChannelAction::ExpiredOnly
-                | ChannelAction::SyncedToParent
-        )
     }
 }
 

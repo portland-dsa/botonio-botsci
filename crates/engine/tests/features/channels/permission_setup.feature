@@ -82,13 +82,3 @@ Feature: Tails locks down channel permissions by role
     Given a plan that will write 3 channels
     When Tails applies the plan with an expected count of 4
     Then apply fails with a plan-changed error
-
-  @drift
-  Scenario: A channel changed since the plan is skipped, not clobbered
-    Given a plan that will write channels "general", "dues-desk", and "welcome"
-    And "general" has been edited since the plan was frozen
-    When Tails executes the permission plan
-    Then "general" is skipped as drifted
-    And no overwrite is written to "general"
-    And "dues-desk" is written
-    And "welcome" is written

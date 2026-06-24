@@ -629,8 +629,9 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
             sctx,
             EditInteractionResponse::new()
                 .content(format!(
-                    "Applied: wrote {}, skipped {} (changed since preview), failed {}.",
-                    outcome.written, outcome.skipped_drift, outcome.failed,
+                    "Applied: wrote {written}, failed {failed}.",
+                    written = outcome.written,
+                    failed = outcome.failed,
                 ))
                 .components(vec![]),
         )

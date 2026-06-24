@@ -53,7 +53,6 @@ impl From<DiscordError> for ChannelsError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ApplyOutcome {
     pub written: usize,
-    pub skipped_drift: usize,
     pub failed: usize,
 }
 
@@ -151,29 +150,12 @@ impl<'a, D: DiscordClient, S: ChannelSnapshotStore> Channels<'a, D, S> {
             });
         }
 
-        // Drift map from the same read the plan was built on. A channel edited on
-        // Discord between the preview and the apply would have different overwrites
-        // from what the plan recorded - skip it rather than clobber the intermediate
-        // change.
-        let live: HashMap<DiscordChannelId, &DiscordChannel> =
-            read.channels.iter().map(|c| (c.id, c)).collect();
-
         let writes: Vec<&_> = plan.writes().collect();
         let bar = progress.bar(writes.len() as u64, "applying channel permissions");
         let mut out = ApplyOutcome::default();
         let mut consecutive = 0usize;
         for p in writes {
             bar.inc(1);
-            // Drift guard: skip a channel whose live state diverged from the snapshot
-            // the plan was built on. `is_none_or` treats a channel absent from the
-            // live list as drifted (safe: the plan knew about it, but it's gone).
-            let drifted = live
-                .get(&p.id)
-                .is_none_or(|c| !overwrites_equal(&c.overwrites, &p.current_overwrites));
-            if drifted {
-                out.skipped_drift += 1;
-                continue;
-            }
             match self
                 .discord
                 .set_channel_overwrites(p.id, &p.final_overwrites)

@@ -20,4 +20,4 @@ pub use plan::{
     resolve_plan, verification_breaches,
 };
 pub use report::{detail_markdown, summary_lines, unverified_visibility};
-pub use snapshot::{ChannelSnapshot, SavedChannel, SnapshotMeta};
+pub use snapshot::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION, SavedChannel, SnapshotMeta};
