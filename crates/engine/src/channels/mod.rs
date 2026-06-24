@@ -8,5 +8,10 @@
 //! Nothing below this module touches the network.
 
 mod model;
+mod plan;
 
 pub use model::SetupConfig;
+pub use plan::{
+    ChannelAction, ChannelPlan, DesyncReport, PlanCounts, PlannedChannel, desync_report,
+    resolve_plan, verification_breaches,
+};
