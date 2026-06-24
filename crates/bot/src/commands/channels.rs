@@ -162,7 +162,25 @@ pub async fn check(ctx: Context<'_>) -> Result<(), Error> {
     match channels.check().await {
         Ok(report) => {
             let content = format_desync_report(&report);
-            ctx.send(ephemeral_text(&content)).await?;
+            // Discord caps message content at 2000 chars; a guild with many out-of-sync
+            // channels overflows it, so fall back to a short summary plus the full list as a
+            // file attachment (the same approach as /channels setup's plan).
+            if content.len() <= 1900 {
+                ctx.send(ephemeral_text(&content)).await?;
+            } else {
+                let summary = format!(
+                    "{} channel(s) out of sync with their category - full list attached.",
+                    report.out_of_sync.len()
+                );
+                let attachment = CreateAttachment::bytes(content.into_bytes(), "channel-desync.md");
+                ctx.send(
+                    poise::CreateReply::default()
+                        .content(summary)
+                        .attachment(attachment)
+                        .ephemeral(true),
+                )
+                .await?;
+            }
         }
         Err(e) => {
             tracing::warn!(error = %e, "channels check failed");
