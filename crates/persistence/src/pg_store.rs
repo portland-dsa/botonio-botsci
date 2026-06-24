@@ -26,7 +26,7 @@ use sqlx::postgres::PgPoolOptions;
 
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::channels::{ChannelSnapshot, SnapshotMeta};
+use engine::channels::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION, SnapshotMeta};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
     ChannelSnapshotStore, ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore,
@@ -795,6 +795,12 @@ impl ChannelSnapshotStore for PgStore {
         .fetch_optional(&self.pool)
         .await?;
         let Some(r) = row else { return Ok(None) };
+        if r.format_version > SNAPSHOT_FORMAT_VERSION as i32 {
+            return Err(PersistenceError::SnapshotVersion {
+                found: r.format_version,
+                known: SNAPSHOT_FORMAT_VERSION as i32,
+            });
+        }
         let channels = serde_json::from_value(r.channels)?;
         Ok(Some(ChannelSnapshot {
             format_version: r.format_version as u32,

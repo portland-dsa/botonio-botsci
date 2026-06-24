@@ -16,7 +16,7 @@ use chrono::NaiveDate;
 
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
-use engine::channels::ChannelSnapshot;
+use engine::channels::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
     ChannelSnapshotStore, IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore,
@@ -539,9 +539,8 @@ fn snapshot(
 ) -> ChannelSnapshot {
     use engine::backends::discord::ChannelKind;
     use engine::channels::SavedChannel;
-    // format_version 1 is the current stable layout; matches SNAPSHOT_FORMAT_VERSION.
     ChannelSnapshot {
-        format_version: 1,
+        format_version: SNAPSHOT_FORMAT_VERSION,
         guild_id: domain::DiscordGuildId(guild),
         saved_at,
         channels: (0..channel_count)
