@@ -530,13 +530,24 @@ async fn when_tails_runs_permission_setup(world: &mut TailsWorld) {
     }
 }
 
-#[when(regex = r"^Tails applies the plan with an expected count of (\d+)$")]
-async fn when_tails_applies_wrong_count(world: &mut TailsWorld, expected: usize) {
+#[when("Tails applies a preview that no longer matches the server")]
+async fn when_tails_applies_stale_preview(world: &mut TailsWorld) {
     let fake = world.build_fake();
     let store = TailsWorld::store();
     let channels = Channels::new(&fake, &store);
     let cfg = world.cfg.as_ref().expect("cfg not set");
-    match channels.apply(cfg, expected, &NoProgress).await {
+    // A preview resolved with one extra public channel beyond what the server has:
+    // its planned write-set no longer matches reality, so the drift guard must reject
+    // it even though the totals could coincide.
+    let mut preview_channels = world.channels.clone();
+    preview_channels.push(public_chan(4242, "ghost"));
+    let stale_preview = resolve_plan(
+        &preview_channels,
+        cfg,
+        world.everyone_base_view,
+        chrono::Utc::now(),
+    );
+    match channels.apply(cfg, &stale_preview, &NoProgress).await {
         Ok(_) => {}
         Err(e) => world.apply_err = Some(e),
     }

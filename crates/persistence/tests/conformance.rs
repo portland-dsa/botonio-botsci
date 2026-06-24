@@ -557,7 +557,7 @@ fn snapshot(
 
 #[sqlx::test(migrations = "./migrations")]
 async fn channel_snapshot_save_latest_and_list(pool: sqlx::PgPool) {
-    use chrono::TimeZone;
+    use chrono::Timelike;
 
     let pg = PgStore::new(pool);
     let guild = domain::DiscordGuildId(500);
@@ -567,8 +567,11 @@ async fn channel_snapshot_save_latest_and_list(pool: sqlx::PgPool) {
     assert!(pg.latest_snapshot(guild).await.unwrap().is_none());
     assert!(pg.list_snapshots(guild).await.unwrap().is_empty());
 
-    let t1 = chrono::Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
-    let t2 = chrono::Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+    // Recent timestamps (sub-second zeroed so they round-trip timestamptz exactly), kept
+    // well inside the 6-month retention window so the save-time prune never reaps them.
+    let now = chrono::Utc::now().with_nanosecond(0).unwrap();
+    let t1 = now - chrono::Duration::hours(2); // older
+    let t2 = now - chrono::Duration::hours(1); // newer
 
     let s1 = snapshot(guild.0, t1, 3); // 3 channels, older
     let s2 = snapshot(guild.0, t2, 5); // 5 channels, newer
@@ -605,4 +608,45 @@ async fn channel_snapshot_save_latest_and_list(pool: sqlx::PgPool) {
     let other_latest = pg.latest_snapshot(other).await.unwrap();
     assert_eq!(other_latest, Some(s_other));
     assert_eq!(pg.list_snapshots(other).await.unwrap().len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn channel_snapshot_history_is_bounded(pool: sqlx::PgPool) {
+    use chrono::Timelike;
+
+    let pg = PgStore::new(pool);
+    let now = chrono::Utc::now().with_nanosecond(0).unwrap();
+
+    // The keep-cap: save seven recent snapshots (oldest first, distinct minute-apart
+    // timestamps, channel_count == i + 1). Only the newest five may survive.
+    let guild = domain::DiscordGuildId(700);
+    for i in 0..7u64 {
+        let saved_at = now - chrono::Duration::minutes((7 - i) as i64);
+        pg.save_snapshot(&snapshot(guild.0, saved_at, i as usize + 1))
+            .await
+            .unwrap();
+    }
+    let metas = pg.list_snapshots(guild).await.unwrap();
+    assert_eq!(metas.len(), 5, "history must be capped at the five newest");
+    assert_eq!(
+        metas[0].channel_count, 7,
+        "the newest snapshot must survive the cap"
+    );
+    assert!(
+        metas.iter().all(|m| m.channel_count >= 3),
+        "the two oldest snapshots must be pruned by the cap, got: {:?}",
+        metas.iter().map(|m| m.channel_count).collect::<Vec<_>>()
+    );
+
+    // The TTL: a snapshot older than six months is reaped on save even when it is the
+    // guild's only one (so it would otherwise sit comfortably inside the five-newest cap).
+    let other = domain::DiscordGuildId(701);
+    let stale = now - chrono::Duration::days(220); // comfortably older than 6 months
+    pg.save_snapshot(&snapshot(other.0, stale, 9))
+        .await
+        .unwrap();
+    assert!(
+        pg.latest_snapshot(other).await.unwrap().is_none(),
+        "a snapshot past the 6-month TTL must be pruned on save"
+    );
 }

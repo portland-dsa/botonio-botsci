@@ -3,9 +3,9 @@ Feature: Tails locks down channel permissions by role
 
   Tails runs permission-setup to make each public channel visible only to the
   right role. The pass classifies every channel into exactly one action, refuses
-  outright if it would hide a verification channel from the Unverified role,
-  gates on the exact number of channel-writes, and skips any channel edited since
-  the plan was frozen rather than clobbering it.
+  outright if it would hide a verification channel from the Unverified role, and
+  aborts before writing if the server drifted into a different set of writes than
+  the confirmed preview.
 
   @classify
   Scenario: A public channel is swept to Member-only
@@ -78,7 +78,7 @@ Feature: Tails locks down channel permissions by role
     Then permission-setup fails because the channel sets overlap
 
   @gate
-  Scenario: The moderator must type the exact channel-write count
+  Scenario: Apply aborts when the server drifted from the confirmed preview
     Given a plan that will write 3 channels
-    When Tails applies the plan with an expected count of 4
+    When Tails applies a preview that no longer matches the server
     Then apply fails with a plan-changed error

@@ -3,9 +3,11 @@
 //! other permission untouched.
 //!
 //! [`model`] is the pure, IO-free heart - the overwrite math and the
-//! [`SetupConfig`] the classifier consumes. The facade, plan, snapshot, and
-//! report modules arrive in later tasks and will be wired here as they land.
-//! Nothing below this module touches the network.
+//! [`SetupConfig`] the classifier consumes. [`plan`] freezes the live channel list
+//! into a [`ChannelPlan`]; [`snapshot`] captures and restores overwrites; [`report`]
+//! renders a plan for the moderator; and [`facade`] is the [`Channels`] handle that
+//! drives the Discord reads/writes and the snapshot store. Nothing below this module
+//! touches the network.
 
 mod facade;
 mod model;

@@ -9,7 +9,7 @@ use chrono::Utc;
 
 use domain::DiscordChannelId;
 
-use crate::backends::discord::{DiscordChannel, DiscordClient, DiscordError};
+use crate::backends::discord::{DiscordChannel, DiscordClient, DiscordError, GuildChannels};
 use crate::seam::{Progress, ProgressBar};
 use crate::store::ChannelSnapshotStore;
 
@@ -101,10 +101,16 @@ impl<'a, D: DiscordClient, S: ChannelSnapshotStore> Channels<'a, D, S> {
         Ok(desync_report(&read.channels))
     }
 
-    /// Snapshot the current overwrites to the store - the `save` subcommand and the
-    /// first step of every `apply`.
+    /// Snapshot the current overwrites to the store - the `save` subcommand. Reads the
+    /// guild once, then delegates to [`snapshot_read`](Self::snapshot_read).
     pub async fn save(&self) -> Result<ChannelSnapshot, ChannelsError> {
         let read = self.discord.read_channels().await?;
+        self.snapshot_read(&read).await
+    }
+
+    /// Snapshot an already-read channel list to the store, so the `apply` path - which
+    /// has just read the guild to resolve its plan - does not read it a second time.
+    async fn snapshot_read(&self, read: &GuildChannels) -> Result<ChannelSnapshot, ChannelsError> {
         let snap = ChannelSnapshot::from_channels(read.guild_id, &read.channels, Utc::now());
         self.store
             .save_snapshot(&snap)
@@ -125,27 +131,33 @@ impl<'a, D: DiscordClient, S: ChannelSnapshotStore> Channels<'a, D, S> {
         Ok(plan)
     }
 
-    /// Snapshot, re-resolve, confirm the write count still matches, then apply each
-    /// planned write with the drift guard and circuit breaker. `expected_writes` is
-    /// the count the moderator confirmed against the preview.
+    /// Snapshot, re-resolve, confirm the planned write-set still matches the preview,
+    /// then apply each planned write with the circuit breaker. `expected` is the plan
+    /// the moderator confirmed against; its
+    /// [`write_signature`](ChannelPlan::write_signature) must still match the
+    /// freshly-resolved plan, so a server that drifted into a different set of writes
+    /// of the same count is rejected just like a different count.
     pub async fn apply(
         &self,
         cfg: &SetupConfig,
-        expected_writes: usize,
+        expected: &ChannelPlan,
         progress: &impl Progress,
     ) -> Result<ApplyOutcome, ChannelsError> {
         Self::validate(cfg)?;
-        self.save().await?; // auto-snapshot before any writes
 
+        // One guild read backs both the recovery snapshot and the plan, so the snapshot
+        // captures exactly the state the plan was resolved against.
         let read = self.discord.read_channels().await?;
+        self.snapshot_read(&read).await?; // auto-snapshot before any writes
+
         let plan = resolve_plan(&read.channels, cfg, read.everyone_base_view, Utc::now());
         let breaches = verification_breaches(&plan, cfg);
         if !breaches.is_empty() {
             return Err(ChannelsError::VerificationBreach(breaches));
         }
-        if plan.counts.writes != expected_writes {
+        if plan.write_signature() != expected.write_signature() {
             return Err(ChannelsError::PlanChanged {
-                expected: expected_writes,
+                expected: expected.counts.writes,
                 found: plan.counts.writes,
             });
         }
@@ -386,7 +398,7 @@ mod tests {
 
         // apply must succeed and written count must match.
         let outcome = channels
-            .apply(&cfg, expected, &NoProgress)
+            .apply(&cfg, &plan, &NoProgress)
             .await
             .expect("apply should succeed");
         assert_eq!(
@@ -419,7 +431,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_rejects_a_stale_count() {
+    async fn apply_rejects_a_drifted_plan() {
+        use super::super::plan::resolve_plan;
+
         let cfg = cfg_with_unverified(2);
         let fake = FakeDiscord::new()
             .with_channels(vec![text_channel(1), text_channel(2)])
@@ -427,11 +441,18 @@ mod tests {
         let store = InMemoryStore::new(crate::store::Index::default_for_test());
         let channels = Channels::new(&fake, &store);
 
-        let plan = channels.plan(&cfg).await.expect("plan should succeed");
-        let expected = plan.counts.writes;
+        // A preview resolved against one extra public channel the live server does not
+        // have: same restrict write for ch-2, but an extra MemberOnly write for ch-3.
+        // Its write-set no longer matches reality, so the drift guard must reject it -
+        // even though a count-only check could have been fooled by an equal total.
+        let stale_preview = resolve_plan(
+            &[text_channel(1), text_channel(2), text_channel(3)],
+            &cfg,
+            true,
+            Utc::now(),
+        );
 
-        // Pass a stale count (one more than actual).
-        let result = channels.apply(&cfg, expected + 1, &NoProgress).await;
+        let result = channels.apply(&cfg, &stale_preview, &NoProgress).await;
         assert!(
             matches!(result, Err(ChannelsError::PlanChanged { .. })),
             "expected PlanChanged, got: {result:?}"
@@ -443,11 +464,11 @@ mod tests {
             "no writes must occur when PlanChanged fires"
         );
 
-        // The auto-snapshot was taken before the stale-count guard, so recovery
-        // is still possible even when PlanChanged aborts the run.
+        // The auto-snapshot was taken before the drift guard, so recovery is still
+        // possible even when PlanChanged aborts the run.
         assert!(
             channels.latest_snapshot().await.is_ok(),
-            "apply must snapshot before the stale-count guard, so recovery stays possible even on PlanChanged"
+            "apply must snapshot before the drift guard, so recovery stays possible even on PlanChanged"
         );
     }
 
@@ -463,7 +484,7 @@ mod tests {
         // First apply.
         let plan = channels.plan(&cfg).await.expect("plan should succeed");
         channels
-            .apply(&cfg, plan.counts.writes, &NoProgress)
+            .apply(&cfg, &plan, &NoProgress)
             .await
             .expect("first apply should succeed");
 
@@ -477,9 +498,9 @@ mod tests {
             "second plan must report zero writes (already in desired state)"
         );
 
-        // A second apply with expected_writes=0 must write nothing.
+        // A second apply confirming the zero-write plan2 must write nothing.
         let outcome2 = channels
-            .apply(&cfg, 0, &NoProgress)
+            .apply(&cfg, &plan2, &NoProgress)
             .await
             .expect("second apply should succeed");
         assert_eq!(outcome2.written, 0, "second apply must write nothing");

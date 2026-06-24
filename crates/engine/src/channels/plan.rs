@@ -14,8 +14,8 @@ use domain::{DiscordChannelId, DiscordGuildId};
 use crate::backends::discord::{ChannelKind, DiscordChannel, PermOverwrite};
 
 use super::model::{
-    SetupConfig, everyone_can_view, lockdown_member, overwrites_equal, overwrites_synced, restrict,
-    role_can_view,
+    SetupConfig, everyone_can_view, lockdown_member, normalize, overwrites_equal,
+    overwrites_synced, restrict, role_can_view,
 };
 
 /// What the plan will do to one channel.
@@ -92,9 +92,28 @@ pub struct ChannelPlan {
     pub everyone_base_view: bool,
 }
 
+/// The identity of the writes a plan will perform: every writing channel as its id
+/// paired with its normalized desired overwrites, sorted by id. Two plans with the
+/// same signature write the same channels to the same final state, so an apply can
+/// confirm the freshly-resolved plan still matches the one the moderator previewed -
+/// pinning the exact set, not merely its count.
+pub type WriteSignature = Vec<(DiscordChannelId, Vec<PermOverwrite>)>;
+
 impl ChannelPlan {
     pub fn writes(&self) -> impl Iterator<Item = &PlannedChannel> {
         self.channels.iter().filter(|c| c.writes)
+    }
+
+    /// The [`WriteSignature`] of this plan - see that type's docs.
+    pub fn write_signature(&self) -> WriteSignature {
+        let mut sig: WriteSignature = self
+            .channels
+            .iter()
+            .filter(|c| c.writes)
+            .map(|c| (c.id, normalize(&c.final_overwrites)))
+            .collect();
+        sig.sort_by_key(|(id, _)| *id);
+        sig
     }
 }
 

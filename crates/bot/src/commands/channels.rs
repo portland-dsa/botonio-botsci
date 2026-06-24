@@ -622,8 +622,9 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
         )
         .await?;
 
-    // Apply.
-    let outcome: ApplyOutcome = match channels.apply(&cfg, typed, &NoProgress).await {
+    // Apply. The confirmed preview `plan` is passed back so apply can verify the
+    // freshly-resolved write-set still matches it, not merely its count.
+    let outcome: ApplyOutcome = match channels.apply(&cfg, &plan, &NoProgress).await {
         Ok(o) => o,
         Err(ChannelsError::PlanChanged { .. }) => {
             submit

@@ -754,26 +754,57 @@ impl BulkSessionStore for PgStore {
     }
 }
 
+/// Per-guild snapshot history is bounded on every save: keep at most this many of the
+/// newest snapshots, and (in the same prune) drop any older than the 6-month TTL spelled
+/// in [`save_snapshot`](PgStore::save_snapshot)'s DELETE. The undo stack is for recent
+/// mistakes, so a row several applies back - or older than the retention window - is no
+/// longer a useful restore target and is reaped rather than kept forever.
+const SNAPSHOT_KEEP_MAX: i64 = 5;
+
 #[async_trait]
 impl ChannelSnapshotStore for PgStore {
     type Error = PersistenceError;
 
-    /// Append a whole-guild channel-permission snapshot. Each call inserts a new row;
-    /// history is never overwritten, so successive saves form an undo stack. The
-    /// `channels` Vec is stored as JSONB so the restore path can deserialize it without
+    /// Append a whole-guild channel-permission snapshot, then prune the guild's history.
+    /// Each call inserts a new row (history is never overwritten, so successive saves form
+    /// an undo stack) and the same transaction reaps every row past the bound: older than
+    /// the 6-month TTL, or beyond the newest [`SNAPSHOT_KEEP_MAX`], whichever removes more.
+    /// The `channels` Vec is stored as JSONB so the restore path can deserialize it without
     /// a per-overwrite join.
     async fn save_snapshot(&self, snapshot: &ChannelSnapshot) -> Result<(), PersistenceError> {
         let channels = serde_json::to_value(&snapshot.channels)?;
+        let guild = snapshot.guild_id.0 as i64;
+
+        let mut tx = self.pool.begin().await?;
         sqlx::query!(
             "INSERT INTO channel_perms_snapshot (guild_id, saved_at, format_version, channels) \
              VALUES ($1, $2, $3, $4)",
-            snapshot.guild_id.0 as i64,
+            guild,
             snapshot.saved_at,
             snapshot.format_version as i32,
             channels,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        // Keep the undo stack bounded: drop rows older than the 6-month TTL, and any beyond
+        // the newest SNAPSHOT_KEEP_MAX for this guild. Same transaction as the insert, so
+        // the cap holds atomically and the table can never grow without limit.
+        sqlx::query!(
+            "DELETE FROM channel_perms_snapshot \
+             WHERE guild_id = $1 \
+               AND (saved_at < now() - interval '6 months' \
+                    OR id NOT IN ( \
+                        SELECT id FROM channel_perms_snapshot \
+                        WHERE guild_id = $1 \
+                        ORDER BY saved_at DESC, id DESC \
+                        LIMIT $2 \
+                    ))",
+            guild,
+            SNAPSHOT_KEEP_MAX,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
         Ok(())
     }
 
