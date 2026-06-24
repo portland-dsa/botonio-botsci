@@ -257,6 +257,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn planned(
         id: u64,
         name: &str,

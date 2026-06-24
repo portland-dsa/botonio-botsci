@@ -839,8 +839,7 @@ impl ChannelSnapshotStore for InMemoryStore {
             .read()
             .expect("snapshots lock poisoned")
             .iter()
-            .filter(|s| s.guild_id == guild)
-            .last()
+            .rfind(|s| s.guild_id == guild)
             .cloned())
     }
 

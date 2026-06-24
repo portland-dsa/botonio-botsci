@@ -7,11 +7,13 @@
 //! report modules arrive in later tasks and will be wired here as they land.
 //! Nothing below this module touches the network.
 
+mod facade;
 mod model;
 mod plan;
 mod report;
 pub(crate) mod snapshot;
 
+pub use facade::{ApplyOutcome, Channels, ChannelsError, RestoreOutcome};
 pub use model::SetupConfig;
 pub use plan::{
     ChannelAction, ChannelPlan, DesyncReport, PlanCounts, PlannedChannel, desync_report,
