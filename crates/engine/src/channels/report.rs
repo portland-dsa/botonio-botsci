@@ -55,8 +55,8 @@ pub fn summary_lines(plan: &ChannelPlan) -> Vec<(String, String)> {
 /// repeats it in its own section.
 ///
 /// Uses the same [`role_can_view`] function the plan uses for breach detection,
-/// with `base_view = true` (the conservative assumption that the guild's base
-/// permission is view-allowed, so the check cannot miss any residual access).
+/// with the guild's actual `everyone_base_view` from the plan so that a
+/// base-private channel is not incorrectly listed as visible.
 pub fn unverified_visibility(plan: &ChannelPlan, cfg: &SetupConfig) -> Vec<String> {
     plan.channels
         .iter()
@@ -64,7 +64,7 @@ pub fn unverified_visibility(plan: &ChannelPlan, cfg: &SetupConfig) -> Vec<Strin
             role_can_view(
                 &c.final_overwrites,
                 cfg.everyone,
-                true,
+                plan.everyone_base_view,
                 &[cfg.unverified_role],
             )
         })
@@ -254,6 +254,7 @@ mod tests {
             channels: vec![],
             counts: PlanCounts::default(),
             resolved_at: Utc::now(),
+            everyone_base_view: true,
         }
     }
 

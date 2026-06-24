@@ -87,6 +87,9 @@ pub struct ChannelPlan {
     pub channels: Vec<PlannedChannel>,
     pub counts: PlanCounts,
     pub resolved_at: DateTime<Utc>,
+    /// Whether `@everyone` has base VIEW permission in this guild. Carried so the
+    /// report can use the real value rather than a conservative assumption.
+    pub everyone_base_view: bool,
 }
 
 impl ChannelPlan {
@@ -155,6 +158,7 @@ pub fn resolve_plan(
         channels: planned,
         counts,
         resolved_at,
+        everyone_base_view,
     }
 }
 
@@ -617,6 +621,7 @@ mod tests {
             channels: vec![wrong_channel],
             counts: PlanCounts::default(),
             resolved_at: now(),
+            everyone_base_view: true,
         };
 
         let breaches = verification_breaches(&plan, &cfg);
