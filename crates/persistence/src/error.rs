@@ -16,4 +16,11 @@ pub enum PersistenceError {
     /// out-of-date row, surfaced rather than silently coerced to a default.
     #[error("corrupt stored token: {0}")]
     BadToken(String),
+    /// A JSON encode/decode failure (JSONB column round-trip for snapshot channels).
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    /// The stored snapshot uses a format version newer than this binary understands.
+    /// The binary must be upgraded before restoring this snapshot.
+    #[error("snapshot format version {found} is newer than this binary knows ({known})")]
+    SnapshotVersion { found: i32, known: i32 },
 }

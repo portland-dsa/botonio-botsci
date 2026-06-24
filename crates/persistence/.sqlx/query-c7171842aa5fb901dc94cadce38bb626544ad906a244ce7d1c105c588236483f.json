@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM channel_perms_snapshot WHERE guild_id = $1 AND (saved_at < now() - interval '6 months' OR id NOT IN ( SELECT id FROM channel_perms_snapshot WHERE guild_id = $1 ORDER BY saved_at DESC, id DESC LIMIT $2 ))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c7171842aa5fb901dc94cadce38bb626544ad906a244ce7d1c105c588236483f"
+}

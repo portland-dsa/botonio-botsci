@@ -1,5 +1,6 @@
 pub mod bulk_verify;
 pub mod card;
+pub mod channels;
 pub mod forget;
 pub mod help;
 mod reclick;
@@ -18,6 +19,7 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         card::lookup(),
         verify::verify(),
         bulk_verify::bulk_verify(),
+        channels::channels(),
         refresh_cache::refresh_cache(),
         setup::setup(),
         help::help(),

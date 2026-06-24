@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT format_version, guild_id, saved_at,\n                      channels AS \"channels: serde_json::Value\"\n               FROM channel_perms_snapshot\n               WHERE guild_id = $1\n               ORDER BY saved_at DESC LIMIT 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "format_version",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "channel_perms_snapshot",
+            "name": "format_version"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "guild_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "channel_perms_snapshot",
+            "name": "guild_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "saved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "channel_perms_snapshot",
+            "name": "saved_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "channels: serde_json::Value",
+        "type_info": "Jsonb",
+        "origin": {
+          "Table": {
+            "table": "channel_perms_snapshot",
+            "name": "channels"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "66f92b354cc28b183c47ec19c362fc212d562ed5f4790f7f8f63c68bc5e03ffc"
+}

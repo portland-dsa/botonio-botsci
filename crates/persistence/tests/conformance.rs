@@ -16,10 +16,11 @@ use chrono::NaiveDate;
 
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
+use engine::channels::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
-    IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore, MissState, OverrideLog,
-    RosterWrite,
+    ChannelSnapshotStore, IdentityWrite, InMemoryStore, Index, MemberRecord, MemberStore,
+    MissState, OverrideLog, RosterWrite,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use persistence::PgStore;
@@ -527,4 +528,125 @@ async fn start_over_replaces_the_queue(pool: sqlx::PgPool) {
     let next = pg.next_pending(g).await.unwrap().unwrap();
     assert_eq!(next.discord_user_id, DiscordUserId(20));
     assert_eq!(pg.counts(g).await.unwrap().pending, 1);
+}
+
+/// Build a minimal snapshot with the given number of placeholder channels for the
+/// given guild and timestamp.
+fn snapshot(
+    guild: u64,
+    saved_at: chrono::DateTime<chrono::Utc>,
+    channel_count: usize,
+) -> ChannelSnapshot {
+    use engine::backends::discord::ChannelKind;
+    use engine::channels::SavedChannel;
+    ChannelSnapshot {
+        format_version: SNAPSHOT_FORMAT_VERSION,
+        guild_id: domain::DiscordGuildId(guild),
+        saved_at,
+        channels: (0..channel_count)
+            .map(|i| SavedChannel {
+                id: domain::DiscordChannelId(i as u64 + 1),
+                name: format!("chan-{i}"),
+                kind: ChannelKind::Text,
+                parent_id: None,
+                overwrites: vec![],
+            })
+            .collect(),
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn channel_snapshot_save_latest_and_list(pool: sqlx::PgPool) {
+    use chrono::Timelike;
+
+    let pg = PgStore::new(pool);
+    let guild = domain::DiscordGuildId(500);
+    let other = domain::DiscordGuildId(501);
+
+    // Nothing saved yet.
+    assert!(pg.latest_snapshot(guild).await.unwrap().is_none());
+    assert!(pg.list_snapshots(guild).await.unwrap().is_empty());
+
+    // Recent timestamps (sub-second zeroed so they round-trip timestamptz exactly), kept
+    // well inside the 6-month retention window so the save-time prune never reaps them.
+    let now = chrono::Utc::now().with_nanosecond(0).unwrap();
+    let t1 = now - chrono::Duration::hours(2); // older
+    let t2 = now - chrono::Duration::hours(1); // newer
+
+    let s1 = snapshot(guild.0, t1, 3); // 3 channels, older
+    let s2 = snapshot(guild.0, t2, 5); // 5 channels, newer
+    let s_other = snapshot(other.0, t1, 2); // different guild - must not bleed into guild
+
+    pg.save_snapshot(&s1).await.unwrap();
+    pg.save_snapshot(&s_other).await.unwrap();
+    pg.save_snapshot(&s2).await.unwrap();
+
+    // latest_snapshot returns the newest for this guild (s2, not s1 or s_other).
+    let latest = pg
+        .latest_snapshot(guild)
+        .await
+        .unwrap()
+        .expect("a snapshot exists");
+    assert_eq!(
+        latest, s2,
+        "latest_snapshot must return the newest saved snapshot"
+    );
+
+    // list_snapshots returns both entries for guild, newest first.
+    let metas = pg.list_snapshots(guild).await.unwrap();
+    assert_eq!(
+        metas.len(),
+        2,
+        "list_snapshots must return one entry per saved snapshot"
+    );
+    assert_eq!(metas[0].saved_at, t2, "first entry is the newer snapshot");
+    assert_eq!(metas[0].channel_count, 5);
+    assert_eq!(metas[1].saved_at, t1, "second entry is the older snapshot");
+    assert_eq!(metas[1].channel_count, 3);
+
+    // The other guild is isolated: its one snapshot is present there but not here.
+    let other_latest = pg.latest_snapshot(other).await.unwrap();
+    assert_eq!(other_latest, Some(s_other));
+    assert_eq!(pg.list_snapshots(other).await.unwrap().len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn channel_snapshot_history_is_bounded(pool: sqlx::PgPool) {
+    use chrono::Timelike;
+
+    let pg = PgStore::new(pool);
+    let now = chrono::Utc::now().with_nanosecond(0).unwrap();
+
+    // The keep-cap: save seven recent snapshots (oldest first, distinct minute-apart
+    // timestamps, channel_count == i + 1). Only the newest five may survive.
+    let guild = domain::DiscordGuildId(700);
+    for i in 0..7u64 {
+        let saved_at = now - chrono::Duration::minutes((7 - i) as i64);
+        pg.save_snapshot(&snapshot(guild.0, saved_at, i as usize + 1))
+            .await
+            .unwrap();
+    }
+    let metas = pg.list_snapshots(guild).await.unwrap();
+    assert_eq!(metas.len(), 5, "history must be capped at the five newest");
+    assert_eq!(
+        metas[0].channel_count, 7,
+        "the newest snapshot must survive the cap"
+    );
+    assert!(
+        metas.iter().all(|m| m.channel_count >= 3),
+        "the two oldest snapshots must be pruned by the cap, got: {:?}",
+        metas.iter().map(|m| m.channel_count).collect::<Vec<_>>()
+    );
+
+    // The TTL: a snapshot older than six months is reaped on save even when it is the
+    // guild's only one (so it would otherwise sit comfortably inside the five-newest cap).
+    let other = domain::DiscordGuildId(701);
+    let stale = now - chrono::Duration::days(220); // comfortably older than 6 months
+    pg.save_snapshot(&snapshot(other.0, stale, 9))
+        .await
+        .unwrap();
+    assert!(
+        pg.latest_snapshot(other).await.unwrap().is_none(),
+        "a snapshot past the 6-month TTL must be pruned on save"
+    );
 }

@@ -3,14 +3,20 @@ Feature: Vector drives the real Discord guild through the bot
 
   These scenarios hit a real test guild through the bot token and run only behind
   the live-discord feature, with credentials supplied out of band. Vector reads a
-  member's roles and round-trips role writes against a designated test user,
-  leaving them as they were found.
+  member's roles, reads the guild's channel list, and round-trips role writes
+  against a designated test user, leaving them as they were found.
 
   @read
   Scenario: Vector reads a member's roles
     Given the live Discord credentials and a test user
     When Vector reads the test user's roles
     Then the test user's roles are returned
+
+  @read @channels
+  Scenario: Vector reads the guild's channel list
+    Given the live Discord credentials
+    When Vector reads the guild's channels
+    Then the channel list is returned with at least one category
 
   @write @role
   Scenario: Vector round-trips a role change on the test user

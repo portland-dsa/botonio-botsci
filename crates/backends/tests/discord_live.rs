@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use cucumber::{World as _, given, then, when};
 
-use backends::discord::{DiscordClient, DiscordHttp, MemberRoles, Role};
+use backends::discord::{
+    ChannelKind, DiscordClient, DiscordHttp, GuildChannels, MemberRoles, Role,
+};
 use backends::util::DiscordUserId;
 
 /// Reads a required env var, panicking with the var name if absent - a missing
@@ -92,6 +94,8 @@ struct DiscordWorld {
 
     // Read results captured by `when` steps.
     roles: Option<MemberRoles>,
+    /// The guild's channel list, captured by the channel-read `when` step.
+    channels: Option<GuildChannels>,
 
     // Write round-trip bookkeeping.
     /// The status the test user held before a role write, for the `then` to
@@ -111,6 +115,7 @@ impl DiscordWorld {
         Self {
             client: None,
             roles: None,
+            channels: None,
             original_status: None,
             primed_status: None,
         }
@@ -152,6 +157,12 @@ async fn given_user(world: &mut DiscordWorld) {
     world.client().await;
     // Parse the test user id eagerly so a missing/invalid var fails here.
     let _ = test_user_id();
+}
+
+#[given("the live Discord credentials")]
+async fn given_credentials(world: &mut DiscordWorld) {
+    // The channel-read scenario needs only the client, not a designated test user.
+    world.client().await;
 }
 
 #[given("the live Discord credentials and a test user already at a known status")]
@@ -196,6 +207,17 @@ async fn when_read_roles(world: &mut DiscordWorld) {
         .await
         .expect("member_roles failed");
     world.roles = Some(roles);
+}
+
+#[when("Vector reads the guild's channels")]
+async fn when_read_channels(world: &mut DiscordWorld) {
+    let channels = world
+        .client()
+        .await
+        .read_channels()
+        .await
+        .expect("read_channels failed");
+    world.channels = Some(channels);
 }
 
 #[when("Vector sets and then restores the test user's status role")]
@@ -302,6 +324,21 @@ async fn then_no_role_change(world: &mut DiscordWorld) {
             .expect("restore remove_roles failed");
         wait_for_status(client, user, None).await;
     }
+}
+
+#[then("the channel list is returned with at least one category")]
+async fn then_channels_returned(world: &mut DiscordWorld) {
+    let read = world.channels.as_ref().expect("no channels were read");
+    assert!(
+        !read.channels.is_empty(),
+        "expected at least one channel in the test guild"
+    );
+    assert!(
+        read.channels
+            .iter()
+            .any(|c| c.kind == ChannelKind::Category),
+        "expected at least one category channel in the test guild"
+    );
 }
 
 #[tokio::main]

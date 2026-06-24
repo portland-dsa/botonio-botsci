@@ -3,8 +3,9 @@
 use async_trait::async_trait;
 
 use crate::MemberPage;
-use crate::util::{DiscordGuildId, DiscordUserId};
+use crate::util::{DiscordChannelId, DiscordGuildId, DiscordUserId};
 
+use super::channels::{GuildChannels, PermOverwrite};
 use super::error::DiscordError;
 use super::roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
 
@@ -84,4 +85,19 @@ pub trait DiscordClient: Send + Sync {
     /// member does not hold it, and likewise when no marker role is configured - there is
     /// then nothing to remove.
     async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError>;
+
+    /// Reads every channel in the guild with its permission overwrites, plus
+    /// whether the `@everyone` guild role grants `VIEW_CHANNEL` at the base level.
+    ///
+    /// REST only - the terraform reads the whole tree once, then plans offline.
+    async fn read_channels(&self) -> Result<GuildChannels, DiscordError>;
+
+    /// Replaces a channel's whole permission-overwrite array (Discord's atomic
+    /// unit). The terraform never edits a single overwrite in place; it computes
+    /// the full desired array and PATCHes it.
+    async fn set_channel_overwrites(
+        &self,
+        id: DiscordChannelId,
+        overwrites: &[PermOverwrite],
+    ) -> Result<(), DiscordError>;
 }

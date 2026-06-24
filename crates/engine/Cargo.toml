@@ -8,6 +8,7 @@ domain = { path = "../domain" }
 backends = { path = "../backends" }
 thiserror = "2"
 chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
 # Async trait definitions so `MemberStore` is object-safe from day one; a later
@@ -50,4 +51,11 @@ harness = false
 # Rouge is linked but her record has no standing (malformed - left untouched).
 [[test]]
 name = "scan"
+harness = false
+
+# Behaviour suite for the channel-permission terraform (classify, guard, gate, drift-skip,
+# check/save/restore). Offline, Cucumber, mocks only. Cast: Tails (the moderator running
+# the terraform); Sonic-cast channels (general, welcome, dues-desk, staff-chat, etc.).
+[[test]]
+name = "channels"
 harness = false

@@ -86,6 +86,9 @@ numeric_newtype! {
     /// ```
     ///
     /// [`FromStr`]: std::str::FromStr
+    // `Ord` (and its `PartialOrd` prerequisite) beyond the common derives: user
+    // ids appear inside `OverwriteTarget` which is `Ord` for stable ordering.
+    #[derive(PartialOrd, Ord)]
     DiscordUserId
 }
 
@@ -143,6 +146,9 @@ numeric_newtype! {
     /// assert_eq!(r.to_string(), "445566778899001122");
     /// assert!("not-a-role".parse::<DiscordRoleId>().is_err());
     /// ```
+    // `Ord` (and its `PartialOrd` prerequisite) beyond the common derives: role
+    // ids appear inside `OverwriteTarget` which is `Ord` for stable ordering.
+    #[derive(PartialOrd, Ord)]
     DiscordRoleId
 }
 

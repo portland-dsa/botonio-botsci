@@ -38,7 +38,16 @@ pub async fn on_error(error: poise::FrameworkError<'_, Data, Error>) {
             // card command itself, which then returns Ok; anything reaching here is an
             // engine or serenity failure, so a single generic reply is right.
             let user_msg = "Something went wrong on my end - please try again in a moment.";
-            tracing::error!(kind = error.kind(), "command error");
+            // Always log the PII-free kind. For a serenity (Discord HTTP) error, also log the
+            // detail: it is a Discord API status/message, never our member PII, so an
+            // interaction-deadline or permission failure is diagnosable from the logs instead
+            // of an opaque `kind="serenity"`.
+            match &error {
+                BotError::Serenity(e) => {
+                    tracing::error!(kind = error.kind(), detail = %e, "command error")
+                }
+                _ => tracing::error!(kind = error.kind(), "command error"),
+            }
             let _ = ctx
                 .send(
                     poise::CreateReply::default()

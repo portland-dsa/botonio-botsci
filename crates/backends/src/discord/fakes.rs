@@ -5,7 +5,9 @@
 //! rather than which calls were made. Seed held roles with
 //! [`with_roles`](FakeDiscord::with_roles) and the sweep roster with
 //! [`with_roster`](FakeDiscord::with_roster); force an error path with
-//! [`failing`](FakeDiscord::failing).
+//! [`failing`](FakeDiscord::failing). Seed channels with
+//! [`with_channels`](FakeDiscord::with_channels) and read recorded overwrite
+//! writes with [`written_overwrites`](FakeDiscord::written_overwrites).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -13,8 +15,9 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use crate::MemberPage;
-use crate::util::{DiscordGuildId, DiscordUserId};
+use crate::util::{DiscordChannelId, DiscordGuildId, DiscordUserId};
 
+use super::channels::{DiscordChannel, GuildChannels, PermOverwrite};
 use super::client::DiscordClient;
 use super::error::DiscordError;
 use super::roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
@@ -39,10 +42,16 @@ pub struct FakeDiscord {
     markers: Mutex<HashSet<DiscordUserId>>,
     roster: Mutex<Vec<DiscordRosterMember>>,
     fail: Mutex<HashSet<DiscordOp>>,
+    /// Seeded channel list; [`set_channel_overwrites`] reflects writes back in.
+    channels: Mutex<Vec<DiscordChannel>>,
+    /// Whether the `@everyone` role grants `VIEW_CHANNEL` at the base level.
+    everyone_base_view: Mutex<bool>,
+    /// Log of every [`set_channel_overwrites`] call, in call order.
+    overwrite_writes: Mutex<Vec<(DiscordChannelId, Vec<PermOverwrite>)>>,
 }
 
 impl FakeDiscord {
-    /// An empty fake: no members, no roster, nothing failing.
+    /// An empty fake: no members, no roster, no channels, nothing failing.
     pub fn new() -> Self {
         Self {
             guild: DiscordGuildId(0),
@@ -51,6 +60,9 @@ impl FakeDiscord {
             markers: Mutex::new(HashSet::new()),
             roster: Mutex::new(Vec::new()),
             fail: Mutex::new(HashSet::new()),
+            channels: Mutex::new(Vec::new()),
+            everyone_base_view: Mutex::new(false),
+            overwrite_writes: Mutex::new(Vec::new()),
         }
     }
 
@@ -70,6 +82,24 @@ impl FakeDiscord {
     pub fn failing(self, op: DiscordOp) -> Self {
         self.fail.lock().unwrap().insert(op);
         self
+    }
+
+    /// Seed the channel list [`read_channels`](super::client::DiscordClient::read_channels) yields.
+    pub fn with_channels(self, channels: Vec<DiscordChannel>) -> Self {
+        *self.channels.lock().unwrap() = channels;
+        self
+    }
+
+    /// Set whether `@everyone` grants `VIEW_CHANNEL` at the base level.
+    pub fn set_everyone_base_view(self, value: bool) -> Self {
+        *self.everyone_base_view.lock().unwrap() = value;
+        self
+    }
+
+    /// Every [`set_channel_overwrites`](super::client::DiscordClient::set_channel_overwrites)
+    /// call recorded so far, in call order.
+    pub fn written_overwrites(&self) -> Vec<(DiscordChannelId, Vec<PermOverwrite>)> {
+        self.overwrite_writes.lock().unwrap().clone()
     }
 
     /// The managed status roles `member` currently holds.
@@ -177,5 +207,113 @@ impl DiscordClient for FakeDiscord {
         self.guard(DiscordOp::RemoveOverrideMarker)?;
         self.markers.lock().unwrap().remove(&user);
         Ok(())
+    }
+
+    async fn read_channels(&self) -> Result<GuildChannels, DiscordError> {
+        Ok(GuildChannels {
+            guild_id: self.guild,
+            everyone_base_view: *self.everyone_base_view.lock().unwrap(),
+            channels: self.channels.lock().unwrap().clone(),
+        })
+    }
+
+    async fn set_channel_overwrites(
+        &self,
+        id: DiscordChannelId,
+        overwrites: &[PermOverwrite],
+    ) -> Result<(), DiscordError> {
+        let mut channels = self.channels.lock().unwrap();
+        // Mirror live Discord: writing to an unknown channel is an error.
+        // A failed write is NOT recorded - the caller's circuit-breaker path can
+        // exercise this against a stale snapshot without poisoning the write log.
+        let Some(c) = channels.iter_mut().find(|c| c.id == id) else {
+            return Err(DiscordError::MissingEnv("channel not found (fake)"));
+        };
+        // Reflect the write back so a read-after-write sees the new state.
+        c.overwrites = overwrites.to_vec();
+        drop(channels);
+        self.overwrite_writes
+            .lock()
+            .unwrap()
+            .push((id, overwrites.to_vec()));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::channels::{ChannelKind, OverwriteTarget, Permissions};
+    use super::*;
+    use domain::DiscordRoleId;
+
+    fn make_channel(id: u64, kind: ChannelKind, parent_id: Option<u64>) -> DiscordChannel {
+        DiscordChannel {
+            id: DiscordChannelId(id),
+            name: format!("channel-{id}"),
+            kind,
+            parent_id: parent_id.map(DiscordChannelId),
+            position: 0,
+            overwrites: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fake_set_channel_overwrites_errors_on_unknown_id() {
+        let fake =
+            FakeDiscord::new().with_channels(vec![make_channel(100, ChannelKind::Text, None)]);
+
+        let ows = vec![PermOverwrite {
+            target: OverwriteTarget::Role(DiscordRoleId(1)),
+            allow: Permissions::VIEW_CHANNEL,
+            deny: Permissions::empty(),
+        }];
+
+        // Unknown id returns Err and does not appear in the write log.
+        let result = fake
+            .set_channel_overwrites(DiscordChannelId(999), &ows)
+            .await;
+        assert!(result.is_err(), "expected Err for unknown channel id");
+        assert!(
+            fake.written_overwrites().is_empty(),
+            "failed write must not be recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_reads_seeded_channels_and_records_writes() {
+        let fake = FakeDiscord::new()
+            .with_channels(vec![
+                make_channel(100, ChannelKind::Category, None),
+                make_channel(101, ChannelKind::Text, Some(100)),
+            ])
+            .set_everyone_base_view(true);
+
+        let read = fake.read_channels().await.unwrap();
+        assert_eq!(read.channels.len(), 2);
+        assert!(read.everyone_base_view);
+
+        let ows = vec![PermOverwrite {
+            target: OverwriteTarget::Role(DiscordRoleId(1)),
+            allow: Permissions::VIEW_CHANNEL,
+            deny: Permissions::empty(),
+        }];
+        fake.set_channel_overwrites(DiscordChannelId(100), &ows)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            fake.written_overwrites(),
+            vec![(DiscordChannelId(100), ows.clone())]
+        );
+        let after = fake.read_channels().await.unwrap();
+        assert_eq!(
+            after
+                .channels
+                .iter()
+                .find(|c| c.id == DiscordChannelId(100))
+                .unwrap()
+                .overwrites,
+            ows
+        );
     }
 }
