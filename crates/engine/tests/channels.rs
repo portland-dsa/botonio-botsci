@@ -954,11 +954,11 @@ fn category_id_for_name(name: &str) -> u64 {
 
 // Expose the `is_write_action` check used in then_channel_skipped_drifted.
 trait ChannelActionExt {
-    fn is_write_action(self) -> bool;
+    fn is_write_action(&self) -> bool;
 }
 
 impl ChannelActionExt for ChannelAction {
-    fn is_write_action(self) -> bool {
+    fn is_write_action(&self) -> bool {
         matches!(
             self,
             ChannelAction::MemberOnly
