@@ -315,3 +315,29 @@ async fn main() {
         .run_and_exit("tests/features/discord_live")
         .await;
 }
+
+// ==============================================================================
+// Standalone smoke tests (not Cucumber - plain tokio::test)
+// ==============================================================================
+
+/// Reads the test guild's channel list and asserts it is non-empty and contains
+/// at least one category. Read-only: no channel or overwrite is mutated.
+#[tokio::test]
+async fn read_channels_returns_channels_with_a_category() {
+    dotenvy::dotenv().ok();
+    let client = DiscordHttp::from_env()
+        .await
+        .expect("DiscordHttp::from_env failed - check DISCORD_BOT_TOKEN and DISCORD_GUILD_ID");
+    let result = client.read_channels().await.expect("read_channels failed");
+    assert!(
+        !result.channels.is_empty(),
+        "expected at least one channel in the test guild"
+    );
+    assert!(
+        result
+            .channels
+            .iter()
+            .any(|c| c.kind == backends::discord::ChannelKind::Category),
+        "expected at least one category channel in the test guild"
+    );
+}

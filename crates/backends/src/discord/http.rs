@@ -9,14 +9,18 @@ use serenity::model::guild::Role as GuildRole;
 use serenity::model::id::{GuildId, RoleId, UserId};
 
 use crate::MemberPage;
-use crate::util::{DiscordGuildId, DiscordHandle, DiscordUserId};
+use crate::util::{DiscordChannelId, DiscordGuildId, DiscordHandle, DiscordUserId};
 
+use super::channels::{
+    ChannelKind, DiscordChannel, GuildChannels, OverwriteTarget, PermOverwrite, Permissions,
+};
 use super::client::DiscordClient;
 use super::error::DiscordError;
 use super::roles::{
     DiscordRosterMember, ManagedRole, MemberRoles, Role, RoleExt, StatusDiff, diff_status_roles,
     role_names_for,
 };
+use domain::DiscordRoleId;
 
 /// Reason attached to every role add/remove, so the change is legible in the
 /// guild's audit log.
@@ -382,5 +386,94 @@ impl DiscordClient for DiscordHttp {
             )
             .await?;
         Ok(())
+    }
+
+    async fn read_channels(&self) -> Result<GuildChannels, DiscordError> {
+        use serenity::model::channel::{ChannelType, PermissionOverwriteType};
+
+        let raw = self.http.get_channels(self.guild_id).await?;
+
+        let map_target = |kind: &PermissionOverwriteType| match kind {
+            PermissionOverwriteType::Role(r) => Some(OverwriteTarget::Role(DiscordRoleId(r.get()))),
+            PermissionOverwriteType::Member(u) => {
+                Some(OverwriteTarget::Member(DiscordUserId(u.get())))
+            }
+            // Forward-compat: an overwrite kind we do not model is dropped.
+            _ => None,
+        };
+
+        let mut channels = Vec::with_capacity(raw.len());
+        for c in raw {
+            let kind = match c.kind {
+                ChannelType::Category => ChannelKind::Category,
+                ChannelType::Text => ChannelKind::Text,
+                ChannelType::Voice => ChannelKind::Voice,
+                ChannelType::News => ChannelKind::Announcement,
+                ChannelType::Forum => ChannelKind::Forum,
+                ChannelType::Stage => ChannelKind::Stage,
+                // Threads and any unknown future kind: skipped (perms derive from parent).
+                _ => continue,
+            };
+            let overwrites = c
+                .permission_overwrites
+                .iter()
+                .filter_map(|o| {
+                    map_target(&o.kind).map(|target| PermOverwrite {
+                        target,
+                        allow: o.allow,
+                        deny: o.deny,
+                    })
+                })
+                .collect();
+            channels.push(DiscordChannel {
+                id: DiscordChannelId(c.id.get()),
+                name: c.name.clone(),
+                kind,
+                parent_id: c.parent_id.map(|p| DiscordChannelId(p.get())),
+                position: c.position,
+                overwrites,
+            });
+        }
+
+        let guild_roles = self.http.get_guild_roles(self.guild_id).await?;
+        // The @everyone role shares its id with the guild id.
+        let everyone_base_view = guild_roles
+            .iter()
+            .find(|r| r.id.get() == self.guild_id.get())
+            .is_some_and(|r| r.permissions.contains(Permissions::VIEW_CHANNEL));
+
+        Ok(GuildChannels {
+            guild_id: DiscordGuildId(self.guild_id.get()),
+            everyone_base_view,
+            channels,
+        })
+    }
+
+    async fn set_channel_overwrites(
+        &self,
+        id: DiscordChannelId,
+        overwrites: &[PermOverwrite],
+    ) -> Result<(), DiscordError> {
+        use serenity::builder::EditChannel;
+        use serenity::model::channel::{PermissionOverwrite as SerPo, PermissionOverwriteType};
+        use serenity::model::id::ChannelId;
+
+        let ser: Vec<SerPo> = overwrites
+            .iter()
+            .map(|o| SerPo {
+                allow: o.allow,
+                deny: o.deny,
+                kind: match o.target {
+                    OverwriteTarget::Role(r) => PermissionOverwriteType::Role(RoleId::new(r.0)),
+                    OverwriteTarget::Member(u) => PermissionOverwriteType::Member(UserId::new(u.0)),
+                },
+            })
+            .collect();
+
+        ChannelId::new(id.0)
+            .edit(&self.http, EditChannel::new().permissions(ser))
+            .await
+            .map(|_| ())
+            .map_err(DiscordError::from)
     }
 }
