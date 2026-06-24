@@ -19,6 +19,7 @@ pub use backends;
 pub mod audit;
 pub mod bulk;
 pub mod card;
+pub mod channels;
 pub mod error;
 pub mod verify;
 pub use error::{Error, Result};
