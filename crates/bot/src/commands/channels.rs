@@ -198,10 +198,10 @@ fn format_desync_report(report: &DesyncReport) -> String {
             "{} channel(s) out of sync with their category:",
             report.out_of_sync.len()
         )];
-        for (child_id, name, parent_id) in &report.out_of_sync {
+        for e in &report.out_of_sync {
             lines.push(format!(
-                "- #{name} ({}) -> category {}",
-                child_id.0, parent_id.0
+                "- #{} ({}) -> category {} ({})",
+                e.child_name, e.child_id.0, e.parent_name, e.parent_id.0
             ));
         }
         lines.join("\n")

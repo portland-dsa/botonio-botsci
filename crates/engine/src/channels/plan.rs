@@ -321,14 +321,25 @@ pub fn verification_breaches(plan: &ChannelPlan, cfg: &SetupConfig) -> Vec<Disco
         .collect()
 }
 
+/// One out-of-sync child channel and the parent category it diverged from. A named
+/// record (not a tuple) so both ids carry their channel name for the report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesyncEntry {
+    pub child_id: DiscordChannelId,
+    pub child_name: String,
+    pub parent_id: DiscordChannelId,
+    pub parent_name: String,
+}
+
 /// A read-only report of children whose overwrites differ from their category.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesyncReport {
-    /// `(child id, child name, parent category id)` for each out-of-sync child.
-    pub out_of_sync: Vec<(DiscordChannelId, String, DiscordChannelId)>,
+    pub out_of_sync: Vec<DesyncEntry>,
 }
 
-/// Compute the desync report - the `/channels check` subcommand's whole job.
+/// Compute the desync report - the `/channels check` subcommand's whole job. The parent
+/// category is always in `channels` (it is a channel of kind `Category`), so its name is
+/// available for the report alongside its id.
 pub fn desync_report(channels: &[DiscordChannel]) -> DesyncReport {
     let by_id: HashMap<DiscordChannelId, &DiscordChannel> =
         channels.iter().map(|c| (c.id, c)).collect();
@@ -338,7 +349,12 @@ pub fn desync_report(channels: &[DiscordChannel]) -> DesyncReport {
             && let Some(p) = by_id.get(&parent)
             && !overwrites_synced(&c.overwrites, &p.overwrites)
         {
-            out_of_sync.push((c.id, c.name.clone(), parent));
+            out_of_sync.push(DesyncEntry {
+                child_id: c.id,
+                child_name: c.name.clone(),
+                parent_id: parent,
+                parent_name: p.name.clone(),
+            });
         }
     }
     DesyncReport { out_of_sync }
@@ -686,8 +702,12 @@ mod tests {
             1,
             "only the desynced child must be reported"
         );
-        assert_eq!(report.out_of_sync[0].0, DiscordChannelId(902));
-        assert_eq!(report.out_of_sync[0].2, DiscordChannelId(900));
+        assert_eq!(report.out_of_sync[0].child_id, DiscordChannelId(902));
+        assert_eq!(report.out_of_sync[0].parent_id, DiscordChannelId(900));
+        assert_eq!(
+            report.out_of_sync[0].parent_name, "ch-900",
+            "carries the category name"
+        );
     }
 
     // Additional: verify the restrict path produces correct final_overwrites for

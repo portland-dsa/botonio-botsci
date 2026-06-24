@@ -726,7 +726,7 @@ async fn then_fails_plan_changed(world: &mut TailsWorld) {
 #[then(regex = r#"^"([^"]+)" is reported as out of sync with its category$"#)]
 async fn then_out_of_sync(world: &mut TailsWorld, name: String) {
     let report = world.desync.as_ref().expect("no desync report");
-    let found = report.out_of_sync.iter().any(|(_, n, _)| n == &name);
+    let found = report.out_of_sync.iter().any(|e| e.child_name == name);
     assert!(
         found,
         "{name} must be reported as out of sync, report was: {:?}",

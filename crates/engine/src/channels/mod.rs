@@ -16,8 +16,8 @@ pub(crate) mod snapshot;
 pub use facade::{ApplyOutcome, Channels, ChannelsError, RestoreOutcome};
 pub use model::SetupConfig;
 pub use plan::{
-    ChannelAction, ChannelPlan, DesyncReport, PlanCounts, PlannedChannel, desync_report,
-    resolve_plan, verification_breaches,
+    ChannelAction, ChannelPlan, DesyncEntry, DesyncReport, PlanCounts, PlannedChannel,
+    desync_report, resolve_plan, verification_breaches,
 };
 pub use report::{detail_markdown, summary_lines, unverified_visibility};
 pub use snapshot::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION, SavedChannel, SnapshotMeta};
