@@ -1,18 +1,23 @@
 //! `/channels` - server-manager commands for inspecting and managing channel-permission
-//! snapshots. Three subcommands: `check` (read-only desync report), `save` (snapshot
-//! current overwrites), and `restore` (roll back to the latest snapshot). A fourth
-//! subcommand (`setup`) is added in a later task.
+//! snapshots and applying the membership-role terraform. Four subcommands: `check`
+//! (read-only desync report), `save` (snapshot current overwrites), `restore` (roll back
+//! to the latest snapshot), and `setup` (preview and apply the full terraform).
 
 use std::time::Duration;
 
 use serenity::all::{
-    ButtonStyle, CreateActionRow, CreateButton, CreateInteractionResponse, EditInteractionResponse,
+    ActionRowComponent, ButtonStyle, CreateActionRow, CreateAttachment, CreateButton,
+    CreateInputText, CreateInteractionResponse, CreateModal, EditInteractionResponse,
+    InputTextStyle,
 };
 
 use domain::DiscordRoleId;
 use engine::backends::discord::DiscordHttp;
 use engine::backends::util::DiscordUserId;
-use engine::channels::{ChannelsError, DesyncReport, RestoreOutcome, SetupConfig};
+use engine::channels::{
+    ApplyOutcome, ChannelsError, DesyncReport, RestoreOutcome, SetupConfig, detail_markdown,
+    summary_lines, unverified_visibility,
+};
 use engine::seam::NoProgress;
 use engine::store::GuildConfig;
 
@@ -32,7 +37,7 @@ const CONFIRM_TIMEOUT: Duration = Duration::from_secs(60);
 /// Inspect and manage channel-permission snapshots. Server managers only.
 #[poise::command(
     slash_command,
-    subcommands("check", "save", "restore"),
+    subcommands("check", "save", "restore", "setup"),
     default_member_permissions = "MANAGE_GUILD",
     guild_only
 )]
@@ -59,8 +64,6 @@ fn channels_http(ctx: &Context<'_>) -> DiscordHttp {
 
 /// Build a `SetupConfig` from the live `GuildConfig`. Returns a friendly error string when
 /// any of the four required roles is unset, so the caller can surface it to the moderator.
-/// Used by the `setup` subcommand (Task 11).
-#[allow(dead_code)]
 pub(crate) fn build_setup_config(
     cfg: &GuildConfig,
     guild_id: u64,
@@ -336,5 +339,302 @@ pub async fn restore(ctx: Context<'_>) -> Result<(), Error> {
                 .components(vec![]),
         )
         .await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// /channels setup
+// ---------------------------------------------------------------------------
+
+/// Button and modal ids for the setup confirm flow.
+const SETUP_CONFIRM_ID: &str = "channels_setup_confirm";
+const SETUP_CANCEL_ID: &str = "channels_setup_cancel";
+const SETUP_COUNT_MODAL_ID: &str = "channels_setup_count_modal";
+const SETUP_COUNT_FIELD_ID: &str = "channels_setup_count";
+
+/// How long to wait for the moderator to click Confirm on the setup preview.
+const SETUP_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for the moderator to submit the count modal.
+const SETUP_MODAL_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Preview and apply the channel-permission terraform. Requires typing the write count to confirm.
+#[poise::command(slash_command)]
+pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
+    ctx.defer_ephemeral().await?;
+
+    let data = ctx.data();
+    let guild_id = ctx.guild_id().expect("channels is guild_only").get();
+    let bot_user = DiscordUserId(ctx.framework().bot_id.get());
+    let guild_cfg = data.guild_config.load();
+
+    // Build the SetupConfig from the live GuildConfig.
+    let cfg = match build_setup_config(&guild_cfg, guild_id, bot_user) {
+        Ok(c) => c,
+        Err(msg) => {
+            ctx.send(ephemeral_text(&msg)).await?;
+            return Ok(());
+        }
+    };
+
+    let discord = channels_http(&ctx);
+    let channels = engine::channels::Channels::new(&discord, &*data.store);
+
+    // Plan: read-only, validates config before any writes.
+    let plan = match channels.plan(&cfg).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "channels setup: plan failed");
+            ctx.send(ephemeral_text(channels_err_msg(&e))).await?;
+            return Ok(());
+        }
+    };
+
+    // Nothing to do - already in the desired state.
+    if plan.counts.writes == 0 {
+        ctx.send(ephemeral_text(
+            "Already in the desired state - nothing to change.",
+        ))
+        .await?;
+        return Ok(());
+    }
+
+    // Build the summary embed from summary_lines + unverified_visibility headline.
+    let visible = unverified_visibility(&plan, &cfg);
+    let visibility_line = if visible.is_empty() {
+        "Unverified role will have no channel access after apply.".to_owned()
+    } else {
+        format!(
+            "Unverified can still see: {}",
+            visible
+                .iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+
+    let mut embed = serenity::all::CreateEmbed::new()
+        .title(format!(
+            "Channel terraform preview - {} write(s)",
+            plan.counts.writes
+        ))
+        .description(visibility_line)
+        .color(serenity::all::Color::GOLD);
+    for (label, value) in summary_lines(&plan) {
+        embed = embed.field(label, value, true);
+    }
+
+    // Build the markdown attachment.
+    let md_bytes = detail_markdown(&plan, &cfg).into_bytes();
+    let attachment = CreateAttachment::bytes(md_bytes, "channel-plan.md");
+
+    let expected_writes = plan.counts.writes;
+
+    // Send the preview with the Confirm / Cancel button row.
+    let handle = ctx
+        .send(
+            poise::CreateReply::default()
+                .embed(embed)
+                .attachment(attachment)
+                .ephemeral(true)
+                .components(vec![CreateActionRow::Buttons(vec![
+                    CreateButton::new(SETUP_CONFIRM_ID)
+                        .label("Confirm")
+                        .style(ButtonStyle::Primary),
+                    CreateButton::new(SETUP_CANCEL_ID)
+                        .label("Cancel")
+                        .style(ButtonStyle::Secondary),
+                ])]),
+        )
+        .await?;
+
+    let sctx = ctx.serenity_context();
+    let message = handle.message().await?;
+
+    // Await the button press.
+    let press = match message
+        .await_component_interaction(sctx)
+        .author_id(ctx.author().id)
+        .timeout(SETUP_CONFIRM_TIMEOUT)
+        .await
+    {
+        Some(p) => p,
+        None => {
+            handle
+                .edit(
+                    ctx,
+                    poise::CreateReply::default()
+                        .content("Setup cancelled (timed out).")
+                        .components(vec![]),
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if press.data.custom_id == SETUP_CANCEL_ID {
+        // Acknowledge and clear the buttons.
+        press
+            .create_response(sctx, CreateInteractionResponse::Acknowledge)
+            .await?;
+        press
+            .edit_response(
+                sctx,
+                EditInteractionResponse::new()
+                    .content("Setup cancelled.")
+                    .components(vec![]),
+            )
+            .await?;
+        return Ok(());
+    }
+
+    // SETUP_CONFIRM_ID: open a modal asking the moderator to type the write count.
+    let count_modal = CreateModal::new(SETUP_COUNT_MODAL_ID, "Confirm apply").components(vec![
+        CreateActionRow::InputText(
+            CreateInputText::new(
+                InputTextStyle::Short,
+                format!("Type the write count ({expected_writes}) to confirm"),
+                SETUP_COUNT_FIELD_ID,
+            )
+            .placeholder(expected_writes.to_string())
+            .required(true)
+            .min_length(1)
+            .max_length(6),
+        ),
+    ]);
+
+    press
+        .create_response(sctx, CreateInteractionResponse::Modal(count_modal))
+        .await?;
+
+    // Await the modal submission. A dismissed modal sends no event so we also have a timeout.
+    let submit = match message
+        .await_modal_interaction(sctx)
+        .author_id(ctx.author().id)
+        .custom_ids(vec![SETUP_COUNT_MODAL_ID.to_owned()])
+        .timeout(SETUP_MODAL_TIMEOUT)
+        .await
+    {
+        Some(s) => s,
+        None => {
+            handle
+                .edit(
+                    ctx,
+                    poise::CreateReply::default()
+                        .content("Setup cancelled (timed out waiting for count).")
+                        .components(vec![]),
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+
+    // Acknowledge immediately so the writes below cannot exceed Discord's 3-second deadline.
+    submit
+        .create_response(sctx, CreateInteractionResponse::Acknowledge)
+        .await?;
+
+    // Read and parse the typed count.
+    let raw_count = submit
+        .data
+        .components
+        .iter()
+        .flat_map(|row| &row.components)
+        .find_map(|c| match c {
+            ActionRowComponent::InputText(input) if input.custom_id == SETUP_COUNT_FIELD_ID => {
+                input.value.clone()
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let typed: usize = match raw_count.trim().parse() {
+        Ok(n) => n,
+        Err(_) => {
+            submit
+                .edit_response(
+                    sctx,
+                    EditInteractionResponse::new()
+                        .content(format!(
+                            "Count mismatch - the plan writes {expected_writes}; \
+                             \"{raw_count}\" is not a valid number. Re-run /channels setup."
+                        ))
+                        .components(vec![]),
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if typed != expected_writes {
+        submit
+            .edit_response(
+                sctx,
+                EditInteractionResponse::new()
+                    .content(format!(
+                        "Count mismatch - the plan writes {expected_writes}; you typed {typed}. \
+                         Re-run /channels setup."
+                    ))
+                    .components(vec![]),
+            )
+            .await?;
+        return Ok(());
+    }
+
+    // Apply.
+    let outcome: ApplyOutcome = match channels.apply(&cfg, typed, &NoProgress).await {
+        Ok(o) => o,
+        Err(ChannelsError::PlanChanged { .. }) => {
+            submit
+                .edit_response(
+                    sctx,
+                    EditInteractionResponse::new()
+                        .content("The server changed since the preview - re-run /channels setup.")
+                        .components(vec![]),
+                )
+                .await?;
+            return Ok(());
+        }
+        Err(ChannelsError::CircuitBreaker { .. }) => {
+            submit
+                .edit_response(
+                    sctx,
+                    EditInteractionResponse::new()
+                        .content(
+                            "Aborted after repeated write failures. \
+                             The pre-run snapshot is intact - use /channels restore.",
+                        )
+                        .components(vec![]),
+                )
+                .await?;
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "channels setup: apply failed");
+            submit
+                .edit_response(
+                    sctx,
+                    EditInteractionResponse::new()
+                        .content(channels_err_msg(&e))
+                        .components(vec![]),
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+
+    submit
+        .edit_response(
+            sctx,
+            EditInteractionResponse::new()
+                .content(format!(
+                    "Applied: wrote {}, skipped {} (changed since preview), failed {}.",
+                    outcome.written, outcome.skipped_drift, outcome.failed,
+                ))
+                .components(vec![]),
+        )
+        .await?;
+
     Ok(())
 }
