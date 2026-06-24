@@ -52,3 +52,10 @@ harness = false
 [[test]]
 name = "scan"
 harness = false
+
+# Behaviour suite for the channel-permission terraform (classify, guard, gate, drift-skip,
+# check/save/restore). Offline, Cucumber, mocks only. Cast: Tails (the moderator running
+# the terraform); Sonic-cast channels (general, welcome, dues-desk, staff-chat, etc.).
+[[test]]
+name = "channels"
+harness = false
