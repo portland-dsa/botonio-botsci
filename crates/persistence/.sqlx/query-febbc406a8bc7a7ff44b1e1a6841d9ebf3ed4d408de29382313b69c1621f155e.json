@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT saved_at, jsonb_array_length(channels) AS \"channel_count!\"\n               FROM channel_perms_snapshot\n               WHERE guild_id = $1\n               ORDER BY saved_at DESC",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "saved_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "channel_perms_snapshot",
+            "name": "saved_at"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_count!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "febbc406a8bc7a7ff44b1e1a6841d9ebf3ed4d408de29382313b69c1621f155e"
+}

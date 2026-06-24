@@ -26,10 +26,11 @@ use sqlx::postgres::PgPoolOptions;
 
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
+use engine::channels::{ChannelSnapshot, SnapshotMeta};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
-    ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore, MissCounts, MissState,
-    OverrideLog, OverrideRecord, RosterWrite, dedup_records,
+    ChannelSnapshotStore, ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore,
+    MissCounts, MissState, OverrideLog, OverrideRecord, RosterWrite, dedup_records,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -750,5 +751,81 @@ impl BulkSessionStore for PgStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ChannelSnapshotStore for PgStore {
+    type Error = PersistenceError;
+
+    /// Append a whole-guild channel-permission snapshot. Each call inserts a new row;
+    /// history is never overwritten, so successive saves form an undo stack. The
+    /// `channels` Vec is stored as JSONB so the restore path can deserialize it without
+    /// a per-overwrite join.
+    async fn save_snapshot(&self, snapshot: &ChannelSnapshot) -> Result<(), PersistenceError> {
+        let channels = serde_json::to_value(&snapshot.channels)?;
+        sqlx::query!(
+            "INSERT INTO channel_perms_snapshot (guild_id, saved_at, format_version, channels) \
+             VALUES ($1, $2, $3, $4)",
+            snapshot.guild_id.0 as i64,
+            snapshot.saved_at,
+            snapshot.format_version as i32,
+            channels,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The most recent snapshot for `guild`, ordered by `saved_at DESC` so the
+    /// same newest-first rule the in-memory store enforces by insertion-order also
+    /// holds in Postgres.
+    async fn latest_snapshot(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<ChannelSnapshot>, PersistenceError> {
+        let row = sqlx::query!(
+            r#"SELECT format_version, guild_id, saved_at,
+                      channels AS "channels: serde_json::Value"
+               FROM channel_perms_snapshot
+               WHERE guild_id = $1
+               ORDER BY saved_at DESC LIMIT 1"#,
+            guild.0 as i64,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        let channels = serde_json::from_value(r.channels)?;
+        Ok(Some(ChannelSnapshot {
+            format_version: r.format_version as u32,
+            guild_id: DiscordGuildId(r.guild_id as u64),
+            saved_at: r.saved_at,
+            channels,
+        }))
+    }
+
+    /// All snapshots' metadata for `guild`, newest first - for the restore picker. Uses
+    /// `jsonb_array_length` so only the length, not the full channel data, crosses the
+    /// wire.
+    async fn list_snapshots(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Vec<SnapshotMeta>, PersistenceError> {
+        let rows = sqlx::query!(
+            r#"SELECT saved_at, jsonb_array_length(channels) AS "channel_count!"
+               FROM channel_perms_snapshot
+               WHERE guild_id = $1
+               ORDER BY saved_at DESC"#,
+            guild.0 as i64,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| SnapshotMeta {
+                saved_at: r.saved_at,
+                channel_count: r.channel_count as usize,
+            })
+            .collect())
     }
 }

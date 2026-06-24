@@ -16,4 +16,7 @@ pub enum PersistenceError {
     /// out-of-date row, surfaced rather than silently coerced to a default.
     #[error("corrupt stored token: {0}")]
     BadToken(String),
+    /// A JSON encode/decode failure (JSONB column round-trip for snapshot channels).
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
 }
