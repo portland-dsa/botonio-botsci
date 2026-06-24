@@ -18,6 +18,7 @@ use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, 
 use crate::backends::solidarity_tech::{
     DuesStatus, MembershipType, SolidarityTechClient, SolidarityTechMember,
 };
+use crate::channels::snapshot::{ChannelSnapshot, SnapshotMeta};
 use crate::paging::drain_pages;
 use crate::seam::NoProgress;
 use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
@@ -538,6 +539,9 @@ pub struct InMemoryStore {
     /// bulk_verify_session/miss tables). `BTreeMap<position, BulkQueueEntry>` keeps the
     /// queue ordered; the option is the at-most-one session.
     bulk: RwLock<Option<(BulkSession, std::collections::BTreeMap<i32, BulkQueueEntry>)>>,
+    /// Channel-permission snapshots, in insertion order. Newest is last. The
+    /// in-memory analogue of a future snapshots table.
+    snapshots: RwLock<Vec<ChannelSnapshot>>,
 }
 
 impl InMemoryStore {
@@ -548,6 +552,7 @@ impl InMemoryStore {
             config: RwLock::new(GuildConfig::default()),
             overrides: RwLock::new(HashMap::new()),
             bulk: RwLock::new(None),
+            snapshots: RwLock::new(Vec::new()),
         }
     }
 
@@ -788,6 +793,70 @@ impl BulkSessionStore for InMemoryStore {
             s.updated_at = Utc::now();
         }
         Ok(())
+    }
+}
+
+/// Persist and recall whole-guild channel-permission snapshots - the save/restore
+/// behind the terraform's disaster recovery. Fallible from the start, like the
+/// other store traits; the in-memory impl's [`Error`](ChannelSnapshotStore::Error)
+/// is [`Infallible`].
+#[async_trait]
+pub trait ChannelSnapshotStore: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Append a snapshot (history is kept; never overwrite an earlier one).
+    async fn save_snapshot(&self, snapshot: &ChannelSnapshot) -> Result<(), Self::Error>;
+
+    /// The most recent snapshot for `guild`, or `None` if none was ever saved.
+    async fn latest_snapshot(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<ChannelSnapshot>, Self::Error>;
+
+    /// All snapshots' metadata for `guild`, newest first - for the restore picker.
+    async fn list_snapshots(&self, guild: DiscordGuildId)
+    -> Result<Vec<SnapshotMeta>, Self::Error>;
+}
+
+#[async_trait]
+impl ChannelSnapshotStore for InMemoryStore {
+    type Error = Infallible;
+
+    async fn save_snapshot(&self, snapshot: &ChannelSnapshot) -> Result<(), Infallible> {
+        self.snapshots
+            .write()
+            .expect("snapshots lock poisoned")
+            .push(snapshot.clone());
+        Ok(())
+    }
+
+    async fn latest_snapshot(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<ChannelSnapshot>, Infallible> {
+        Ok(self
+            .snapshots
+            .read()
+            .expect("snapshots lock poisoned")
+            .iter()
+            .filter(|s| s.guild_id == guild)
+            .last()
+            .cloned())
+    }
+
+    async fn list_snapshots(&self, guild: DiscordGuildId) -> Result<Vec<SnapshotMeta>, Infallible> {
+        let guard = self.snapshots.read().expect("snapshots lock poisoned");
+        let mut metas: Vec<SnapshotMeta> = guard
+            .iter()
+            .filter(|s| s.guild_id == guild)
+            .map(|s| SnapshotMeta {
+                saved_at: s.saved_at,
+                channel_count: s.channels.len(),
+            })
+            .collect();
+        // Newest first for the restore picker.
+        metas.reverse();
+        Ok(metas)
     }
 }
 
@@ -1065,5 +1134,54 @@ mod tests {
         assert_eq!(BulkScope::from_token("nonsense"), None);
         assert_eq!(BulkStatus::from_token("nonsense"), None);
         assert_eq!(MissState::from_token("nonsense"), None);
+    }
+
+    // Helpers for snapshot tests.
+    fn empty_snapshot(guild: u64, saved_at: chrono::DateTime<Utc>) -> ChannelSnapshot {
+        ChannelSnapshot {
+            format_version: crate::channels::snapshot::SNAPSHOT_FORMAT_VERSION,
+            guild_id: domain::DiscordGuildId(guild),
+            saved_at,
+            channels: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_save_latest_and_list() {
+        use chrono::TimeZone;
+        let store = InMemoryStore::new(Index::default_for_test());
+        let guild = domain::DiscordGuildId(100);
+        let other = domain::DiscordGuildId(999);
+
+        let t1 = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let t2 = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+
+        // Nothing saved yet.
+        assert!(store.latest_snapshot(guild).await.unwrap().is_none());
+        assert!(store.list_snapshots(guild).await.unwrap().is_empty());
+
+        let s1 = empty_snapshot(guild.0, t1);
+        let s2 = empty_snapshot(guild.0, t2);
+        let s_other = empty_snapshot(other.0, t1);
+
+        store.save_snapshot(&s1).await.unwrap();
+        store.save_snapshot(&s_other).await.unwrap(); // different guild - must not affect guild
+        store.save_snapshot(&s2).await.unwrap();
+
+        // latest returns the most recently saved for this guild.
+        assert_eq!(
+            store.latest_snapshot(guild).await.unwrap(),
+            Some(s2.clone())
+        );
+
+        // list returns newest first.
+        let metas = store.list_snapshots(guild).await.unwrap();
+        assert_eq!(metas.len(), 2);
+        assert_eq!(metas[0].saved_at, t2);
+        assert_eq!(metas[1].saved_at, t1);
+
+        // other guild has its own snapshot, not leaking into guild.
+        assert_eq!(store.latest_snapshot(other).await.unwrap(), Some(s_other));
+        assert_eq!(store.list_snapshots(other).await.unwrap().len(), 1);
     }
 }

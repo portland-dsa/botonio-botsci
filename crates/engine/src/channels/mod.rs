@@ -9,9 +9,11 @@
 
 mod model;
 mod plan;
+pub(crate) mod snapshot;
 
 pub use model::SetupConfig;
 pub use plan::{
     ChannelAction, ChannelPlan, DesyncReport, PlanCounts, PlannedChannel, desync_report,
     resolve_plan, verification_breaches,
 };
+pub use snapshot::{ChannelSnapshot, SavedChannel, SnapshotMeta};
