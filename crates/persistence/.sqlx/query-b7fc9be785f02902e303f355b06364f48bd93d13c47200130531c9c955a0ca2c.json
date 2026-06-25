@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT grace_until, granted_by, granted_at, reason\n               FROM dues_grace_override\n               WHERE guild_id = $1 AND discord_user_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "grace_until",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "dues_grace_override",
+            "name": "grace_until"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "granted_by",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "dues_grace_override",
+            "name": "granted_by"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "granted_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "dues_grace_override",
+            "name": "granted_at"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "reason",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "dues_grace_override",
+            "name": "reason"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "b7fc9be785f02902e303f355b06364f48bd93d13c47200130531c9c955a0ca2c"
+}

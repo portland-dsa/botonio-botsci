@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO guild_config\n                 (guild_id, moderator_role_id, member_role_id, dues_expired_role_id,\n                  unverified_role_id, manual_override_role_id, mod_approval_channel_id,\n                  unverified_channel_id, dues_expired_channel_id,\n                  verification_log_channel_id, dues_reminder_channel_id,\n                  dues_signup_url, reminders_enabled, scan_enabled, updated_at)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())\n               ON CONFLICT (guild_id) DO UPDATE SET\n                 moderator_role_id           = EXCLUDED.moderator_role_id,\n                 member_role_id              = EXCLUDED.member_role_id,\n                 dues_expired_role_id        = EXCLUDED.dues_expired_role_id,\n                 unverified_role_id          = EXCLUDED.unverified_role_id,\n                 manual_override_role_id     = EXCLUDED.manual_override_role_id,\n                 mod_approval_channel_id     = EXCLUDED.mod_approval_channel_id,\n                 unverified_channel_id       = EXCLUDED.unverified_channel_id,\n                 dues_expired_channel_id     = EXCLUDED.dues_expired_channel_id,\n                 verification_log_channel_id = EXCLUDED.verification_log_channel_id,\n                 dues_reminder_channel_id    = EXCLUDED.dues_reminder_channel_id,\n                 dues_signup_url             = EXCLUDED.dues_signup_url,\n                 reminders_enabled           = EXCLUDED.reminders_enabled,\n                 scan_enabled                = EXCLUDED.scan_enabled,\n                 updated_at                  = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d0e60cb70d27eaa17eecdc2d081979297ff4b251907707deb008a518f9f627fe"
+}

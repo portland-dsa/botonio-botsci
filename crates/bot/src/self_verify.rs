@@ -253,6 +253,7 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
         &discord,
         &*data.store,
         &*data.auditor,
+        data.config.guild(),
     );
     let target = Target {
         id: member_id,
@@ -429,6 +430,7 @@ async fn review_reverify(
         &discord,
         &*data.store,
         &*data.auditor,
+        data.config.guild(),
     );
     let invoker = DiscordUserId(c.user.id.get());
     let outcome = VerifyMember::new(
@@ -567,6 +569,7 @@ async fn review_override_submit(
         &discord,
         &*data.store,
         &*data.auditor,
+        data.config.guild(),
     );
     let invoker = DiscordUserId(m.user.id.get());
     match VerifyMember::new(

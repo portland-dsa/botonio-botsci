@@ -4,7 +4,7 @@ use chrono::NaiveDate;
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 
 use domain::{MigsStatus, Role};
-use engine::store::{MemberRecord, OverrideRecord};
+use engine::store::{GraceOverride, MemberRecord, OverrideRecord};
 
 pub const COLOR_GREEN: u32 = 0x3b_a5_5d;
 pub const COLOR_AMBER: u32 = 0xfa_a6_1a;
@@ -15,12 +15,17 @@ const SOON_DAYS: i64 = 30;
 
 /// Build the self-card embed. `display_name` is the Discord nickname/global name;
 /// `pronouns` is appended to the title only when present. `today` is injected for
-/// deterministic colour tests.
+/// deterministic colour tests. `grace` adds a banner field when the member is under
+/// a moderator grace window - shown alongside (not replacing) the Solidarity Tech
+/// status. `show_reason` gates the mod-supplied grace reason: it is drawn only on a
+/// moderator-facing view (a lookup of another member), never on the member's own card.
 pub fn membership_card(
     rec: &MemberRecord,
     display_name: &str,
     pronouns: Option<&str>,
     today: NaiveDate,
+    grace: Option<&GraceOverride>,
+    show_reason: bool,
 ) -> CreateEmbed {
     let title = match pronouns {
         Some(p) => format!("{display_name} · {p}"),
@@ -45,9 +50,28 @@ pub fn membership_card(
         embed = embed.field("Expires", x.format("%b %-d, %Y").to_string(), true);
     }
     embed = embed.field("Email", rec.email.as_str(), false);
+    if let Some(g) = grace {
+        embed = embed.field("Grace", grace_banner_value(g, show_reason), false);
+    }
     embed.footer(serenity::all::CreateEmbedFooter::new(
         "Pulled from Solidarity Tech · PDX DSA",
     ))
+}
+
+/// Format the grace banner field value: "On grace until <date>, granted by <@id>"
+/// with an optional reason appended on the next line when `show_reason` is true.
+/// The base line (date + grantor) is always shown; the reason is moderator-only context.
+fn grace_banner_value(g: &GraceOverride, show_reason: bool) -> String {
+    let date = g.until.format("%b %-d, %Y");
+    let base = format!("On grace until {date}, granted by <@{}>", g.granted_by.0);
+    if show_reason {
+        match g.reason.as_deref() {
+            Some(r) if !r.is_empty() => format!("{base}\n{r}"),
+            _ => base,
+        }
+    } else {
+        base
+    }
 }
 
 /// Build the card for a manually-verified member - one Solidarity Tech does not know,
@@ -176,6 +200,8 @@ mod tests {
             "rose",
             Some("she/her"),
             today,
+            None,
+            false,
         );
         assert_eq!(json(e)["color"].as_u64(), Some(COLOR_GREEN as u64));
     }
@@ -191,6 +217,8 @@ mod tests {
             "rose",
             None,
             today,
+            None,
+            false,
         );
         assert_eq!(json(e)["color"].as_u64(), Some(COLOR_AMBER as u64));
     }
@@ -198,7 +226,14 @@ mod tests {
     #[test]
     fn lapsed_is_red() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let e = membership_card(&rec(Some(MigsStatus::Lapsed), None), "rose", None, today);
+        let e = membership_card(
+            &rec(Some(MigsStatus::Lapsed), None),
+            "rose",
+            None,
+            today,
+            None,
+            false,
+        );
         assert_eq!(json(e)["color"].as_u64(), Some(COLOR_RED as u64));
     }
 
@@ -213,6 +248,8 @@ mod tests {
             "rose",
             None,
             today,
+            None,
+            false,
         );
         let v = json(e);
         assert_eq!(v["color"].as_u64(), Some(COLOR_GREEN as u64));
@@ -228,6 +265,8 @@ mod tests {
             "rose",
             None,
             today,
+            None,
+            false,
         );
         assert_eq!(json(e)["title"], "rose");
     }
@@ -240,6 +279,8 @@ mod tests {
             "rose",
             Some("she/her"),
             today,
+            None,
+            false,
         );
         assert_eq!(json(e)["title"], "rose · she/her");
     }
@@ -248,7 +289,14 @@ mod tests {
     fn role_field_uses_guild_facing_label_not_debug() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         // Lapsed standing -> role() == DuesExpired; the field must read "Dues Expired".
-        let e = membership_card(&rec(Some(MigsStatus::Lapsed), None), "rose", None, today);
+        let e = membership_card(
+            &rec(Some(MigsStatus::Lapsed), None),
+            "rose",
+            None,
+            today,
+            None,
+            false,
+        );
         assert_eq!(
             field_value(&json(e), "Role").as_deref(),
             Some("Dues Expired")
@@ -264,6 +312,8 @@ mod tests {
             "rose",
             None,
             today,
+            None,
+            false,
         );
         assert_eq!(
             json(e)["description"],
@@ -279,6 +329,8 @@ mod tests {
             "rose",
             None,
             today,
+            None,
+            false,
         );
         let v = json(e);
         let desc = v["description"].as_str().unwrap();
@@ -390,6 +442,8 @@ mod tests {
             &long,
             None,
             today,
+            None,
+            false,
         );
         assert_eq!(json(e)["title"].as_str().unwrap().len(), 200);
     }
@@ -405,6 +459,8 @@ mod tests {
             "rose",
             None,
             today,
+            None,
+            false,
         );
         let v = json(e);
         let fields = v["fields"].as_array().unwrap();
@@ -425,7 +481,113 @@ mod tests {
         // A record with no standing (malformed) must show "Unknown" in the Role field,
         // not a misleading "Unverified" from the old shim default.
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-        let e = membership_card(&rec(None, None), "rose", None, today);
+        let e = membership_card(&rec(None, None), "rose", None, today, None, false);
         assert_eq!(field_value(&json(e), "Role").as_deref(), Some("Unknown"));
+    }
+
+    #[test]
+    fn grace_banner_appears_alongside_st_status() {
+        use chrono::{DateTime, Utc};
+        use engine::backends::util::DiscordUserId;
+        let today = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let until = NaiveDate::from_ymd_opt(2026, 7, 31).unwrap();
+        let grace = GraceOverride {
+            until,
+            granted_by: DiscordUserId(99),
+            granted_at: DateTime::<Utc>::from_naive_utc_and_offset(
+                today.and_hms_opt(0, 0, 0).unwrap(),
+                Utc,
+            ),
+            reason: Some("annual hardship waiver".to_string()),
+        };
+        let e = membership_card(
+            &rec(Some(MigsStatus::Lapsed), None),
+            "amy",
+            None,
+            today,
+            Some(&grace),
+            true,
+        );
+        let v = json(e);
+        // The ST-derived status is still present in the description.
+        assert!(v["description"].as_str().unwrap().contains("Lapsed"));
+        // The grace banner field exists and contains the date, the grantor mention,
+        // and the reason (show_reason = true, the mod-facing path).
+        let banner = field_value(&v, "Grace").expect("Grace field must be present");
+        assert!(banner.contains("Jul 31, 2026"), "must show until date");
+        assert!(banner.contains("<@99>"), "must mention the grantor");
+        assert!(
+            banner.contains("annual hardship waiver"),
+            "must include the reason"
+        );
+    }
+
+    #[test]
+    fn grace_banner_omits_reason_when_absent() {
+        use chrono::{DateTime, Utc};
+        use engine::backends::util::DiscordUserId;
+        let today = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let until = NaiveDate::from_ymd_opt(2026, 7, 31).unwrap();
+        let grace = GraceOverride {
+            until,
+            granted_by: DiscordUserId(99),
+            granted_at: DateTime::<Utc>::from_naive_utc_and_offset(
+                today.and_hms_opt(0, 0, 0).unwrap(),
+                Utc,
+            ),
+            reason: None,
+        };
+        let e = membership_card(
+            &rec(Some(MigsStatus::Lapsed), None),
+            "amy",
+            None,
+            today,
+            Some(&grace),
+            false,
+        );
+        let banner = field_value(&json(e), "Grace").expect("Grace field must be present");
+        assert!(!banner.contains('\n'), "no newline when reason is absent");
+    }
+
+    #[test]
+    fn grace_banner_hides_reason_on_self_card() {
+        // The reason is moderator-only context: a member viewing their own card
+        // (show_reason = false) must not see the reason text, even when one is present.
+        // The base "On grace until ..." line must still appear.
+        use chrono::{DateTime, Utc};
+        use engine::backends::util::DiscordUserId;
+        let today = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
+        let until = NaiveDate::from_ymd_opt(2026, 7, 31).unwrap();
+        let grace = GraceOverride {
+            until,
+            granted_by: DiscordUserId(99),
+            granted_at: DateTime::<Utc>::from_naive_utc_and_offset(
+                today.and_hms_opt(0, 0, 0).unwrap(),
+                Utc,
+            ),
+            reason: Some("annual hardship waiver".to_string()),
+        };
+        let e = membership_card(
+            &rec(Some(MigsStatus::Lapsed), None),
+            "amy",
+            None,
+            today,
+            Some(&grace),
+            false,
+        );
+        let banner = field_value(&json(e), "Grace").expect("Grace field must be present");
+        assert!(
+            banner.contains("Jul 31, 2026"),
+            "base date must still appear"
+        );
+        assert!(
+            banner.contains("<@99>"),
+            "grantor mention must still appear"
+        );
+        assert!(
+            !banner.contains("annual hardship waiver"),
+            "reason must be absent on self-card"
+        );
+        assert!(!banner.contains('\n'), "no newline when reason is hidden");
     }
 }

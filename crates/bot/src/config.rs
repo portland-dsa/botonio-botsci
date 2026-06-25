@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use domain::DiscordGuildId;
 use secrecy::SecretString;
 
 /// Default index refresh cadence when `BOT_INDEX_REFRESH_SECS` is unset/invalid.
@@ -49,6 +50,17 @@ pub struct BotConfig {
     pub scan_tripwire_floor: usize,
     /// Pause between role writes during the scan's apply phase.
     pub scan_pace: Duration,
+    /// A reminder sweep whose gap since the last run exceeds this is treated as a
+    /// catch-up (round-to-nearest) pass rather than firing exact crossings.
+    pub reminder_catchup_gap: std::time::Duration,
+}
+
+impl BotConfig {
+    /// The home guild as a typed id. The bot serves exactly one guild; this is the wrapped form
+    /// the command and sweep call sites use instead of re-wrapping `guild_id` at each one.
+    pub fn guild(&self) -> DiscordGuildId {
+        DiscordGuildId(self.guild_id)
+    }
 }
 
 /// Everything that can go wrong reading config.
@@ -98,6 +110,11 @@ impl BotConfig {
         let scan_tripwire_floor =
             parse_tripwire_floor(std::env::var("BOT_SCAN_TRIPWIRE_FLOOR").ok().as_deref());
         let scan_pace = parse_scan_pace(std::env::var("BOT_SCAN_PACE_MS").ok().as_deref());
+        let reminder_catchup_gap = parse_reminder_catchup_gap(
+            std::env::var("BOT_REMINDER_CATCHUP_GAP_SECS")
+                .ok()
+                .as_deref(),
+        );
         Ok(Self {
             token,
             guild_id,
@@ -113,6 +130,7 @@ impl BotConfig {
             scan_tripwire_percent,
             scan_tripwire_floor,
             scan_pace,
+            reminder_catchup_gap,
         })
     }
 }
@@ -196,6 +214,18 @@ fn parse_scan_pace(raw: Option<&str>) -> Duration {
         .unwrap_or(DEFAULT_SCAN_PACE)
 }
 
+/// Default catch-up threshold: ~25h, comfortably past the ~4h sweep cadence, so a brief
+/// restart stays "timely" and only a real outage triggers the round-to-nearest collapse.
+const DEFAULT_REMINDER_CATCHUP_GAP_SECS: u64 = 90_000;
+
+fn parse_reminder_catchup_gap(raw: Option<&str>) -> std::time::Duration {
+    let secs = raw
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_REMINDER_CATCHUP_GAP_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +300,21 @@ mod tests {
         assert_eq!(parse_tripwire_floor(Some("10")), 10);
         assert_eq!(parse_scan_pace(None), DEFAULT_SCAN_PACE);
         assert_eq!(parse_scan_pace(Some("500")), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn reminder_catchup_gap_defaults_and_rejects_zero() {
+        assert_eq!(
+            parse_reminder_catchup_gap(None),
+            Duration::from_secs(DEFAULT_REMINDER_CATCHUP_GAP_SECS)
+        );
+        assert_eq!(
+            parse_reminder_catchup_gap(Some("0")),
+            Duration::from_secs(DEFAULT_REMINDER_CATCHUP_GAP_SECS)
+        );
+        assert_eq!(
+            parse_reminder_catchup_gap(Some("3600")),
+            Duration::from_secs(3_600)
+        );
     }
 }

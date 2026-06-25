@@ -2,6 +2,7 @@ pub mod bulk_verify;
 pub mod card;
 pub mod help;
 pub mod modal;
+pub mod reminders;
 pub mod scan;
 pub mod self_verify;
 pub mod setup;

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dues_reminder_run (guild_id, last_run_at)\n               VALUES ($1, $2)\n               ON CONFLICT (guild_id) DO UPDATE SET last_run_at = EXCLUDED.last_run_at",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d828286ced064fb7171f3c487a105a64c5aba0786a7357ad65c15d9b7d6b3139"
+}

@@ -3,9 +3,9 @@
 use crate::audit::AuditLog;
 use crate::backends::discord::DiscordClient;
 use crate::backends::solidarity_tech::SolidarityTechClient;
-use crate::store::{IdentityWrite, MemberRecord, MemberStore, OverrideLog};
+use crate::store::{GraceStore, IdentityWrite, MemberRecord, MemberStore, OverrideLog};
 use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-use domain::Role;
+use domain::{DiscordGuildId, Role};
 
 use super::decision::{HealAction, Located};
 use super::facade::{Heal, MemberError, MemberRead, MemberWrite};
@@ -22,16 +22,24 @@ pub struct DataStore<'a, St, Dc, S, A> {
     discord: &'a Dc,
     store: &'a S,
     audit: &'a A,
+    guild: DiscordGuildId,
 }
 
 impl<'a, St, Dc, S, A> DataStore<'a, St, Dc, S, A> {
-    /// Bundle the four backends into one facade value.
-    pub fn new(st: &'a St, discord: &'a Dc, store: &'a S, audit: &'a A) -> Self {
+    /// Bundle the four backends plus the guild into one facade value.
+    pub fn new(
+        st: &'a St,
+        discord: &'a Dc,
+        store: &'a S,
+        audit: &'a A,
+        guild: DiscordGuildId,
+    ) -> Self {
         Self {
             st,
             discord,
             store,
             audit,
+            guild,
         }
     }
 }
@@ -41,7 +49,7 @@ impl<St, Dc, S, A> MemberRead for DataStore<'_, St, Dc, S, A>
 where
     St: SolidarityTechClient,
     Dc: DiscordClient,
-    S: MemberStore + IdentityWrite + OverrideLog,
+    S: MemberStore + IdentityWrite + OverrideLog + GraceStore,
     A: AuditLog,
 {
     async fn lookup(
@@ -71,6 +79,14 @@ where
             .map_err(|e| MemberError::Discord(e.to_string()))?
             .held)
     }
+
+    async fn active_grace(&self, id: DiscordUserId) -> Result<bool, MemberError> {
+        let today = chrono::Utc::now().date_naive();
+        self.store
+            .active_grace(self.guild, id, today)
+            .await
+            .map_err(|e| MemberError::Store(e.to_string()))
+    }
 }
 
 #[async_trait::async_trait]
@@ -78,7 +94,7 @@ impl<St, Dc, S, A> MemberWrite for DataStore<'_, St, Dc, S, A>
 where
     St: SolidarityTechClient,
     Dc: DiscordClient,
-    S: MemberStore + IdentityWrite + OverrideLog,
+    S: MemberStore + IdentityWrite + OverrideLog + GraceStore,
     A: AuditLog,
 {
     async fn assign_role(&self, id: DiscordUserId, role: Role) -> Result<(), MemberError> {
@@ -210,7 +226,7 @@ impl<St, Dc, S, A> Heal for DataStore<'_, St, Dc, S, A>
 where
     St: SolidarityTechClient,
     Dc: DiscordClient,
-    S: MemberStore + IdentityWrite + OverrideLog,
+    S: MemberStore + IdentityWrite + OverrideLog + GraceStore,
     A: AuditLog,
 {
 }
@@ -266,7 +282,7 @@ mod datastore_tests {
         let st = FakeSolidarityTech::new();
         let store = InMemoryStore::new(Index::default());
         let audit = NoopAudit;
-        let ds = DataStore::new(&st, &discord, &store, &audit);
+        let ds = DataStore::new(&st, &discord, &store, &audit, DiscordGuildId(1));
 
         ds.assign_role(DiscordUserId(7), Role::Member)
             .await
@@ -291,7 +307,7 @@ mod datastore_tests {
         let discord = FakeDiscord::new();
         let store = InMemoryStore::new(Index::default());
         let audit = NoopAudit;
-        let ds = DataStore::new(&st, &discord, &store, &audit);
+        let ds = DataStore::new(&st, &discord, &store, &audit, DiscordGuildId(1));
 
         ds.self_heal(
             &record,
@@ -316,7 +332,7 @@ mod datastore_tests {
         let discord = FakeDiscord::new();
         let store = InMemoryStore::new(Index::default());
         let audit = NoopAudit;
-        let ds = DataStore::new(&st, &discord, &store, &audit);
+        let ds = DataStore::new(&st, &discord, &store, &audit, DiscordGuildId(1));
 
         ds.self_heal(
             &record,
@@ -350,7 +366,7 @@ mod datastore_tests {
         // Seed the cache with the stale handle so a stray link_cache would be observable.
         let store = InMemoryStore::new(Index::from_records(vec![linked_record("st-7", 7, "old")]));
         let audit = NoopAudit;
-        let ds = DataStore::new(&st, &discord, &store, &audit);
+        let ds = DataStore::new(&st, &discord, &store, &audit, DiscordGuildId(1));
 
         let err = ds
             .self_heal(
@@ -382,7 +398,7 @@ mod datastore_tests {
         let st = FakeSolidarityTech::new();
         let store = InMemoryStore::new(Index::default());
         let audit = NoopAudit;
-        let ds = DataStore::new(&st, &discord, &store, &audit);
+        let ds = DataStore::new(&st, &discord, &store, &audit, DiscordGuildId(1));
 
         let err = ds
             .assign_role(DiscordUserId(7), Role::Member)

@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS(\n                   SELECT 1 FROM dues_reminder_optout\n                   WHERE guild_id = $1 AND discord_user_id = $2\n               ) AS \"opted_out!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "opted_out!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2e1b9a12dba6609a1fdc4f44b7c229b135487b10b6e5a4db2bf4765aea4b8aea"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM dues_grace_override WHERE guild_id = $1 AND discord_user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ac3db5f7d749c982c249829d049dae1b7ae2a745464eac89d681917e70c52ea4"
+}

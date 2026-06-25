@@ -19,4 +19,7 @@ pub use decision::{
     EmailMatchOutcome, HealAction, Located, MatchOutcome, decide, locate, match_by_email,
 };
 pub use facade::{Heal, MemberError, MemberRead, MemberWrite};
+/// The shared "grace forces Member, else standing-derived role" decision, reused by the
+/// scheduled scan so it cannot drift from the verify path.
+pub(crate) use member::effective_role;
 pub use member::{EmailGrant, Member, ResyncOutcome, StripOutcome, Target, VerifyOutcome};

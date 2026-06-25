@@ -52,6 +52,24 @@ pub fn config_embed(cfg: &GuildConfig, accent: u32) -> CreateEmbed {
             false,
         )
         .field(
+            "Dues-reminder channel",
+            channel_line(cfg.dues_reminder_channel),
+            false,
+        )
+        .field(
+            "Dues sign-up URL",
+            cfg.dues_signup_url
+                .as_deref()
+                .unwrap_or("_not set_")
+                .to_owned(),
+            false,
+        )
+        .field(
+            "Dues reminders",
+            if cfg.reminders_enabled { "On" } else { "Off" },
+            false,
+        )
+        .field(
             "Scheduled scan",
             if cfg.scan_enabled { "On" } else { "Off" },
             false,

@@ -42,6 +42,7 @@ pub async fn forget(
         &discord,
         &*data.store,
         &*data.auditor,
+        data.config.guild(),
     );
     match Member::new(
         &store,

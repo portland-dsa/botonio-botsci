@@ -202,6 +202,14 @@ pub struct GuildConfig {
     /// verification - the member and the email that matched. Unset by default;
     /// when unset the grant still happens and only the log post is skipped.
     pub verification_log_channel: Option<DiscordChannelId>,
+    /// The channel the dues-reminder private threads are parented off. Must be visible to
+    /// both `Member` and `Dues Expired` so a member's thread survives their lapse demotion.
+    pub dues_reminder_channel: Option<DiscordChannelId>,
+    /// The external dues sign-up page the reminder "Renew" button links to.
+    pub dues_signup_url: Option<String>,
+    /// Whether the dues-reminder sweep runs for this guild. Off by default, like
+    /// [`scan_enabled`](Self::scan_enabled); the two toggle independently.
+    pub reminders_enabled: bool,
     /// Whether the scheduled membership scan runs for this guild. Off by default - the
     /// scan reconciles roles and can demote, so it is opt-in via /setup.
     pub scan_enabled: bool,
@@ -229,6 +237,12 @@ pub trait MemberStore: Send + Sync {
     /// misses, and the conflict guard still refuses to re-link a record already bound to a
     /// different id.
     async fn by_handle(&self, handle: &DiscordHandle) -> Result<Option<MemberRecord>, Self::Error>;
+
+    /// Every record currently in the roster, in unspecified order. The reminder planner
+    /// iterates the whole cached roster once per sweep to build the plan. The
+    /// `InMemoryStore` impl clones its index's records; the `PgStore` impl runs
+    /// `SELECT * FROM member_cache`.
+    async fn all_records(&self) -> Result<Vec<MemberRecord>, Self::Error>;
 }
 
 /// Replace the whole cached roster in one shot - the write half of a refresh sweep.
@@ -304,6 +318,52 @@ pub struct OverrideRecord {
     pub note: Option<String>,
 }
 
+/// Who set a dues-reminder opt-out - a member pressing the button, or a moderator by
+/// hand. Stored for the audit/analytics trail on `dues_reminder_optout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptOutSource {
+    Member,
+    Moderator,
+}
+
+impl OptOutSource {
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Moderator => "mod",
+        }
+    }
+    pub fn from_token(s: &str) -> Option<Self> {
+        match s {
+            "member" => Some(Self::Member),
+            "mod" => Some(Self::Moderator),
+            _ => None,
+        }
+    }
+}
+
+/// One member's per-cycle reminder bookkeeping. `cycle_xdate` ties `last_sent` and
+/// `snoozed` to a specific lapse date: when the member's record shows a different
+/// `expires`, the cycle has turned and the planner treats `last_sent`/`snoozed` as
+/// reset. `thread_id` is the member's lifecycle thread and survives the reset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderCycleState {
+    pub cycle_xdate: NaiveDate,
+    pub last_sent: Option<crate::reminders::Milestone>,
+    pub snoozed: bool,
+    pub thread_id: Option<i64>,
+}
+
+/// A moderator grace stamp: hold this member at `Member` until `until` (inclusive),
+/// ignoring their dues. Active while `until >= today`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraceOverride {
+    pub until: NaiveDate,
+    pub granted_by: DiscordUserId,
+    pub granted_at: DateTime<Utc>,
+    pub reason: Option<String>,
+}
+
 /// Record and clear the permanent note that a member was hand-approved past Solidarity
 /// Tech. Keyed on the immutable Discord id - an overridden member has no Solidarity Tech
 /// id to key on. [`stamp_override`](Self::stamp_override) is insert-once: a second stamp
@@ -336,6 +396,150 @@ pub trait OverrideLog: Send + Sync {
     /// Reachable only through the staging-gated reset; production withholds the `DELETE`
     /// grant, so this fails closed there.
     async fn delete_override(&self, subject: DiscordUserId) -> Result<(), Self::Error>;
+}
+
+/// The moderator grace override: hold a member at `Member` for a fixed window. Read by
+/// the shared role decision (so the scan and verify never demote a graced member) and by
+/// the reminder planner (its top gate). Keyed on the immutable Discord id.
+#[async_trait]
+pub trait GraceStore: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// Whether `id` has a grace active on `today` (its `until >= today`).
+    async fn active_grace(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        today: NaiveDate,
+    ) -> Result<bool, Self::Error>;
+
+    /// The full grace stamp (for the card banner), or `None` if there is none.
+    async fn grace_override(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<Option<GraceOverride>, Self::Error>;
+
+    /// Upsert a grace stamp (set or extend the window).
+    async fn set_grace(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        until: NaiveDate,
+        granted_by: DiscordUserId,
+        reason: Option<String>,
+    ) -> Result<(), Self::Error>;
+
+    /// Remove a member's grace stamp (lift it early). A member with none is a no-op.
+    async fn clear_grace(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<(), Self::Error>;
+}
+
+/// Per-member dues-reminder bookkeeping: the cycle state, the permanent opt-out, and the
+/// sweep's last-run marker. Keyed on the immutable Discord id.
+#[async_trait]
+pub trait ReminderStore: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// The member's cycle state, or `None` if they have never been reminded.
+    async fn reminder_state(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<Option<ReminderCycleState>, Self::Error>;
+
+    /// Record that `milestone` was sent for the cycle ending `cycle_xdate`, in
+    /// `thread_id`. Upserts: sets `last_sent = milestone`, `cycle_xdate`, `thread_id`,
+    /// and (when `cycle_xdate` differs from the stored one) resets `snoozed` to false.
+    async fn record_sent(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+        milestone: crate::reminders::Milestone,
+        thread_id: i64,
+    ) -> Result<(), Self::Error>;
+
+    /// Persist a member's lifecycle thread id without recording a send. Saves a freshly created
+    /// thread before its first message goes out, so a later send/record failure reuses that thread
+    /// rather than orphaning it and creating a duplicate next sweep. Upserts: sets `thread_id`,
+    /// preserving `last_sent`/`snoozed`/`cycle_xdate`; a new row is seeded with `cycle_xdate` and
+    /// no recorded milestone.
+    async fn set_thread(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+        thread_id: i64,
+    ) -> Result<(), Self::Error>;
+
+    /// Set the snooze for the cycle ending `cycle_xdate` (upserting the row if needed).
+    async fn set_snooze(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+    ) -> Result<(), Self::Error>;
+
+    /// Whether `id` has a permanent opt-out.
+    async fn is_opted_out(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<bool, Self::Error>;
+
+    /// Set the permanent opt-out (row presence = opted out).
+    async fn opt_out(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        source: OptOutSource,
+    ) -> Result<(), Self::Error>;
+
+    /// Clear the permanent opt-out (the moderator reversal). A member with none is a no-op.
+    async fn clear_opt_out(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<(), Self::Error>;
+
+    /// When the reminder sweep last completed for `guild`, or `None` if it never has.
+    async fn last_reminder_run(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<DateTime<Utc>>, Self::Error>;
+
+    /// Record that the sweep completed for `guild` at `at`.
+    async fn set_last_reminder_run(
+        &self,
+        guild: DiscordGuildId,
+        at: DateTime<Utc>,
+    ) -> Result<(), Self::Error>;
+}
+
+/// Read a guild's editable per-type reminder template bodies. An absent row is `None`;
+/// the bot's render layer supplies the built-in default.
+#[async_trait]
+pub trait ReminderTemplates: Send + Sync {
+    type Error: std::error::Error + Send + Sync + 'static;
+
+    /// The stored body for `kind`, or `None` to use the built-in default.
+    async fn template(
+        &self,
+        guild: DiscordGuildId,
+        kind: crate::reminders::ReminderTemplateKind,
+    ) -> Result<Option<String>, Self::Error>;
+
+    /// Upsert the body for `kind`.
+    async fn set_template(
+        &self,
+        guild: DiscordGuildId,
+        kind: crate::reminders::ReminderTemplateKind,
+        body: String,
+    ) -> Result<(), Self::Error>;
 }
 
 /// Which members `/bulk-verify` sweeps. The DB token spellings are owned here.
@@ -542,6 +746,16 @@ pub struct InMemoryStore {
     /// Channel-permission snapshots, in insertion order. Newest is last. The
     /// in-memory analogue of a future snapshots table.
     snapshots: RwLock<Vec<ChannelSnapshot>>,
+    /// Moderator grace stamps: Discord id to its [`GraceOverride`].
+    grace: RwLock<HashMap<u64, GraceOverride>>,
+    /// Per-member reminder cycle state: Discord id to its [`ReminderCycleState`].
+    reminder_state: RwLock<HashMap<u64, ReminderCycleState>>,
+    /// Permanent opt-outs: Discord id to the [`OptOutSource`] that set it.
+    opt_out: RwLock<HashMap<u64, OptOutSource>>,
+    /// Per-template-kind bodies: token string to body text.
+    templates: RwLock<HashMap<String, String>>,
+    /// When the reminder sweep last completed.
+    last_reminder_run: RwLock<Option<DateTime<Utc>>>,
 }
 
 impl InMemoryStore {
@@ -553,6 +767,11 @@ impl InMemoryStore {
             overrides: RwLock::new(HashMap::new()),
             bulk: RwLock::new(None),
             snapshots: RwLock::new(Vec::new()),
+            grace: RwLock::new(HashMap::new()),
+            reminder_state: RwLock::new(HashMap::new()),
+            opt_out: RwLock::new(HashMap::new()),
+            templates: RwLock::new(HashMap::new()),
+            last_reminder_run: RwLock::new(None),
         }
     }
 
@@ -595,6 +814,19 @@ impl MemberStore for InMemoryStore {
 
     async fn by_handle(&self, handle: &DiscordHandle) -> Result<Option<MemberRecord>, Infallible> {
         Ok(self.snapshot().by_handle(handle))
+    }
+
+    async fn all_records(&self) -> Result<Vec<MemberRecord>, Infallible> {
+        let snap = self.snapshot();
+        // Collect from both maps then dedup: a record with both a Discord id and a handle
+        // appears in both maps and collapses to one entry via `Index::from_records`'s rule.
+        let records: Vec<MemberRecord> = snap
+            .by_id
+            .values()
+            .chain(snap.by_handle.values())
+            .cloned()
+            .collect();
+        Ok(dedup_records(records))
     }
 }
 
@@ -856,6 +1088,250 @@ impl ChannelSnapshotStore for InMemoryStore {
         // Newest first for the restore picker.
         metas.reverse();
         Ok(metas)
+    }
+}
+
+#[async_trait]
+impl GraceStore for InMemoryStore {
+    type Error = Infallible;
+
+    async fn active_grace(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+        today: NaiveDate,
+    ) -> Result<bool, Infallible> {
+        Ok(self
+            .grace
+            .read()
+            .expect("grace lock poisoned")
+            .get(&id.0)
+            .map(|g| g.until >= today)
+            .unwrap_or(false))
+    }
+
+    async fn grace_override(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<Option<GraceOverride>, Infallible> {
+        Ok(self
+            .grace
+            .read()
+            .expect("grace lock poisoned")
+            .get(&id.0)
+            .cloned())
+    }
+
+    async fn set_grace(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+        until: NaiveDate,
+        granted_by: DiscordUserId,
+        reason: Option<String>,
+    ) -> Result<(), Infallible> {
+        self.grace.write().expect("grace lock poisoned").insert(
+            id.0,
+            GraceOverride {
+                until,
+                granted_by,
+                granted_at: Utc::now(),
+                reason,
+            },
+        );
+        Ok(())
+    }
+
+    async fn clear_grace(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<(), Infallible> {
+        self.grace
+            .write()
+            .expect("grace lock poisoned")
+            .remove(&id.0);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderStore for InMemoryStore {
+    type Error = Infallible;
+
+    async fn reminder_state(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<Option<ReminderCycleState>, Infallible> {
+        Ok(self
+            .reminder_state
+            .read()
+            .expect("reminder_state lock poisoned")
+            .get(&id.0)
+            .cloned())
+    }
+
+    async fn record_sent(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+        milestone: crate::reminders::Milestone,
+        thread_id: i64,
+    ) -> Result<(), Infallible> {
+        let mut guard = self
+            .reminder_state
+            .write()
+            .expect("reminder_state lock poisoned");
+        let entry = guard.entry(id.0).or_insert(ReminderCycleState {
+            cycle_xdate,
+            last_sent: None,
+            snoozed: false,
+            thread_id: None,
+        });
+        // New cycle: reset snooze; same cycle: preserve it.
+        if entry.cycle_xdate != cycle_xdate {
+            entry.snoozed = false;
+        }
+        entry.cycle_xdate = cycle_xdate;
+        entry.last_sent = Some(milestone);
+        entry.thread_id = Some(thread_id);
+        Ok(())
+    }
+
+    async fn set_thread(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+        thread_id: i64,
+    ) -> Result<(), Infallible> {
+        let mut guard = self
+            .reminder_state
+            .write()
+            .expect("reminder_state lock poisoned");
+        let entry = guard.entry(id.0).or_insert(ReminderCycleState {
+            cycle_xdate,
+            last_sent: None,
+            snoozed: false,
+            thread_id: None,
+        });
+        // Preserve the cycle, last_sent, and snooze; only stamp the thread id.
+        entry.thread_id = Some(thread_id);
+        Ok(())
+    }
+
+    async fn set_snooze(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+    ) -> Result<(), Infallible> {
+        let mut guard = self
+            .reminder_state
+            .write()
+            .expect("reminder_state lock poisoned");
+        let entry = guard.entry(id.0).or_insert(ReminderCycleState {
+            cycle_xdate,
+            last_sent: None,
+            snoozed: false,
+            thread_id: None,
+        });
+        entry.cycle_xdate = cycle_xdate;
+        entry.snoozed = true;
+        Ok(())
+    }
+
+    async fn is_opted_out(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<bool, Infallible> {
+        Ok(self
+            .opt_out
+            .read()
+            .expect("opt_out lock poisoned")
+            .contains_key(&id.0))
+    }
+
+    async fn opt_out(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+        source: OptOutSource,
+    ) -> Result<(), Infallible> {
+        self.opt_out
+            .write()
+            .expect("opt_out lock poisoned")
+            .insert(id.0, source);
+        Ok(())
+    }
+
+    async fn clear_opt_out(
+        &self,
+        _guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<(), Infallible> {
+        self.opt_out
+            .write()
+            .expect("opt_out lock poisoned")
+            .remove(&id.0);
+        Ok(())
+    }
+
+    async fn last_reminder_run(
+        &self,
+        _guild: DiscordGuildId,
+    ) -> Result<Option<DateTime<Utc>>, Infallible> {
+        Ok(*self
+            .last_reminder_run
+            .read()
+            .expect("last_reminder_run lock poisoned"))
+    }
+
+    async fn set_last_reminder_run(
+        &self,
+        _guild: DiscordGuildId,
+        at: DateTime<Utc>,
+    ) -> Result<(), Infallible> {
+        *self
+            .last_reminder_run
+            .write()
+            .expect("last_reminder_run lock poisoned") = Some(at);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderTemplates for InMemoryStore {
+    type Error = Infallible;
+
+    async fn template(
+        &self,
+        _guild: DiscordGuildId,
+        kind: crate::reminders::ReminderTemplateKind,
+    ) -> Result<Option<String>, Infallible> {
+        Ok(self
+            .templates
+            .read()
+            .expect("templates lock poisoned")
+            .get(kind.as_token())
+            .cloned())
+    }
+
+    async fn set_template(
+        &self,
+        _guild: DiscordGuildId,
+        kind: crate::reminders::ReminderTemplateKind,
+        body: String,
+    ) -> Result<(), Infallible> {
+        self.templates
+            .write()
+            .expect("templates lock poisoned")
+            .insert(kind.as_token().to_string(), body);
+        Ok(())
     }
 }
 

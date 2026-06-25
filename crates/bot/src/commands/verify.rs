@@ -9,11 +9,10 @@ use serenity::all::{
     CreateEmbed, CreateInteractionResponse, EditInteractionResponse, Message, User,
 };
 
+use domain::Role;
 use engine::backends::discord::DiscordHttp;
 use engine::backends::util::{DiscordHandle, DiscordUserId};
 use engine::verify::{DataStore, Member, Target, VerifyOutcome};
-
-use domain::Role;
 
 use crate::commands::reclick::{ReclickAction, reclick_action};
 use crate::data::{Context, Error};
@@ -109,6 +108,7 @@ pub async fn verify(
         &discord,
         &*data.store,
         &*data.auditor,
+        data.config.guild(),
     );
     let result = Member::new(
         &store,
@@ -420,6 +420,7 @@ pub(crate) async fn verify_step(
                 discord,
                 &*data.store,
                 &*data.auditor,
+                data.config.guild(),
             );
             let (next, outcome) = match Member::new(
                 &store,
@@ -519,6 +520,7 @@ pub(crate) async fn verify_step(
                     discord,
                     &*data.store,
                     &*data.auditor,
+                    data.config.guild(),
                 );
                 match Member::new(
                     &store,

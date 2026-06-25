@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM dues_reminder_optout WHERE guild_id = $1 AND discord_user_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f4efb64917307a15414bec0804197f5a0fde246249de7c3e164541432b55ad8b"
+}

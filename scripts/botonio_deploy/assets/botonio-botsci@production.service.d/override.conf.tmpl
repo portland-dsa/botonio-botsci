@@ -32,6 +32,12 @@ Environment=BOT_SCAN_TRIPWIRE_PERCENT=20
 Environment=BOT_SCAN_TRIPWIRE_FLOOR=5
 Environment=BOT_SCAN_PACE_MS=250
 
+# Dues-renewal reminders (run on the scan loop after role-sync; OFF until enabled per-guild in
+# /setup, reminders_enabled). BOT_REMINDER_CATCHUP_GAP_SECS is how long a gap since the last
+# sweep counts as a catch-up run (round to the nearest milestone) rather than a timely one;
+# 90000s = 25h, so only a real outage triggers catch-up and normal 4h sweeps stay timely.
+Environment=BOT_REMINDER_CATCHUP_GAP_SECS=90000
+
 # Local membership cache (Postgres). The runtime connection authenticates by peer over
 # the Unix socket - no password. The migrate phase (ExecStartPre) uses the migration
 # credential below over TCP loopback to apply the schema.

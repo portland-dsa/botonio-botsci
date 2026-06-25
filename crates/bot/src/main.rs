@@ -14,6 +14,7 @@ mod moderator;
 mod notify;
 mod ping;
 mod refresh;
+mod reminders;
 mod render;
 mod scan;
 mod self_verify;
@@ -178,6 +179,8 @@ async fn main() -> anyhow::Result<()> {
         floor: cfg.scan_tripwire_floor,
     };
     let scan_pace = cfg.scan_pace;
+    let scan_catchup_gap = cfg.reminder_catchup_gap;
+    let scan_accent = cfg.accent_color;
 
     let guild_id = cfg.guild_id;
     let token = secrecy::ExposeSecret::expose_secret(&cfg.token).to_owned();
@@ -227,6 +230,11 @@ async fn main() -> anyhow::Result<()> {
                         }
                         serenity::all::FullEvent::InteractionCreate { interaction } => {
                             crate::self_verify::on_interaction(ctx, interaction, data).await?;
+                            if let serenity::all::Interaction::Component(c) = interaction
+                                && c.data.custom_id.starts_with("dues_")
+                            {
+                                crate::reminders::on_component(ctx, c, data).await?;
+                            }
                         }
                         _ => {}
                     }
@@ -256,6 +264,8 @@ async fn main() -> anyhow::Result<()> {
                     scan_interval,
                     scan_threshold,
                     scan_pace,
+                    scan_catchup_gap,
+                    scan_accent,
                 );
                 // The first index build already finished before `client.start()`, so
                 // reaching this point means gateway-ready AND index-built - exactly the

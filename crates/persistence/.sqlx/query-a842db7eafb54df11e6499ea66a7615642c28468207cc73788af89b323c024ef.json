@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT cycle_xdate, last_sent, snoozed, thread_id\n               FROM dues_reminder_state\n               WHERE guild_id = $1 AND discord_user_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "cycle_xdate",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "dues_reminder_state",
+            "name": "cycle_xdate"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "last_sent",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "dues_reminder_state",
+            "name": "last_sent"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "snoozed",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "dues_reminder_state",
+            "name": "snoozed"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "thread_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "dues_reminder_state",
+            "name": "thread_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "a842db7eafb54df11e6499ea66a7615642c28468207cc73788af89b323c024ef"
+}

@@ -10,6 +10,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
+use chrono::NaiveDate;
+
 use cucumber::{World as _, given, then, when};
 
 use engine::backends::discord::Role;
@@ -91,6 +93,8 @@ struct FakeMembers {
     audit_available: bool,
     assign_fails: bool,
     marker_fails: bool,
+    /// Per-member grace expiry date; `None` means no grace.
+    grace: HashMap<u64, NaiveDate>,
 }
 
 impl FakeMembers {
@@ -99,6 +103,10 @@ impl FakeMembers {
             audit_available: true,
             ..Default::default()
         }
+    }
+
+    fn set_grace(&mut self, id: DiscordUserId, until: NaiveDate) {
+        self.grace.insert(id.0, until);
     }
 
     /// Seed a record into the id/handle/email maps the reads consult.
@@ -164,6 +172,15 @@ impl MemberRead for FakeMembers {
 
     async fn held_roles(&self, id: DiscordUserId) -> Result<Vec<Role>, MemberError> {
         Ok(self.roles_of(id))
+    }
+
+    async fn active_grace(&self, id: DiscordUserId) -> Result<bool, MemberError> {
+        let today = chrono::Utc::now().date_naive();
+        Ok(self
+            .grace
+            .get(&id.0)
+            .map(|&until| until >= today)
+            .unwrap_or(false))
     }
 }
 
@@ -288,6 +305,8 @@ struct VerifyWorld {
     forget_result: Option<Result<(), MemberError>>,
     last_target: Option<DiscordUserId>,
     fake: Option<FakeMembers>,
+    /// Optional grace expiry to seed into the fake before running the verb.
+    grace_until: Option<NaiveDate>,
 }
 
 impl std::fmt::Debug for VerifyWorld {
@@ -312,6 +331,7 @@ impl VerifyWorld {
             forget_result: None,
             last_target: None,
             fake: None,
+            grace_until: None,
         }
     }
 
@@ -325,6 +345,9 @@ impl VerifyWorld {
         fake.audit_available = self.audit_available;
         fake.assign_fails = self.discord_fails;
         fake.marker_fails = self.marker_fails;
+        if let Some(until) = self.grace_until {
+            fake.set_grace(target, until);
+        }
         fake
     }
 
@@ -829,6 +852,39 @@ async fn resync_audited_once(world: &mut VerifyWorld) {
         1,
         "expected exactly one audit row"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Grace override steps
+// ---------------------------------------------------------------------------
+
+/// Seed a lapsed (DuesExpired-standing) record for `name`, linked to their id.
+#[given(regex = r"^(\w+) is in our records linked to her Discord id, and her dues have lapsed$")]
+async fn lapsed_record(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    let mut rec = record(&name, handle, Some(id));
+    rec.standing = Some(domain::MigsStatus::Lapsed);
+    world.members.push(rec);
+}
+
+#[given(regex = r"^(\w+) has an active grace override$")]
+async fn active_grace(world: &mut VerifyWorld, _name: String) {
+    // Grant a grace window ending far in the future.
+    let far_future = chrono::Utc::now()
+        .date_naive()
+        .checked_add_days(chrono::Days::new(30))
+        .unwrap();
+    world.grace_until = Some(far_future);
+}
+
+#[given(regex = r"^(\w+)'s grace override has expired$")]
+async fn expired_grace(world: &mut VerifyWorld, _name: String) {
+    // Set the grace window to yesterday so today's check yields false.
+    let yesterday = chrono::Utc::now()
+        .date_naive()
+        .checked_sub_days(chrono::Days::new(1))
+        .unwrap();
+    world.grace_until = Some(yesterday);
 }
 
 #[tokio::main]

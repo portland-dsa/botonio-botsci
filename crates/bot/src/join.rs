@@ -71,6 +71,7 @@ pub async fn on_guild_member_add(
         &discord,
         &*data.store,
         &*data.auditor,
+        data.config.guild(),
     );
     // The bot acted on its own behalf; its id is the audit actor, which is what tells an
     // autonomous join-verify apart from a moderator `/verify` in the audit log.

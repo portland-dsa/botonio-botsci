@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dues_reminder_optout\n                 (guild_id, discord_user_id, opted_out_at, source)\n               VALUES ($1, $2, now(), $3)\n               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET\n                 opted_out_at = EXCLUDED.opted_out_at,\n                 source       = EXCLUDED.source",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "826b6c7d1c25033784fc170f9c5965269fb743b50cbb96338f60a23cbea327ea"
+}

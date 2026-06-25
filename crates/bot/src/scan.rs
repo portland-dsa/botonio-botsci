@@ -9,6 +9,7 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use serenity::all::{ChannelId, Http};
 
+use domain::DiscordGuildId;
 use engine::backends::util::DiscordUserId;
 use engine::bulk::enumerate;
 use engine::scan::{ScanThreshold, ScanVerdict, plan};
@@ -30,6 +31,8 @@ pub fn spawn_scan_loop(
     interval: Duration,
     threshold: ScanThreshold,
     pace: Duration,
+    catchup_gap: Duration,
+    accent: u32,
 ) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
@@ -46,6 +49,8 @@ pub fn spawn_scan_loop(
                 bot_user_id,
                 threshold,
                 pace,
+                catchup_gap,
+                accent,
             )
             .await;
         }
@@ -63,9 +68,15 @@ async fn run_once(
     bot_user_id: DiscordUserId,
     threshold: ScanThreshold,
     pace: Duration,
+    catchup_gap: Duration,
+    accent: u32,
 ) {
     let cfg = guild_config.load();
+    let guild = DiscordGuildId(guild_id);
     if !cfg.scan_enabled {
+        // The scheduled scan is off, but the dues-reminder sweep toggles independently (see
+        // GuildConfig). Run it on its own and skip the role-sync pass.
+        run_reminder_sweep_if_enabled(&cfg, http, store, guild, pace, catchup_gap, accent).await;
         return;
     }
     let Some(discord) = build_role_writer(http.clone(), guild_id, &cfg) else {
@@ -84,7 +95,15 @@ async fn run_once(
         }
     };
 
-    let scan_plan = match plan(store.as_ref(), &members, threshold).await {
+    let scan_plan = match plan(
+        store.as_ref(),
+        &members,
+        threshold,
+        guild,
+        chrono::Utc::now().date_naive(),
+    )
+    .await
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "scheduled scan: planning failed; skipping pass");
@@ -137,6 +156,7 @@ async fn run_once(
         &discord,
         store.as_ref(),
         auditor.as_ref(),
+        guild,
     );
     let (mut promoted, mut demoted, mut failed) = (0usize, 0usize, 0usize);
     for (i, change) in scan_plan.changes.iter().enumerate() {
@@ -179,4 +199,42 @@ async fn run_once(
         failed,
         "scheduled scan complete"
     );
+
+    // Dues-reminder sweep: runs after the role-sync apply completes. The tripwire-abort and
+    // scan-error paths return early above, so the sweep is naturally skipped on an aborted pass.
+    run_reminder_sweep_if_enabled(&cfg, http, store, guild, pace, catchup_gap, accent).await;
+}
+
+/// Run the dues-reminder sweep when the guild has it enabled and a dues-reminder channel set.
+/// Split out of `run_once` so it runs whether or not the scheduled scan is enabled - the two
+/// toggle independently (see `GuildConfig`) - while still being skipped on a tripwire abort,
+/// whose early return is reached before either call site.
+async fn run_reminder_sweep_if_enabled(
+    cfg: &GuildConfig,
+    http: &Arc<Http>,
+    store: &Arc<PgStore>,
+    guild: DiscordGuildId,
+    pace: Duration,
+    catchup_gap: Duration,
+    accent: u32,
+) {
+    if !cfg.reminders_enabled {
+        return;
+    }
+    let Some(chan) = cfg.dues_reminder_channel else {
+        tracing::debug!("reminders enabled but no dues-reminder channel configured; skipping");
+        return;
+    };
+    crate::reminders::run_reminder_sweep(crate::reminders::ReminderCtx {
+        http: http.as_ref(),
+        store: store.as_ref(),
+        guild,
+        today: chrono::Utc::now().date_naive(),
+        parent_channel: ChannelId::new(chan.0),
+        signup_url: cfg.dues_signup_url.as_deref(),
+        catchup_gap,
+        pace,
+        accent,
+    })
+    .await;
 }
