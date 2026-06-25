@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT body FROM dues_reminder_template WHERE guild_id = $1 AND kind = $2",
+  "query": "SELECT body FROM message_template WHERE guild_id = $1 AND kind = $2",
   "describe": {
     "columns": [
       {
@@ -9,7 +9,7 @@
         "type_info": "Text",
         "origin": {
           "Table": {
-            "table": "dues_reminder_template",
+            "table": "message_template",
             "name": "body"
           }
         }
@@ -25,5 +25,5 @@
       false
     ]
   },
-  "hash": "41aa9cf9e01082292ee4f888967ee0d20dad81f5a6b032d4a58bd8864ebcf212"
+  "hash": "1d1aeea74b4dde4cbf601e7cc3ae314d760b26d4cb16fe48d66fd08ef0954abc"
 }

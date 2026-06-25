@@ -7,11 +7,11 @@
 //! [`FromStr`] and [`Display`] and serializes transparently, so the wire form is
 //! just the inner value with no wrapping object.
 //!
-//! The three snowflake types ([`DiscordUserId`], [`DiscordGuildId`],
-//! [`DiscordChannelId`]) wrap `u64` and reject non-numeric input. The four string
-//! types ([`DiscordHandle`], [`StUserId`], [`Email`], [`Phone`]) guarantee only
-//! non-emptiness - see each type for the deliberately narrow validation it does,
-//! and does not, perform.
+//! The snowflake types ([`DiscordUserId`], [`DiscordGuildId`],
+//! [`DiscordChannelId`], [`DiscordRoleId`], [`DiscordMessageId`]) wrap `u64` and
+//! reject non-numeric input. The four string types ([`DiscordHandle`],
+//! [`StUserId`], [`Email`], [`Phone`]) guarantee only non-emptiness - see each
+//! type for the deliberately narrow validation it does, and does not, perform.
 //!
 //! [`FromStr`]: std::str::FromStr
 //! [`Display`]: std::fmt::Display
@@ -150,6 +150,27 @@ numeric_newtype! {
     // ids appear inside `OverwriteTarget` which is `Ord` for stable ordering.
     #[derive(PartialOrd, Ord)]
     DiscordRoleId
+}
+
+numeric_newtype! {
+    /// A Discord message snowflake, guaranteed to hold a valid `u64`.
+    ///
+    /// Distinct from the other snowflake newtypes for the same reason they are
+    /// distinct from each other: separate types stop a message id being passed where
+    /// a user, guild, channel, or role id is required. Paired with a
+    /// [`DiscordChannelId`] it locates a single posted message - the bot stores that
+    /// pair for each standing message it can edit in place (the verification prompt
+    /// and the dues banner). The inner field is public so a value already known from a
+    /// gateway event or a send response can be constructed directly.
+    ///
+    /// ```
+    /// use domain::DiscordMessageId;
+    ///
+    /// let m: DiscordMessageId = "778899001122334455".parse().unwrap();
+    /// assert_eq!(m.to_string(), "778899001122334455");
+    /// assert!("not-a-message".parse::<DiscordMessageId>().is_err());
+    /// ```
+    DiscordMessageId
 }
 
 /// Defines a `String`-backed identifier newtype.

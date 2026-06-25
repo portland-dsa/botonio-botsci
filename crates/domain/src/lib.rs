@@ -16,8 +16,8 @@ pub mod migs_status;
 pub mod role;
 
 pub use ids::{
-    DiscordChannelId, DiscordGuildId, DiscordHandle, DiscordRoleId, DiscordUserId, Email, Phone,
-    StUserId,
+    DiscordChannelId, DiscordGuildId, DiscordHandle, DiscordMessageId, DiscordRoleId,
+    DiscordUserId, Email, Phone, StUserId,
 };
 pub use membership::{MalformedMembership, MembershipStatus};
 pub use migs_status::{MigsStatus, MigsStatusError, RetiredMigsStatus};

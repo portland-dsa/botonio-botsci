@@ -13,7 +13,11 @@ use crate::data::{Context, Error};
 use crate::render::help::{Topic, help_embed, topics_for};
 
 const MENU_ID: &str = "help_topic";
-const NAV_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long the menu may sit idle before its collector is freed - an *inactivity* window,
+/// reset on every interaction (see the loop below), not a total lifetime. serenity's
+/// built-in collector timeout is a single sleep that ends the stream a fixed time after it
+/// opened regardless of activity, which would kill the menu mid-browse.
+const NAV_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 
 #[poise::command(slash_command)]
 pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
@@ -34,10 +38,16 @@ pub async fn help(ctx: Context<'_>) -> Result<(), Error> {
         .message_id(msg.id)
         .author_id(ctx.author().id)
         .custom_ids(vec![MENU_ID.to_string()])
-        .timeout(NAV_TIMEOUT)
         .stream();
 
-    while let Some(interaction) = stream.next().await {
+    loop {
+        // Reset the idle window on each interaction, rather than relying on serenity's
+        // fixed-lifetime built-in timeout.
+        let interaction = match tokio::time::timeout(NAV_IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(interaction)) => interaction,
+            // The stream ended (shard gone), or the menu sat idle past the deadline.
+            Ok(None) | Err(_) => break,
+        };
         // Re-derive the chosen topic AND re-check permission - never trust the id.
         let chosen = selected_topic(&interaction);
         let allowed = topics_for(crate::moderator::invoker_is_moderator(&ctx).await);

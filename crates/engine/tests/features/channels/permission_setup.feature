@@ -16,9 +16,30 @@ Feature: Tails locks down channel permissions by role
 
   @classify
   Scenario: A nominated dues-expired channel allows Dues Expired
-    Given a public text channel named "dues-desk" nominated as a dues-expired channel
+    Given a public text channel named "dues-expired" nominated as a dues-expired channel
     When Tails resolves the permission plan
-    Then "dues-desk" is classified as dues-expired-only
+    Then "dues-expired" is classified as dues-expired-only
+
+  @classify
+  Scenario: The dues-expired channel grants VIEW to both the Dues Expired and Dues Expiring roles
+    Given a public text channel named "dues-expired" nominated as a dues-expired channel
+    When Tails resolves the permission plan
+    Then "dues-expired" is classified as dues-expired-only
+    And the Dues Expired role can view "dues-expired"
+    And the Dues Expiring role can view "dues-expired"
+
+  @classify
+  Scenario Outline: A dues member can reply in their own thread but not post in the channel
+    Given a public text channel named "dues-expired" nominated as a dues-expired channel
+    And <member>'s dues <situation>, so they hold the <role> role
+    When Tails resolves the permission plan
+    Then <member> can reply in a thread in "dues-expired"
+    But <member> cannot post in "dues-expired"
+
+    Examples:
+      | member   | situation    | role          |
+      | Amy      | are expiring | Dues Expiring |
+      | Knuckles | have lapsed  | Dues Expired  |
 
   @classify
   Scenario: A nominated unverified channel allows Unverified

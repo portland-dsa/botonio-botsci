@@ -1,31 +1,33 @@
 //! Dues-reminder sweep: on each scan pass, send each due member their milestone
-//! message into a private thread off the configured dues-reminder channel.
+//! message into a private thread off the configured dues-expired channel, and
+//! reconcile the Dues Expiring marker role for all members with an xdate.
 //!
-//! The sweep and the per-member [`send_reminder`] helper are separated so the
+//! The sweep and the per-member [`send_notice`] helper are separated so the
 //! staging test-send command can drive a single member without running the full
 //! planner. Both receive a [`ReminderCtx`] carrying the stable per-pass context.
 //!
 //! This module also owns the persistent button handler ([`on_component`]) for the
-//! snooze / opt-out / ask-an-admin actions embedded in each reminder message.
+//! opt-out / ask-an-admin actions embedded in each reminder message.
 
 use std::time::Duration;
 
-use chrono::{NaiveDate, Utc};
+use chrono::{Local, NaiveDate};
 use domain::DiscordGuildId;
+use engine::backends::discord::{DiscordClient, MarkerRole};
 use engine::backends::solidarity_tech::MembershipType;
 use engine::backends::util::DiscordUserId;
-use engine::reminders::{Milestone, ReminderTemplateKind};
-use engine::store::{OptOutSource, ReminderStore, ReminderTemplates};
+use engine::reminders::{ExpiryStatus, MessageKind, Milestone};
+use engine::store::{MemberStore, MessageTemplates, OptOutSource, ReminderStore};
 use persistence::PgStore;
 use serenity::all::{
     AutoArchiveDuration, ChannelId, ChannelType, ComponentInteraction, Context,
     CreateAllowedMentions, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMessage, CreateThread, Http, RoleId, UserId,
+    CreateMessage, CreateThread, EditThread, Http, RoleId, UserId,
 };
 
 use crate::data::{Data, Error};
 use crate::render::reminders::{
-    DUES_HELP_ID, DUES_OPTOUT_ID, DUES_SNOOZE_ID, default_template, reminder_message,
+    DUES_BANNER_HELP_ID, DUES_HELP_ID, DUES_OPTOUT_ID, default_body, reminder_message,
 };
 
 // ---- context ------------------------------------------------------------
@@ -35,112 +37,166 @@ use crate::render::reminders::{
 pub struct ReminderCtx<'a> {
     pub http: &'a Http,
     pub store: &'a PgStore,
+    pub discord: &'a engine::backends::discord::DiscordHttp,
     pub guild: DiscordGuildId,
     pub today: NaiveDate,
     pub parent_channel: ChannelId,
     pub signup_url: Option<&'a str>,
-    pub catchup_gap: Duration,
     pub pace: Duration,
     pub accent: u32,
 }
 
 // ---- per-member helper --------------------------------------------------
 
-/// Send one member their dues reminder. Creates or reuses their private thread,
-/// resolves the correct template body, sends the message, and records the send.
+/// Create or reuse the member's lifecycle thread off `parent_channel`.
 ///
-/// Returns an error on Discord API or store failure; the sweep loop treats each
-/// such error as a skip and continues.
-pub async fn send_reminder(
-    ctx: &ReminderCtx<'_>,
+/// If a thread is already persisted in `reminder_state`, it is returned as-is.
+/// Otherwise a private thread is created, the member is added to it, and the id is
+/// persisted via `set_thread` before returning - so a later failure on the caller's
+/// side reuses the same thread on the next attempt rather than orphaning it.
+///
+/// `status` drives the thread title: `Expiring` -> Renewal Notice, `Lapsed` -> Lapse
+/// Notice. On a `Lapsed` request when a thread already exists, the thread is retitled.
+#[allow(clippy::too_many_arguments)]
+async fn ensure_lifecycle_thread(
+    http: &Http,
+    store: &PgStore,
+    guild: DiscordGuildId,
+    parent_channel: ChannelId,
     member: DiscordUserId,
-    milestone: Milestone,
-    days_until: i64,
-    membership_type: Option<MembershipType>,
-) -> Result<(), crate::error::BotError> {
-    // Resolve the template kind. Expired is fixed; pre-lapse nudges key on
-    // membership type. Skip with a warning when the type is absent for a
-    // pre-lapse milestone - the right template cannot be chosen without it.
-    let kind = if milestone == Milestone::Expired {
-        ReminderTemplateKind::Expired
-    } else {
-        match membership_type {
-            Some(t) => ReminderTemplateKind::from_membership_type(t),
-            None => {
-                tracing::warn!(
-                    id = member.0,
-                    milestone = milestone.as_token(),
-                    "skipping reminder: pre-lapse milestone but membership_type is absent"
-                );
-                return Ok(());
-            }
+    display_name: &str,
+    status: ExpiryStatus,
+    xdate: NaiveDate,
+) -> Result<ChannelId, crate::error::BotError> {
+    let state = store.reminder_state(guild, member).await?;
+    let serenity_user = UserId::new(member.0);
+
+    let thread_title = |milestone: Milestone| -> String {
+        match milestone {
+            Milestone::Renewal => format!("{display_name} - Dues Renewal Notice"),
+            Milestone::Lapse => format!("{display_name} - Dues Lapse Notice"),
         }
     };
 
-    // Ensure the member has a thread: reuse the stored id, or create a new
-    // private thread off the parent channel and add the member.
-    let state = ctx.store.reminder_state(ctx.guild, member).await?;
-    let serenity_user = UserId::new(member.0);
-
-    // Recompute xdate from ctx.today + days_until so the invariant is
-    // structurally enforced rather than left to the caller.
-    let xdate = match ctx
-        .today
-        .checked_add_signed(chrono::Duration::days(days_until))
-    {
-        Some(d) => d,
-        None => {
-            tracing::warn!(
-                id = member.0,
-                "skipping reminder: xdate overflowed (days_until={})",
-                days_until
-            );
-            return Ok(());
-        }
+    let milestone = match status {
+        ExpiryStatus::Expiring { .. } | ExpiryStatus::Current => Milestone::Renewal,
+        ExpiryStatus::Lapsed => Milestone::Lapse,
     };
 
     let thread_id: i64 = match state.and_then(|s| s.thread_id) {
-        Some(tid) => tid,
+        Some(tid) => {
+            // On a Lapse request, retitle the thread if it exists.
+            if milestone == Milestone::Lapse {
+                let thread_channel = ChannelId::new(tid as u64);
+                if let Err(e) = thread_channel
+                    .edit_thread(http, EditThread::new().name(thread_title(Milestone::Lapse)))
+                    .await
+                {
+                    tracing::warn!(id = member.0, error = %e, "ensure_lifecycle_thread: could not retitle thread on lapse");
+                }
+            }
+            tid
+        }
         None => {
-            // Name is stable and PII-free; the member is added by id, not
-            // named in the title.
-            let thread = ctx
-                .parent_channel
+            let thread = parent_channel
                 .create_thread(
-                    ctx.http,
-                    CreateThread::new("Dues renewal")
+                    http,
+                    CreateThread::new(thread_title(milestone))
                         .kind(ChannelType::PrivateThread)
                         .auto_archive_duration(AutoArchiveDuration::OneWeek)
                         .invitable(false),
                 )
                 .await?;
 
-            thread.id.add_thread_member(ctx.http, serenity_user).await?;
+            thread.id.add_thread_member(http, serenity_user).await?;
 
             // Discord snowflakes fit in 63 bits; a wrapping cast is lossless
-            // and the reverse cast (thread_id as u64) recovers the exact value.
+            // and the reverse cast (tid as u64) recovers the exact value.
             let tid = thread.id.get() as i64;
 
-            // Persist the new thread id before the message goes out, so a later send or
-            // record_sent failure reuses this thread on the next sweep instead of orphaning it
-            // and creating a duplicate.
-            ctx.store.set_thread(ctx.guild, member, xdate, tid).await?;
+            // Persist before the caller's message goes out, so a later failure
+            // reuses this thread rather than orphaning it.
+            store.set_thread(guild, member, xdate, tid).await?;
             tid
         }
     };
 
-    let thread_channel = ChannelId::new(thread_id as u64);
+    Ok(ChannelId::new(thread_id as u64))
+}
+
+/// Send one member their dues notice. Creates or reuses their private thread,
+/// resolves the correct template body, sends the message, and records the send.
+/// On a Lapse send, edits the thread's name to the lapse title.
+///
+/// Returns an error on Discord API or store failure; the sweep loop treats each
+/// such error as a skip and continues.
+pub async fn send_notice(
+    ctx: &ReminderCtx<'_>,
+    member: DiscordUserId,
+    milestone: Milestone,
+    membership_type: Option<MembershipType>,
+    xdate: NaiveDate,
+) -> Result<(), crate::error::BotError> {
+    // Resolve the template kind from membership type. Lapse and Renewal both key on
+    // membership type. Skip with a warning when the type is absent - the right template
+    // cannot be chosen without it.
+    let kind = match membership_type {
+        Some(t) => MessageKind::from_membership_type(t),
+        None => {
+            tracing::warn!(
+                id = member.0,
+                milestone = milestone.as_token(),
+                "skipping notice: membership_type is absent"
+            );
+            return Ok(());
+        }
+    };
+
+    let serenity_user = UserId::new(member.0);
+
+    // Resolve the member's server display name for the thread title.
+    let display_name = match serenity::all::GuildId::new(ctx.guild.0)
+        .member(ctx.http, serenity_user)
+        .await
+    {
+        Ok(m) => m.display_name().to_owned(),
+        Err(e) => {
+            tracing::warn!(id = member.0, error = %e, "send_notice: could not fetch member for thread title; using id");
+            member.0.to_string()
+        }
+    };
+
+    let status = match milestone {
+        Milestone::Renewal => ExpiryStatus::Expiring {
+            time_left: xdate - ctx.today,
+        },
+        Milestone::Lapse => ExpiryStatus::Lapsed,
+    };
+
+    let thread_channel = ensure_lifecycle_thread(
+        ctx.http,
+        ctx.store,
+        ctx.guild,
+        ctx.parent_channel,
+        member,
+        &display_name,
+        status,
+        xdate,
+    )
+    .await?;
+
+    let thread_id = thread_channel.get() as i64;
 
     // Resolve body: stored moderator template, else the built-in default.
     let body: String = match ctx.store.template(ctx.guild, kind).await? {
         Some(custom) => custom,
-        None => default_template(kind).to_owned(),
+        None => default_body(kind).to_owned(),
     };
 
     let msg = reminder_message(
         &body,
-        days_until,
         milestone,
+        xdate,
         ctx.signup_url,
         serenity_user,
         ctx.accent,
@@ -158,31 +214,14 @@ pub async fn send_reminder(
 
 /// Run the dues-reminder sweep for one scan pass.
 ///
-/// Reads `last_reminder_run`, plans which members are due a reminder today,
-/// delivers each one paced, and records the run time. A per-member failure is
-/// logged and skipped; the sweep continues and marks completion so a later pass
-/// does not double-fire.
+/// Plans which members are due a notice today and delivers each one paced.
+/// Also reconciles the Dues Expiring marker role for all members with an xdate.
+/// A per-member failure is logged and skipped; the sweep continues.
 ///
 /// `info!` carries aggregate counts only; `debug!` carries the member id with
 /// no other PII.
 pub async fn run_reminder_sweep(ctx: ReminderCtx<'_>) {
-    let now = Utc::now();
-
-    // Timely: first-ever run (no stored timestamp) counts as timely. A gap
-    // larger than the catchup threshold means the bot missed one or more
-    // crossings, so the planner uses round-to-nearest logic instead.
-    let timely = match store_last_run(ctx.store, ctx.guild).await {
-        Some(last) => {
-            let gap = now
-                .signed_duration_since(last)
-                .to_std()
-                .unwrap_or(Duration::MAX);
-            gap <= ctx.catchup_gap
-        }
-        None => true,
-    };
-
-    let plan = match engine::reminders::plan(ctx.store, ctx.guild, ctx.today, timely).await {
+    let plan = match engine::reminders::plan(ctx.store, ctx.guild, ctx.today).await {
         Ok(p) => p,
         Err(e) => {
             tracing::error!(error = %e, "reminder sweep: planning failed; skipping pass");
@@ -191,7 +230,7 @@ pub async fn run_reminder_sweep(ctx: ReminderCtx<'_>) {
     };
 
     let total = plan.due.len();
-    tracing::info!(total, timely, "reminder sweep starting");
+    tracing::info!(total, "reminder sweep starting");
 
     let (mut sent, mut failed) = (0usize, 0usize);
 
@@ -206,15 +245,7 @@ pub async fn run_reminder_sweep(ctx: ReminderCtx<'_>) {
             "reminder sweep: sending"
         );
 
-        match send_reminder(
-            &ctx,
-            due.id,
-            due.milestone,
-            due.days_until,
-            due.membership_type,
-        )
-        .await
-        {
+        match send_notice(&ctx, due.id, due.milestone, due.membership_type, due.xdate).await {
             Ok(()) => sent += 1,
             Err(e) => {
                 failed += 1;
@@ -226,33 +257,169 @@ pub async fn run_reminder_sweep(ctx: ReminderCtx<'_>) {
         }
     }
 
-    if let Err(e) = ctx.store.set_last_reminder_run(ctx.guild, now).await {
-        tracing::error!(error = %e, "reminder sweep: failed to record last-run timestamp");
-    }
+    tracing::info!(sent, failed, total, "reminder sweep notices done");
 
-    tracing::info!(sent, failed, total, "reminder sweep complete");
+    // Reconcile the Dues Expiring marker for all members with an xdate.
+    reconcile_expiring_markers(&ctx).await;
 }
 
-async fn store_last_run(store: &PgStore, guild: DiscordGuildId) -> Option<chrono::DateTime<Utc>> {
-    match store.last_reminder_run(guild).await {
-        Ok(ts) => ts,
+/// Reconcile the Dues Expiring marker role for all members with a lapse date.
+///
+/// A member who is `Expiring`, not yet marked, and in good standing -> grant the marker.
+/// A member who is currently marked but now `Current` or `Lapsed` -> remove it.
+/// Per-member errors are logged and skipped.
+async fn reconcile_expiring_markers(ctx: &ReminderCtx<'_>) {
+    let records = match ctx.store.all_records().await {
+        Ok(r) => r,
         Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "reminder sweep: could not read last_reminder_run; treating as first run"
-            );
-            None
+            tracing::warn!(error = %e, "reminder sweep: could not read roster for marker reconciliation");
+            return;
+        }
+    };
+
+    let (mut granted, mut removed, mut failed) = (0usize, 0usize, 0usize);
+
+    for record in &records {
+        let Some(id) = record.discord_user_id else {
+            continue;
+        };
+        let Some(xdate) = record.expires else {
+            continue;
+        };
+
+        let status = ExpiryStatus::from(xdate - ctx.today);
+
+        let state = match ctx.store.reminder_state(ctx.guild, id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(id = id.0, error = %e, "marker reconcile: could not read state; skipping");
+                failed += 1;
+                continue;
+            }
+        };
+
+        // Treat a stale cycle as unmarked.
+        let expiring_marked = match &state {
+            Some(s) if s.cycle_xdate == xdate => s.expiring_marked,
+            _ => false,
+        };
+
+        match status {
+            ExpiryStatus::Expiring { time_left } if !expiring_marked => {
+                tracing::debug!(
+                    id = id.0,
+                    days = time_left.num_days(),
+                    "marker reconcile: granting DuesExpiring"
+                );
+                if let Err(e) = ctx
+                    .discord
+                    .assign_marker_role(id, MarkerRole::DuesExpiring)
+                    .await
+                {
+                    tracing::warn!(id = id.0, error = %e, "marker reconcile: assign failed; skipping");
+                    failed += 1;
+                    continue;
+                }
+                if let Err(e) = ctx
+                    .store
+                    .set_expiring_marked(ctx.guild, id, xdate, true)
+                    .await
+                {
+                    tracing::warn!(id = id.0, error = %e, "marker reconcile: set_expiring_marked failed");
+                    failed += 1;
+                }
+                granted += 1;
+            }
+            ExpiryStatus::Current | ExpiryStatus::Lapsed if expiring_marked => {
+                tracing::debug!(id = id.0, "marker reconcile: removing DuesExpiring");
+                if let Err(e) = ctx
+                    .discord
+                    .remove_marker_role(id, MarkerRole::DuesExpiring)
+                    .await
+                {
+                    tracing::warn!(id = id.0, error = %e, "marker reconcile: remove failed; skipping");
+                    failed += 1;
+                    continue;
+                }
+                if let Err(e) = ctx
+                    .store
+                    .set_expiring_marked(ctx.guild, id, xdate, false)
+                    .await
+                {
+                    tracing::warn!(id = id.0, error = %e, "marker reconcile: set_expiring_marked failed");
+                    failed += 1;
+                }
+                removed += 1;
+            }
+            _ => {}
         }
     }
+
+    tracing::info!(granted, removed, failed, "marker reconcile complete");
+}
+
+/// Remove the Dues Expiring marker from every currently-marked member and clear the flag.
+/// Called when reminders are toggled off so the marker does not linger on members.
+/// Per-member errors are logged and skipped.
+pub async fn cleanup_expiring_markers(
+    store: &PgStore,
+    discord: &engine::backends::discord::DiscordHttp,
+    guild: DiscordGuildId,
+    pace: Duration,
+) {
+    let members = match store.marked_members(guild).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "cleanup_expiring_markers: could not read marked members");
+            return;
+        }
+    };
+
+    let total = members.len();
+    let (mut removed, mut failed) = (0usize, 0usize);
+
+    for (i, id) in members.iter().enumerate() {
+        if i > 0 {
+            tokio::time::sleep(pace).await;
+        }
+        tracing::debug!(id = id.0, "cleanup: removing DuesExpiring marker");
+        if let Err(e) = discord
+            .remove_marker_role(*id, MarkerRole::DuesExpiring)
+            .await
+        {
+            tracing::warn!(id = id.0, error = %e, "cleanup: remove_marker_role failed; skipping");
+            failed += 1;
+            continue;
+        }
+        // The cycle key only addresses the member's row; the flag is what we are clearing.
+        // Read the stored cycle_xdate so set_expiring_marked targets that current row.
+        let xdate = match store.reminder_state(guild, *id).await {
+            Ok(Some(s)) => s.cycle_xdate,
+            _ => {
+                // Cannot determine cycle_xdate; skip the flag clear but count as success.
+                removed += 1;
+                continue;
+            }
+        };
+        if let Err(e) = store.set_expiring_marked(guild, *id, xdate, false).await {
+            tracing::warn!(id = id.0, error = %e, "cleanup: set_expiring_marked failed");
+            failed += 1;
+        } else {
+            removed += 1;
+        }
+    }
+
+    tracing::info!(total, removed, failed, "cleanup_expiring_markers complete");
 }
 
 // ---- button handler -----------------------------------------------------
 
-/// Route a dues-reminder button press (snooze / opt-out / ask-an-admin).
+/// Route a dues-reminder button press (opt-out / ask-an-admin / banner get-help).
 ///
-/// Ignores interactions that are not from the home guild, not a `dues_*` id, or
-/// whose suffix target does not match the presser - so a moderator who joined the
-/// thread cannot toggle a member's reminder state.
+/// Ignores interactions that are not from the home guild or not a `dues_*` id.
+/// For `DUES_HELP_ID`/`DUES_OPTOUT_ID` (which carry a `kind:member_id` suffix)
+/// only the target member may act. `DUES_BANNER_HELP_ID` carries no suffix - the
+/// presser is the actor.
 pub async fn on_component(
     ctx: &Context,
     c: &ComponentInteraction,
@@ -262,11 +429,18 @@ pub async fn on_component(
         return Ok(());
     }
     let id = c.data.custom_id.as_str();
+
+    // Banner help: no member-id suffix; the presser is the actor.
+    if id == DUES_BANNER_HELP_ID {
+        let presser = DiscordUserId(c.user.id.get());
+        return handle_banner_help(ctx, c, data, presser).await;
+    }
+
     let Some((kind, suffix)) = id.split_once(':') else {
         return Ok(());
     };
     // Only act on dues_* prefixes.
-    if !matches!(kind, DUES_SNOOZE_ID | DUES_OPTOUT_ID | DUES_HELP_ID) {
+    if !matches!(kind, DUES_OPTOUT_ID | DUES_HELP_ID) {
         return Ok(());
     }
     // Parse the target member id from the suffix.
@@ -281,59 +455,160 @@ pub async fn on_component(
     let guild = data.config.guild();
 
     match kind {
-        DUES_SNOOZE_ID => handle_snooze(ctx, c, data, guild, target_id).await,
         DUES_OPTOUT_ID => handle_optout(ctx, c, data, guild, target_id).await,
         DUES_HELP_ID => handle_help(ctx, c, data, target_id).await,
         _ => Ok(()),
     }
 }
 
-/// Snooze reminders for this cycle. Keys the snooze on the recorded `cycle_xdate` (the cycle
-/// the reminder was sent for); if no state is recorded, acknowledges gracefully without writing.
-async fn handle_snooze(
+/// Handle a press of the "Get help" button on the dues-expired channel banner.
+///
+/// The presser is the actor. If they hold a dues-related role (Member / DuesExpired /
+/// DuesExpiring), their lifecycle thread is created (or reused) and the configured
+/// moderator role is pinged in it. A presser who holds only the moderator role and
+/// no dues role gets a private "this is for members" reply - no thread is created.
+async fn handle_banner_help(
     ctx: &Context,
     c: &ComponentInteraction,
     data: &Data,
-    guild: DiscordGuildId,
-    id: DiscordUserId,
+    presser: DiscordUserId,
 ) -> Result<(), Error> {
-    // Snooze the cycle the member was actually reminded about - the recorded `cycle_xdate` -
-    // not the live roster `expires`, which may have moved on if the roster refreshed since the
-    // reminder was sent. No recorded state means no reminder was sent, so there is nothing to
-    // snooze; that falls through to a graceful acknowledgement below.
-    let xdate = match data.store.reminder_state(guild, id).await {
-        Ok(state) => state.map(|s| s.cycle_xdate),
+    let cfg = data.guild_config.load();
+    let guild = data.config.guild();
+
+    // Build a set of the roles that mark a dues-standing member (any of the three suffices).
+    let is_dues_member = {
+        let presser_roles = c.member.as_ref().map(|m| m.roles.as_slice()).unwrap_or(&[]);
+        let dues_role_ids: Vec<serenity::all::RoleId> = [
+            cfg.member_role,
+            cfg.dues_expired_role,
+            cfg.dues_expiring_role,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|r| serenity::all::RoleId::new(r.0))
+        .collect();
+        dues_role_ids.iter().any(|r| presser_roles.contains(r))
+    };
+
+    if !is_dues_member {
+        tracing::debug!(
+            id = presser.0,
+            "banner help: presser has no dues role; ignoring"
+        );
+        return ack_ephemeral(ctx, c, "This button is for members with dues coming due.").await;
+    }
+
+    // Resolve the parent channel synchronously (config is already in memory) before
+    // the ack so we can still send the user an error response if it is missing.
+    let Some(parent_channel_id) = cfg.dues_expired_channel else {
+        tracing::warn!(
+            id = presser.0,
+            "banner help: dues_expired_channel not configured"
+        );
+        return ack_ephemeral(
+            ctx,
+            c,
+            "Something went wrong - a moderator hasn't finished setting up the bot. Please ask them directly.",
+        )
+        .await;
+    };
+    let parent_channel = ChannelId::new(parent_channel_id.0);
+
+    // Ack first (ephemeral) - all remaining work (store, HTTP) can exceed 3 s. Mirrors
+    // handle_help's ack-first model; post-ack errors are logged and not re-surfaced.
+    ack_ephemeral(ctx, c, "I've let the admins know - head to your thread.").await?;
+
+    // Look up the presser's xdate from the cache to derive the thread title.
+    let record = match data.store.by_discord_id(presser).await {
+        Ok(r) => r,
         Err(e) => {
-            tracing::warn!(id = id.0, error = %e, "dues snooze: state read failed");
-            return ack_ephemeral(
-                ctx,
-                c,
-                "Something went wrong saving that - please try again in a moment.",
-            )
-            .await;
+            tracing::warn!(id = presser.0, error = %e, "banner help: cache lookup failed");
+            None
         }
     };
-    match xdate {
-        Some(cycle_xdate) => {
-            if let Err(e) = data.store.set_snooze(guild, id, cycle_xdate).await {
-                tracing::warn!(id = id.0, error = %e, "dues snooze: store write failed");
-                return ack_ephemeral(
-                    ctx,
-                    c,
-                    "Something went wrong saving that - please try again in a moment.",
-                )
-                .await;
-            }
-            tracing::debug!(id = id.0, "dues reminder snoozed for cycle");
+
+    let today = Local::now().date_naive();
+    let (xdate, status) = match record.as_ref().and_then(|r| r.expires) {
+        Some(d) => (d, ExpiryStatus::from(d - today)),
+        None => {
+            // No xdate in the cache - treat as lapsed for title purposes and use today
+            // as a placeholder cycle_xdate so set_thread can persist if needed.
+            tracing::debug!(
+                id = presser.0,
+                "banner help: no xdate in cache; using today as placeholder"
+            );
+            (today, ExpiryStatus::Lapsed)
+        }
+    };
+
+    // Resolve the display name for the thread title.
+    let display_name = match serenity::all::GuildId::new(guild.0)
+        .member(&ctx.http, c.user.id)
+        .await
+    {
+        Ok(m) => m.display_name().to_owned(),
+        Err(e) => {
+            tracing::warn!(id = presser.0, error = %e, "banner help: could not fetch member for thread title; using id");
+            presser.0.to_string()
+        }
+    };
+
+    // Find or create the lifecycle thread. Post-ack: log and return on failure.
+    let thread_channel = match ensure_lifecycle_thread(
+        &ctx.http,
+        &data.store,
+        guild,
+        parent_channel,
+        presser,
+        &display_name,
+        status,
+        xdate,
+    )
+    .await
+    {
+        Ok(ch) => ch,
+        Err(e) => {
+            tracing::warn!(id = presser.0, error = %e, "banner help: could not ensure lifecycle thread");
+            return Ok(());
+        }
+    };
+
+    tracing::debug!(
+        id = presser.0,
+        "banner help: posting moderator ping in thread"
+    );
+
+    // Post the moderator-role ping in the thread (same body as handle_help).
+    let (content, allowed) = match cfg.moderator_role {
+        Some(role) => {
+            let content = format!(
+                "<@&{}> - <@{}> asked for help renewing their membership.",
+                role.0, presser.0
+            );
+            let allowed = CreateAllowedMentions::new().roles(vec![RoleId::new(role.0)]);
+            (content, Some(allowed))
         }
         None => {
-            tracing::debug!(
-                id = id.0,
-                "dues snooze: no xdate on record; skipping store write"
+            tracing::warn!(
+                id = presser.0,
+                "banner help: no moderator_role configured; posting without role mention"
             );
+            let content = format!("<@{}> asked for help renewing their membership.", presser.0);
+            (content, None)
         }
+    };
+
+    let mut msg = CreateMessage::new().content(content);
+    if let Some(mentions) = allowed {
+        msg = msg.allowed_mentions(mentions);
     }
-    ack_ephemeral(ctx, c, "You won't get more reminders this cycle.").await
+
+    if let Err(e) = thread_channel.send_message(&ctx.http, msg).await {
+        tracing::warn!(id = presser.0, error = %e, "banner help: failed to post the help message in the thread");
+    }
+
+    Ok(())
 }
 
 /// Permanently opt the member out of dues reminders.

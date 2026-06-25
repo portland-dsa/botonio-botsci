@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use domain::Role;
+use engine::backends::discord::MarkerRole;
 use engine::store::GuildConfig;
 use serenity::model::id::RoleId;
 
@@ -17,14 +18,18 @@ pub fn build_role_writer(
     cfg: &GuildConfig,
 ) -> Option<engine::backends::discord::DiscordHttp> {
     let map = managed_role_map(cfg)?;
-    let override_role = cfg
-        .manual_override_role
-        .map(|r| serenity::all::RoleId::new(r.0));
+    let mut marker_role_ids = std::collections::HashMap::new();
+    if let Some(r) = cfg.manual_override_role {
+        marker_role_ids.insert(MarkerRole::ManualOverride, serenity::all::RoleId::new(r.0));
+    }
+    if let Some(r) = cfg.dues_expiring_role {
+        marker_role_ids.insert(MarkerRole::DuesExpiring, serenity::all::RoleId::new(r.0));
+    }
     Some(engine::backends::discord::DiscordHttp::from_role_map(
         http,
         serenity::all::GuildId::new(guild_id),
         map,
-        override_role,
+        marker_role_ids,
     ))
 }
 

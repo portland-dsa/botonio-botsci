@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT discord_user_id FROM dues_reminder_state\n               WHERE guild_id = $1 AND expiring_marked",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "discord_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "dues_reminder_state",
+            "name": "discord_user_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "462ff52607466879aa08aa5c328f59c36041df73fadbfcdc7e66cda314818559"
+}

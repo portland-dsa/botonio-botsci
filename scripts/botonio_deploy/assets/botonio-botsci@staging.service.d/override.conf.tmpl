@@ -32,13 +32,6 @@ Environment=BOT_SCAN_TRIPWIRE_PERCENT=20
 Environment=BOT_SCAN_TRIPWIRE_FLOOR=5
 Environment=BOT_SCAN_PACE_MS=250
 
-# Dues-renewal reminders (run on the scan loop after role-sync; OFF until enabled per-guild in
-# /setup, reminders_enabled). BOT_REMINDER_CATCHUP_GAP_SECS is how long a gap since the last
-# sweep counts as a catch-up run (round to the nearest milestone) rather than a timely one.
-# Staging uses a value below BOT_SCAN_INTERVAL_SECS (300) so every sweep exercises the catch-up
-# rounding path that a normal 4h prod cadence almost never hits.
-Environment=BOT_REMINDER_CATCHUP_GAP_SECS=120
-
 # Local membership cache (Postgres). The runtime connection authenticates by peer over
 # the Unix socket - no password (the long-running process holds no DB secret). The
 # migrate phase (ExecStartPre) uses the migration credential below over TCP loopback.
