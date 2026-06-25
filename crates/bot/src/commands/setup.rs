@@ -18,19 +18,19 @@ use serenity::all::{
     ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateButton,
     CreateEmbed, CreateInputText, CreateInteractionResponse, CreateInteractionResponseFollowup,
     CreateInteractionResponseMessage, CreateModal, CreateSelectMenu, CreateSelectMenuKind,
-    EditInteractionResponse, InputTextStyle, Permissions, RoleId,
+    EditInteractionResponse, InputTextStyle, MessageId, Permissions, RoleId,
 };
 use serenity::futures::StreamExt as _;
 
-use domain::{DiscordChannelId, DiscordRoleId};
+use domain::{DiscordChannelId, DiscordMessageId, DiscordRoleId};
 use engine::audit::AuditLog;
 use engine::backends::util::DiscordUserId;
 use engine::reminders::{MessageKind, Milestone};
-use engine::store::{ConfigStore, GuildConfig, MessageTemplates};
+use engine::store::{ConfigStore, GuildConfig, MessageRef, MessageTemplates};
 
 use crate::data::{Context, Error};
-use crate::render::reminders::{banner_message, default_body};
-use crate::render::self_verify::verify_prompt;
+use crate::render::reminders::{banner_edit, banner_message, default_body};
+use crate::render::self_verify::{verify_prompt, verify_prompt_edit};
 use crate::render::setup::{dues_page_embed, landing_embed};
 
 // Landing navigation buttons (one per feature page).
@@ -81,7 +81,12 @@ const DUES_URL_MODAL_ID: &str = "setup_dues_url_modal";
 const DUES_URL_FIELD_ID: &str = "setup_dues_url_field";
 const DUES_URL_MODAL_TIMEOUT: Duration = Duration::from_secs(120);
 
-const NAV_TIMEOUT: Duration = Duration::from_secs(180);
+/// How long the panel may sit idle before its collector is freed. This is an *inactivity*
+/// window, reset on every interaction (see the loop in [`setup`]) - not a total lifetime.
+/// An active moderator never trips it; each button press mints a fresh interaction token,
+/// so there is no shorter ceiling to respect, and this only reclaims the collector once the
+/// panel is abandoned.
+const NAV_IDLE_TIMEOUT: Duration = Duration::from_secs(900);
 
 /// Which feature page a re-render should redraw, so a select or action leaves the
 /// moderator on the page they acted from.
@@ -136,13 +141,24 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
     // One collector for every button and select on this ephemeral message, scoped to the
     // invoker. Each interaction navigates between pages, applies one setting, opens a modal,
     // or runs a posting/toggle action.
+    //
+    // No built-in `.timeout()`: serenity's collector timeout is a single sleep composed via
+    // `take_until`, so it ends the stream a fixed time after it *opened*, regardless of
+    // activity - which would kill the panel mid-configuration. Instead, give each wait its
+    // own deadline below, so the window resets on every interaction.
     let mut stream = ComponentInteractionCollector::new(ctx.serenity_context())
         .message_id(msg.id)
         .author_id(ctx.author().id)
-        .timeout(NAV_TIMEOUT)
         .stream();
 
-    while let Some(interaction) = stream.next().await {
+    loop {
+        // Reset the idle window on each interaction. A modal's own wait happens inside the
+        // arm (off this timer), and clicks that arrive during a modal are buffered, not lost.
+        let interaction = match tokio::time::timeout(NAV_IDLE_TIMEOUT, stream.next()).await {
+            Ok(Some(interaction)) => interaction,
+            // The stream ended (shard gone), or the panel sat idle past the deadline.
+            Ok(None) | Err(_) => break,
+        };
         match interaction.data.custom_id.as_str() {
             // ---- navigation ------------------------------------------------
             NAV_VERIFICATION_ID => nav(&ctx, &interaction, accent, Page::Verification).await,
@@ -322,9 +338,12 @@ fn verification_page(cfg: &GuildConfig) -> Vec<CreateActionRow> {
             CreateButton::new(EDIT_PROMPT_ID)
                 .label("Edit prompt message")
                 .style(ButtonStyle::Primary),
-            CreateButton::new(POST_PROMPT_ID)
-                .label("Post prompt")
-                .style(ButtonStyle::Primary),
+            publish_button(
+                POST_PROMPT_ID,
+                cfg.unverified_prompt.is_some(),
+                "Post prompt",
+                "Update prompt",
+            ),
             back_button(),
         ]),
     ]
@@ -379,9 +398,12 @@ fn dues_page(cfg: &GuildConfig) -> Vec<CreateActionRow> {
             CreateButton::new(EDIT_BANNER_ID)
                 .label("Edit channel message")
                 .style(ButtonStyle::Primary),
-            CreateButton::new(POST_BANNER_ID)
-                .label("Post channel message")
-                .style(ButtonStyle::Primary),
+            publish_button(
+                POST_BANNER_ID,
+                cfg.dues_banner.is_some(),
+                "Post channel message",
+                "Update message",
+            ),
             CreateButton::new(DUES_URL_BUTTON_ID)
                 .label("Set sign-up URL")
                 .style(ButtonStyle::Secondary),
@@ -580,22 +602,65 @@ async fn cleanup_markers_on_off(ctx: &Context<'_>) {
 // Posting actions
 // ====================================================================
 
-/// Post the verification prompt (stored body, else the built-in default) to the configured
-/// unverified channel. Returns a short note for the moderator.
+/// Which standing message a posted reference belongs to. Selects the [`GuildConfig`] slot
+/// [`save_message_ref`] writes.
+#[derive(Clone, Copy)]
+enum PostedMessage {
+    Prompt,
+    Banner,
+}
+
+/// Publish the verification prompt: edit the standing message in place if one was posted
+/// before, otherwise post a fresh one to the configured unverified channel and remember it.
+/// Any edit failure (most often the message was deleted) falls back to a fresh post. Returns
+/// a short note for the moderator.
 async fn post_prompt(ctx: &Context<'_>, accent: u32) -> Option<String> {
     let data = ctx.data();
-    let Some(channel) = data.guild_config.load().unverified_channel else {
+    let body = resolve_body(ctx, MessageKind::Unverified).await;
+    let (existing, configured_channel) = {
+        let cfg = data.guild_config.load();
+        (cfg.unverified_prompt, cfg.unverified_channel)
+    };
+
+    if let Some(r) = existing {
+        match ChannelId::new(r.channel.0)
+            .edit_message(
+                ctx.serenity_context().http.clone(),
+                MessageId::new(r.message.0),
+                verify_prompt_edit(&body, accent),
+            )
+            .await
+        {
+            Ok(_) => return Some("Updated the verification prompt in place.".to_owned()),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "setup: couldn't edit the existing verification prompt; posting a fresh one"
+            ),
+        }
+    }
+
+    let Some(channel) = configured_channel else {
         return Some(
             "Set an unverified channel first (on this page), then post the prompt.".to_owned(),
         );
     };
-    let body = resolve_body(ctx, MessageKind::Unverified).await;
-    let message = verify_prompt(&body, accent);
     match ChannelId::new(channel.0)
-        .send_message(ctx.serenity_context().http.clone(), message)
+        .send_message(
+            ctx.serenity_context().http.clone(),
+            verify_prompt(&body, accent),
+        )
         .await
     {
-        Ok(_) => Some("Posted the verification prompt to the unverified channel.".to_owned()),
+        Ok(msg) => {
+            save_message_ref(
+                ctx,
+                PostedMessage::Prompt,
+                channel,
+                DiscordMessageId(msg.id.get()),
+            )
+            .await;
+            Some("Posted the verification prompt to the unverified channel.".to_owned())
+        }
         Err(e) => {
             tracing::warn!(error = %e, "setup: failed to post the verification prompt");
             Some(
@@ -605,24 +670,61 @@ async fn post_prompt(ctx: &Context<'_>, accent: u32) -> Option<String> {
     }
 }
 
-/// Post the dues-expiring banner (stored body, else the built-in default) to the configured
-/// dues-expired channel. Returns a short note for the moderator.
+/// Publish the dues-expiring banner: the dues counterpart to [`post_prompt`], editing the
+/// standing banner in place when one exists and otherwise posting a fresh one to the
+/// configured dues-expired channel. Returns a short note for the moderator.
 async fn post_banner(ctx: &Context<'_>, accent: u32) -> Option<String> {
     let data = ctx.data();
-    let cfg = data.guild_config.load();
-    let Some(channel) = cfg.dues_expired_channel else {
+    let body = resolve_body(ctx, MessageKind::DuesBanner).await;
+    let (existing, configured_channel, signup_url) = {
+        let cfg = data.guild_config.load();
+        (
+            cfg.dues_banner,
+            cfg.dues_expired_channel,
+            cfg.dues_signup_url.clone(),
+        )
+    };
+
+    if let Some(r) = existing {
+        match ChannelId::new(r.channel.0)
+            .edit_message(
+                ctx.serenity_context().http.clone(),
+                MessageId::new(r.message.0),
+                banner_edit(&body, signup_url.as_deref(), accent),
+            )
+            .await
+        {
+            Ok(_) => return Some("Updated the dues-expiring message in place.".to_owned()),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "setup: couldn't edit the existing dues channel message; posting a fresh one"
+            ),
+        }
+    }
+
+    let Some(channel) = configured_channel else {
         return Some(
             "Set a dues-expired channel first (on this page), then post the channel message."
                 .to_owned(),
         );
     };
-    let body = resolve_body(ctx, MessageKind::DuesBanner).await;
-    let message = banner_message(&body, cfg.dues_signup_url.as_deref(), accent);
     match ChannelId::new(channel.0)
-        .send_message(ctx.serenity_context().http.clone(), message)
+        .send_message(
+            ctx.serenity_context().http.clone(),
+            banner_message(&body, signup_url.as_deref(), accent),
+        )
         .await
     {
-        Ok(_) => Some("Posted the dues-expiring message to the dues-expired channel.".to_owned()),
+        Ok(msg) => {
+            save_message_ref(
+                ctx,
+                PostedMessage::Banner,
+                channel,
+                DiscordMessageId(msg.id.get()),
+            )
+            .await;
+            Some("Posted the dues-expiring message to the dues-expired channel.".to_owned())
+        }
         Err(e) => {
             tracing::warn!(error = %e, "setup: failed to post the dues channel message");
             Some(
@@ -631,6 +733,33 @@ async fn post_banner(ctx: &Context<'_>, accent: u32) -> Option<String> {
             )
         }
     }
+}
+
+/// Remember where a standing message was just posted, so the next publish edits it in place
+/// and its button reads "Update". Persists the reference into the guild config and swaps the
+/// live handle. A failed save is logged, not surfaced: the message is already posted, and a
+/// missing reference only means the next publish posts a fresh copy.
+async fn save_message_ref(
+    ctx: &Context<'_>,
+    which: PostedMessage,
+    channel: DiscordChannelId,
+    message: DiscordMessageId,
+) {
+    let data = ctx.data();
+    let mut cfg = GuildConfig::clone(&data.guild_config.load());
+    let slot = match which {
+        PostedMessage::Prompt => &mut cfg.unverified_prompt,
+        PostedMessage::Banner => &mut cfg.dues_banner,
+    };
+    *slot = Some(MessageRef { channel, message });
+    if let Err(e) = data.store.save_config(data.config.guild(), &cfg).await {
+        tracing::warn!(
+            error = %e,
+            "setup: posted the message but couldn't save its reference; the next publish posts fresh"
+        );
+        return;
+    }
+    data.guild_config.store(std::sync::Arc::new(cfg));
 }
 
 // ====================================================================
@@ -918,6 +1047,15 @@ fn toggle_button(id: &str, label: &str, enabled: bool) -> CreateButton {
     CreateButton::new(id)
         .label(format!("{label}: {state}"))
         .style(style)
+}
+
+/// The blurple publish button for a standing message. Reads `post_label` until the message
+/// has been posted once (a stored [`MessageRef`] in the config), then `update_label` - a
+/// press re-publishes by editing that message in place rather than posting a duplicate.
+fn publish_button(id: &str, posted: bool, post_label: &str, update_label: &str) -> CreateButton {
+    CreateButton::new(id)
+        .label(if posted { update_label } else { post_label })
+        .style(ButtonStyle::Primary)
 }
 
 fn role_select(id: &str, placeholder: &str, current: Option<DiscordRoleId>) -> CreateActionRow {

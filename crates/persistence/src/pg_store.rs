@@ -24,15 +24,15 @@ use chrono::NaiveDate;
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
-use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
+use domain::{DiscordChannelId, DiscordGuildId, DiscordMessageId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::channels::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION, SnapshotMeta};
 use engine::reminders::{MessageKind, Milestone};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
     ChannelSnapshotStore, ConfigStore, GraceOverride, GraceStore, GuildConfig, IdentityWrite,
-    MemberRecord, MemberStore, MessageTemplates, MissCounts, MissState, OptOutSource, OverrideLog,
-    OverrideRecord, ReminderCycleState, ReminderStore, RosterWrite, dedup_records,
+    MemberRecord, MemberStore, MessageRef, MessageTemplates, MissCounts, MissState, OptOutSource,
+    OverrideLog, OverrideRecord, ReminderCycleState, ReminderStore, RosterWrite, dedup_records,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -505,12 +505,25 @@ struct GuildConfigRow {
     dues_signup_url: Option<String>,
     reminders_enabled: bool,
     scan_enabled: bool,
+    unverified_prompt_channel_id: Option<i64>,
+    unverified_prompt_message_id: Option<i64>,
+    dues_banner_channel_id: Option<i64>,
+    dues_banner_message_id: Option<i64>,
 }
 
 impl From<GuildConfigRow> for GuildConfig {
     fn from(r: GuildConfigRow) -> Self {
         let role = |v: Option<i64>| v.map(|i| DiscordRoleId(i as u64));
         let chan = |v: Option<i64>| v.map(|i| DiscordChannelId(i as u64));
+        // A posted-message reference is stored as a channel/message id pair and is only a
+        // reference when both are present; a half-set row collapses to `None`.
+        let msg_ref = |chan: Option<i64>, msg: Option<i64>| match (chan, msg) {
+            (Some(c), Some(m)) => Some(MessageRef {
+                channel: DiscordChannelId(c as u64),
+                message: DiscordMessageId(m as u64),
+            }),
+            _ => None,
+        };
         GuildConfig {
             moderator_role: role(r.moderator_role_id),
             member_role: role(r.member_role_id),
@@ -525,6 +538,11 @@ impl From<GuildConfigRow> for GuildConfig {
             dues_signup_url: r.dues_signup_url,
             reminders_enabled: r.reminders_enabled,
             scan_enabled: r.scan_enabled,
+            unverified_prompt: msg_ref(
+                r.unverified_prompt_channel_id,
+                r.unverified_prompt_message_id,
+            ),
+            dues_banner: msg_ref(r.dues_banner_channel_id, r.dues_banner_message_id),
         }
     }
 }
@@ -540,7 +558,9 @@ impl ConfigStore for PgStore {
                       unverified_role_id, manual_override_role_id, dues_expiring_role_id,
                       mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,
                       verification_log_channel_id,
-                      dues_signup_url, reminders_enabled, scan_enabled
+                      dues_signup_url, reminders_enabled, scan_enabled,
+                      unverified_prompt_channel_id, unverified_prompt_message_id,
+                      dues_banner_channel_id, dues_banner_message_id
                FROM guild_config WHERE guild_id = $1"#,
             guild.0 as i64
         )
@@ -556,29 +576,39 @@ impl ConfigStore for PgStore {
     ) -> Result<(), PersistenceError> {
         let role = |r: Option<DiscordRoleId>| r.map(|x| x.0 as i64);
         let chan = |c: Option<DiscordChannelId>| c.map(|x| x.0 as i64);
+        // A posted-message reference splits back into its channel/message id columns.
+        let ref_chan = |m: Option<MessageRef>| m.map(|r| r.channel.0 as i64);
+        let ref_msg = |m: Option<MessageRef>| m.map(|r| r.message.0 as i64);
         sqlx::query!(
             r#"INSERT INTO guild_config
                  (guild_id, moderator_role_id, member_role_id, dues_expired_role_id,
                   unverified_role_id, manual_override_role_id, dues_expiring_role_id,
                   mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,
                   verification_log_channel_id,
-                  dues_signup_url, reminders_enabled, scan_enabled, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+                  dues_signup_url, reminders_enabled, scan_enabled,
+                  unverified_prompt_channel_id, unverified_prompt_message_id,
+                  dues_banner_channel_id, dues_banner_message_id, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                       $15, $16, $17, $18, now())
                ON CONFLICT (guild_id) DO UPDATE SET
-                 moderator_role_id           = EXCLUDED.moderator_role_id,
-                 member_role_id              = EXCLUDED.member_role_id,
-                 dues_expired_role_id        = EXCLUDED.dues_expired_role_id,
-                 unverified_role_id          = EXCLUDED.unverified_role_id,
-                 manual_override_role_id     = EXCLUDED.manual_override_role_id,
-                 dues_expiring_role_id       = EXCLUDED.dues_expiring_role_id,
-                 mod_approval_channel_id     = EXCLUDED.mod_approval_channel_id,
-                 unverified_channel_id       = EXCLUDED.unverified_channel_id,
-                 dues_expired_channel_id     = EXCLUDED.dues_expired_channel_id,
-                 verification_log_channel_id = EXCLUDED.verification_log_channel_id,
-                 dues_signup_url             = EXCLUDED.dues_signup_url,
-                 reminders_enabled           = EXCLUDED.reminders_enabled,
-                 scan_enabled                = EXCLUDED.scan_enabled,
-                 updated_at                  = now()"#,
+                 moderator_role_id            = EXCLUDED.moderator_role_id,
+                 member_role_id               = EXCLUDED.member_role_id,
+                 dues_expired_role_id         = EXCLUDED.dues_expired_role_id,
+                 unverified_role_id           = EXCLUDED.unverified_role_id,
+                 manual_override_role_id      = EXCLUDED.manual_override_role_id,
+                 dues_expiring_role_id        = EXCLUDED.dues_expiring_role_id,
+                 mod_approval_channel_id      = EXCLUDED.mod_approval_channel_id,
+                 unverified_channel_id        = EXCLUDED.unverified_channel_id,
+                 dues_expired_channel_id      = EXCLUDED.dues_expired_channel_id,
+                 verification_log_channel_id  = EXCLUDED.verification_log_channel_id,
+                 dues_signup_url              = EXCLUDED.dues_signup_url,
+                 reminders_enabled            = EXCLUDED.reminders_enabled,
+                 scan_enabled                 = EXCLUDED.scan_enabled,
+                 unverified_prompt_channel_id = EXCLUDED.unverified_prompt_channel_id,
+                 unverified_prompt_message_id = EXCLUDED.unverified_prompt_message_id,
+                 dues_banner_channel_id       = EXCLUDED.dues_banner_channel_id,
+                 dues_banner_message_id       = EXCLUDED.dues_banner_message_id,
+                 updated_at                   = now()"#,
             guild.0 as i64,
             role(config.moderator_role),
             role(config.member_role),
@@ -593,6 +623,10 @@ impl ConfigStore for PgStore {
             config.dues_signup_url,
             config.reminders_enabled,
             config.scan_enabled,
+            ref_chan(config.unverified_prompt),
+            ref_msg(config.unverified_prompt),
+            ref_chan(config.dues_banner),
+            ref_msg(config.dues_banner),
         )
         .execute(&self.pool)
         .await?;

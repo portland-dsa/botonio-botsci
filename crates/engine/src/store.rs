@@ -13,7 +13,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 
-use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MembershipStatus, MigsStatus};
+use domain::{
+    DiscordChannelId, DiscordGuildId, DiscordMessageId, DiscordRoleId, MembershipStatus, MigsStatus,
+};
 
 use crate::backends::solidarity_tech::{
     DuesStatus, MembershipType, SolidarityTechClient, SolidarityTechMember,
@@ -179,6 +181,18 @@ impl Index {
     }
 }
 
+/// A reference to one standing message the bot posted and can later edit in place:
+/// the channel it lives in and its id. Held for each message `/setup` publishes (the
+/// verification prompt, the dues-expiring banner) so a re-publish edits the existing
+/// message rather than posting a duplicate. The two halves are persisted and read back
+/// together, so the reference is present or absent as a unit - there is no
+/// "message id but no channel" state to represent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageRef {
+    pub channel: DiscordChannelId,
+    pub message: DiscordMessageId,
+}
+
 /// The per-guild runtime configuration set through the bot's `/setup` command:
 /// the moderator role, the three managed status roles, the additive Manual Override
 /// marker, and the verification channels. Every field is optional - a freshly
@@ -207,6 +221,14 @@ pub struct GuildConfig {
     pub verification_log_channel: Option<DiscordChannelId>,
     /// The external dues sign-up page the reminder "Renew" button links to.
     pub dues_signup_url: Option<String>,
+    /// Where the standing verification prompt was last posted, if at all. Set when a
+    /// moderator publishes the prompt through `/setup`; a later publish edits this
+    /// message in place rather than posting a duplicate. Bot bookkeeping, not a setting
+    /// the moderator picks - see [`MessageRef`].
+    pub unverified_prompt: Option<MessageRef>,
+    /// Where the standing dues-expiring banner was last posted, if at all. The dues
+    /// counterpart to [`unverified_prompt`](Self::unverified_prompt).
+    pub dues_banner: Option<MessageRef>,
     /// Whether the dues-reminder sweep runs for this guild. Off by default, like
     /// [`scan_enabled`](Self::scan_enabled); the two toggle independently.
     pub reminders_enabled: bool,

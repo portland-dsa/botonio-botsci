@@ -21,8 +21,8 @@ use engine::reminders::{MessageKind, Milestone};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
     ChannelSnapshotStore, ConfigStore, GraceStore, GuildConfig, IdentityWrite, InMemoryStore,
-    Index, MemberRecord, MemberStore, MessageTemplates, MissState, OptOutSource, OverrideLog,
-    ReminderStore, RosterWrite,
+    Index, MemberRecord, MemberStore, MessageRef, MessageTemplates, MissState, OptOutSource,
+    OverrideLog, ReminderStore, RosterWrite,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use persistence::PgStore;
@@ -287,7 +287,7 @@ async fn link_identity_backfills_a_discord_id(pool: sqlx::PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn guild_config_round_trips(pool: sqlx::PgPool) {
-    use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId};
+    use domain::{DiscordChannelId, DiscordGuildId, DiscordMessageId, DiscordRoleId};
 
     let store = PgStore::new(pool);
     let guild = DiscordGuildId(123);
@@ -313,6 +313,15 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
         dues_signup_url: Some("https://example.org/dues".to_owned()),
         reminders_enabled: true,
         scan_enabled: true,
+        // Each posted-message reference round-trips as its (channel, message) id pair.
+        unverified_prompt: Some(MessageRef {
+            channel: DiscordChannelId(6),
+            message: DiscordMessageId(600),
+        }),
+        dues_banner: Some(MessageRef {
+            channel: DiscordChannelId(7),
+            message: DiscordMessageId(700),
+        }),
     };
     store.save_config(guild, &full).await.unwrap();
     assert_eq!(store.load_config(guild).await.unwrap(), full);

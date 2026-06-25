@@ -4,7 +4,7 @@
 
 use chrono::{Datelike, NaiveDate};
 use serenity::all::{
-    ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, UserId,
+    ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateMessage, EditMessage, UserId,
 };
 
 use engine::reminders::{MessageKind, Milestone};
@@ -119,7 +119,15 @@ pub fn reminder_message(
 /// The channel banner message for members inside the pre-lapse window.
 /// Embed titled "Dues Expiring!", described with `body`. Buttons: grey Renew link +
 /// blurple Get help (`DUES_BANNER_HELP_ID`).
-pub fn banner_message(body: &str, signup_url: Option<&str>, accent: u32) -> CreateMessage {
+/// The embed and components shared by the fresh-post [`banner_message`] and the in-place
+/// [`banner_edit`], so the two cannot drift. Title is bot-owned; the description is the
+/// stored or default body. The Renew link is included only for a usable http(s) URL (see
+/// [`is_http_signup_url`]); the help button id is a constant so it survives an edit.
+fn banner_parts(
+    body: &str,
+    signup_url: Option<&str>,
+    accent: u32,
+) -> (CreateEmbed, Vec<CreateActionRow>) {
     let embed = CreateEmbed::new()
         .title("Dues Expiring!")
         .description(body)
@@ -133,9 +141,20 @@ pub fn banner_message(body: &str, signup_url: Option<&str>, accent: u32) -> Crea
             .label("Get help")
             .style(ButtonStyle::Primary),
     );
-    CreateMessage::new()
-        .embed(embed)
-        .components(vec![CreateActionRow::Buttons(buttons)])
+    (embed, vec![CreateActionRow::Buttons(buttons)])
+}
+
+pub fn banner_message(body: &str, signup_url: Option<&str>, accent: u32) -> CreateMessage {
+    let (embed, components) = banner_parts(body, signup_url, accent);
+    CreateMessage::new().embed(embed).components(components)
+}
+
+/// The in-place edit of an already-posted dues banner: the same embed and buttons as
+/// [`banner_message`], shaped as an [`EditMessage`] so a re-publish updates the standing
+/// banner rather than posting a duplicate.
+pub fn banner_edit(body: &str, signup_url: Option<&str>, accent: u32) -> EditMessage {
+    let (embed, components) = banner_parts(body, signup_url, accent);
+    EditMessage::new().embed(embed).components(components)
 }
 
 #[cfg(test)]

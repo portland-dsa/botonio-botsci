@@ -4,7 +4,7 @@
 
 use serenity::all::{
     ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateInputText, CreateMessage,
-    CreateModal, InputTextStyle, UserId,
+    CreateModal, EditMessage, InputTextStyle, UserId,
 };
 
 use domain::Role;
@@ -32,21 +32,36 @@ pub const REVIEW_OVERRIDE_ID: &str = "selfverify_review_override";
 pub const REVIEW_REJECT_ID: &str = "selfverify_review_reject";
 pub const REVIEW_MODAL_ID: &str = "selfverify_review_modal";
 
-/// The message posted into the unverified channel: an explainer embed (body supplied by
-/// the caller) and the button that opens the verification form. Title is bot-owned;
-/// description is the stored or default body so moderators can customise the text.
-pub fn verify_prompt(body: &str, accent: u32) -> CreateMessage {
+/// The embed and components shared by the fresh-post [`verify_prompt`] and the in-place
+/// [`verify_prompt_edit`], so the two cannot drift. Title is bot-owned; the description is
+/// the stored or default body so moderators can customise the text. The button id is a
+/// constant, so re-supplying it on an edit keeps the standing button working.
+fn verify_prompt_parts(body: &str, accent: u32) -> (CreateEmbed, Vec<CreateActionRow>) {
     let embed = CreateEmbed::new()
         .title("Verify your membership")
         .description(body)
         .color(accent);
-    CreateMessage::new()
-        .embed(embed)
-        .components(vec![CreateActionRow::Buttons(vec![
-            CreateButton::new(PROMPT_BUTTON_ID)
-                .label("Verify me")
-                .style(ButtonStyle::Primary),
-        ])])
+    let components = vec![CreateActionRow::Buttons(vec![
+        CreateButton::new(PROMPT_BUTTON_ID)
+            .label("Verify me")
+            .style(ButtonStyle::Primary),
+    ])];
+    (embed, components)
+}
+
+/// The message posted into the unverified channel: an explainer embed (body supplied by
+/// the caller) and the button that opens the verification form.
+pub fn verify_prompt(body: &str, accent: u32) -> CreateMessage {
+    let (embed, components) = verify_prompt_parts(body, accent);
+    CreateMessage::new().embed(embed).components(components)
+}
+
+/// The in-place edit of an already-posted verification prompt: the same embed and button as
+/// [`verify_prompt`], shaped as an [`EditMessage`] so a re-publish updates the standing
+/// message rather than posting a duplicate.
+pub fn verify_prompt_edit(body: &str, accent: u32) -> EditMessage {
+    let (embed, components) = verify_prompt_parts(body, accent);
+    EditMessage::new().embed(embed).components(components)
 }
 
 /// The verification form: membership email, first name, last initial. The name

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, dues_expiring_role_id,\n                      mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id,\n                      dues_signup_url, reminders_enabled, scan_enabled\n               FROM guild_config WHERE guild_id = $1",
+  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, dues_expiring_role_id,\n                      mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id,\n                      dues_signup_url, reminders_enabled, scan_enabled,\n                      unverified_prompt_channel_id, unverified_prompt_message_id,\n                      dues_banner_channel_id, dues_banner_message_id\n               FROM guild_config WHERE guild_id = $1",
   "describe": {
     "columns": [
       {
@@ -145,6 +145,50 @@
             "name": "scan_enabled"
           }
         }
+      },
+      {
+        "ordinal": 13,
+        "name": "unverified_prompt_channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "unverified_prompt_channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
+        "name": "unverified_prompt_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "unverified_prompt_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 15,
+        "name": "dues_banner_channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "dues_banner_channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 16,
+        "name": "dues_banner_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "dues_banner_message_id"
+          }
+        }
       }
     ],
     "parameters": {
@@ -165,8 +209,12 @@
       true,
       true,
       false,
-      false
+      false,
+      true,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "d6ee88ba7869e6dae2b9a8e595616fbcf7df8286b8d639d8acb60c014c645509"
+  "hash": "57fedbefe93139259ceaffef28b2ceebbd9b9e14d7a2fdc0c75371b91a956fa3"
 }
