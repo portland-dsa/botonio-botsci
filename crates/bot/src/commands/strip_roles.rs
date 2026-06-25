@@ -72,6 +72,7 @@ pub async fn strip_roles(ctx: Context<'_>) -> Result<(), Error> {
         &discord,
         &*data.store,
         &*data.auditor,
+        data.config.guild(),
     );
 
     let scanned = members.len();

@@ -302,6 +302,7 @@ pub async fn bulk_verify(
         &discord,
         &*data.store,
         &*data.auditor,
+        guild_id,
     );
     for (i, m) in members.iter().enumerate() {
         let outcome = Member::new(

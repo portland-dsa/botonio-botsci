@@ -20,17 +20,19 @@
 //! `as_str`/`decode` strings (the source of truth, not a wire spelling).
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::channels::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION, SnapshotMeta};
+use engine::reminders::{Milestone, ReminderTemplateKind};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
-    ChannelSnapshotStore, ConfigStore, GuildConfig, IdentityWrite, MemberRecord, MemberStore,
-    MissCounts, MissState, OverrideLog, OverrideRecord, RosterWrite, dedup_records,
+    ChannelSnapshotStore, ConfigStore, GraceOverride, GraceStore, GuildConfig, IdentityWrite,
+    MemberRecord, MemberStore, MissCounts, MissState, OptOutSource, OverrideLog, OverrideRecord,
+    ReminderCycleState, ReminderStore, ReminderTemplates, RosterWrite, dedup_records,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -240,6 +242,21 @@ impl MemberStore for PgStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(MemberRecord::from))
+    }
+
+    /// Every record currently in the cache, in unspecified order. The reminder planner
+    /// iterates the whole cached roster once per sweep to build the plan; reading all rows
+    /// in one query rather than paging avoids multiple round-trips at sweep time.
+    async fn all_records(&self) -> Result<Vec<MemberRecord>, PersistenceError> {
+        let rows = sqlx::query_as!(
+            MemberCacheRow,
+            r#"SELECT st_user_id, discord_user_id, discord_handle, email, full_name,
+                      standing, join_date, expires, membership_type, monthly_dues, yearly_dues
+               FROM member_cache"#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(MemberRecord::from).collect())
     }
 }
 
@@ -484,6 +501,9 @@ struct GuildConfigRow {
     unverified_channel_id: Option<i64>,
     dues_expired_channel_id: Option<i64>,
     verification_log_channel_id: Option<i64>,
+    dues_reminder_channel_id: Option<i64>,
+    dues_signup_url: Option<String>,
+    reminders_enabled: bool,
     scan_enabled: bool,
 }
 
@@ -501,6 +521,9 @@ impl From<GuildConfigRow> for GuildConfig {
             unverified_channel: chan(r.unverified_channel_id),
             dues_expired_channel: chan(r.dues_expired_channel_id),
             verification_log_channel: chan(r.verification_log_channel_id),
+            dues_reminder_channel: chan(r.dues_reminder_channel_id),
+            dues_signup_url: r.dues_signup_url,
+            reminders_enabled: r.reminders_enabled,
             scan_enabled: r.scan_enabled,
         }
     }
@@ -516,7 +539,8 @@ impl ConfigStore for PgStore {
             r#"SELECT moderator_role_id, member_role_id, dues_expired_role_id,
                       unverified_role_id, manual_override_role_id, mod_approval_channel_id,
                       unverified_channel_id, dues_expired_channel_id,
-                      verification_log_channel_id, scan_enabled
+                      verification_log_channel_id, dues_reminder_channel_id,
+                      dues_signup_url, reminders_enabled, scan_enabled
                FROM guild_config WHERE guild_id = $1"#,
             guild.0 as i64
         )
@@ -537,8 +561,9 @@ impl ConfigStore for PgStore {
                  (guild_id, moderator_role_id, member_role_id, dues_expired_role_id,
                   unverified_role_id, manual_override_role_id, mod_approval_channel_id,
                   unverified_channel_id, dues_expired_channel_id,
-                  verification_log_channel_id, scan_enabled, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+                  verification_log_channel_id, dues_reminder_channel_id,
+                  dues_signup_url, reminders_enabled, scan_enabled, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
                ON CONFLICT (guild_id) DO UPDATE SET
                  moderator_role_id           = EXCLUDED.moderator_role_id,
                  member_role_id              = EXCLUDED.member_role_id,
@@ -549,6 +574,9 @@ impl ConfigStore for PgStore {
                  unverified_channel_id       = EXCLUDED.unverified_channel_id,
                  dues_expired_channel_id     = EXCLUDED.dues_expired_channel_id,
                  verification_log_channel_id = EXCLUDED.verification_log_channel_id,
+                 dues_reminder_channel_id    = EXCLUDED.dues_reminder_channel_id,
+                 dues_signup_url             = EXCLUDED.dues_signup_url,
+                 reminders_enabled           = EXCLUDED.reminders_enabled,
                  scan_enabled                = EXCLUDED.scan_enabled,
                  updated_at                  = now()"#,
             guild.0 as i64,
@@ -561,6 +589,9 @@ impl ConfigStore for PgStore {
             chan(config.unverified_channel),
             chan(config.dues_expired_channel),
             chan(config.verification_log_channel),
+            chan(config.dues_reminder_channel),
+            config.dues_signup_url,
+            config.reminders_enabled,
             config.scan_enabled,
         )
         .execute(&self.pool)
@@ -864,5 +895,355 @@ impl ChannelSnapshotStore for PgStore {
                 channel_count: r.channel_count as usize,
             })
             .collect())
+    }
+}
+
+#[async_trait]
+impl GraceStore for PgStore {
+    type Error = PersistenceError;
+
+    /// `true` when `id` has a row in `dues_grace_override` whose `grace_until >= today`.
+    async fn active_grace(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        today: NaiveDate,
+    ) -> Result<bool, PersistenceError> {
+        let active = sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                   SELECT 1 FROM dues_grace_override
+                   WHERE guild_id = $1 AND discord_user_id = $2
+                     AND grace_until >= $3
+               ) AS "active!""#,
+            guild.0 as i64,
+            id.0 as i64,
+            today,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(active)
+    }
+
+    /// The full grace stamp for `id`, or `None` if there is none.
+    async fn grace_override(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<Option<GraceOverride>, PersistenceError> {
+        let row = sqlx::query!(
+            r#"SELECT grace_until, granted_by, granted_at, reason
+               FROM dues_grace_override
+               WHERE guild_id = $1 AND discord_user_id = $2"#,
+            guild.0 as i64,
+            id.0 as i64,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| GraceOverride {
+            until: r.grace_until,
+            granted_by: DiscordUserId(r.granted_by as u64),
+            granted_at: r.granted_at,
+            reason: r.reason,
+        }))
+    }
+
+    /// Upsert a grace stamp (insert or extend the window).
+    async fn set_grace(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        until: NaiveDate,
+        granted_by: DiscordUserId,
+        reason: Option<String>,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO dues_grace_override
+                 (guild_id, discord_user_id, grace_until, granted_by, granted_at, reason)
+               VALUES ($1, $2, $3, $4, now(), $5)
+               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET
+                 grace_until = EXCLUDED.grace_until,
+                 granted_by  = EXCLUDED.granted_by,
+                 granted_at  = EXCLUDED.granted_at,
+                 reason      = EXCLUDED.reason"#,
+            guild.0 as i64,
+            id.0 as i64,
+            until,
+            granted_by.0 as i64,
+            reason,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove a member's grace stamp. A member with none is a no-op.
+    async fn clear_grace(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            "DELETE FROM dues_grace_override WHERE guild_id = $1 AND discord_user_id = $2",
+            guild.0 as i64,
+            id.0 as i64,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderStore for PgStore {
+    type Error = PersistenceError;
+
+    /// The member's per-cycle reminder state, or `None` if they have never been reminded.
+    async fn reminder_state(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<Option<ReminderCycleState>, PersistenceError> {
+        let row = sqlx::query!(
+            r#"SELECT cycle_xdate, last_sent, snoozed, thread_id
+               FROM dues_reminder_state
+               WHERE guild_id = $1 AND discord_user_id = $2"#,
+            guild.0 as i64,
+            id.0 as i64,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(r) = row else { return Ok(None) };
+        let last_sent = r
+            .last_sent
+            .as_deref()
+            .map(|t| {
+                Milestone::from_token(t)
+                    .ok_or_else(|| PersistenceError::BadToken(format!("milestone {:?}", t)))
+            })
+            .transpose()?;
+        Ok(Some(ReminderCycleState {
+            cycle_xdate: r.cycle_xdate,
+            last_sent,
+            snoozed: r.snoozed,
+            thread_id: r.thread_id,
+        }))
+    }
+
+    /// Record that `milestone` was sent for the cycle ending `cycle_xdate`. Upserts the row
+    /// and resets `snoozed` to false when `cycle_xdate` differs from the stored one (the
+    /// cycle has turned); otherwise preserves the stored `snoozed` value.
+    async fn record_sent(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+        milestone: Milestone,
+        thread_id: i64,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO dues_reminder_state
+                 (guild_id, discord_user_id, cycle_xdate, last_sent, snoozed, thread_id, updated_at)
+               VALUES ($1, $2, $3, $4, false, $5, now())
+               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET
+                 last_sent   = EXCLUDED.last_sent,
+                 cycle_xdate = EXCLUDED.cycle_xdate,
+                 thread_id   = EXCLUDED.thread_id,
+                 snoozed     = CASE
+                                   WHEN dues_reminder_state.cycle_xdate <> EXCLUDED.cycle_xdate
+                                   THEN false
+                                   ELSE dues_reminder_state.snoozed
+                               END,
+                 updated_at  = now()"#,
+            guild.0 as i64,
+            id.0 as i64,
+            cycle_xdate,
+            milestone.as_token(),
+            thread_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Persist the lifecycle thread id without recording a send, preserving the existing cycle
+    /// fields. Seeds a new row with `cycle_xdate` and no recorded milestone.
+    async fn set_thread(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+        thread_id: i64,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO dues_reminder_state
+                 (guild_id, discord_user_id, cycle_xdate, last_sent, snoozed, thread_id, updated_at)
+               VALUES ($1, $2, $3, NULL, false, $4, now())
+               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET
+                 thread_id  = EXCLUDED.thread_id,
+                 updated_at = now()"#,
+            guild.0 as i64,
+            id.0 as i64,
+            cycle_xdate,
+            thread_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Set the snooze for the cycle ending `cycle_xdate`, upserting the row if needed.
+    async fn set_snooze(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        cycle_xdate: NaiveDate,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO dues_reminder_state
+                 (guild_id, discord_user_id, cycle_xdate, last_sent, snoozed, thread_id, updated_at)
+               VALUES ($1, $2, $3, NULL, true, NULL, now())
+               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET
+                 cycle_xdate = EXCLUDED.cycle_xdate,
+                 snoozed     = true,
+                 updated_at  = now()"#,
+            guild.0 as i64,
+            id.0 as i64,
+            cycle_xdate,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Whether `id` has a permanent opt-out row in `dues_reminder_optout`.
+    async fn is_opted_out(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<bool, PersistenceError> {
+        let opted_out = sqlx::query_scalar!(
+            r#"SELECT EXISTS(
+                   SELECT 1 FROM dues_reminder_optout
+                   WHERE guild_id = $1 AND discord_user_id = $2
+               ) AS "opted_out!""#,
+            guild.0 as i64,
+            id.0 as i64,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(opted_out)
+    }
+
+    /// Insert the permanent opt-out row. On conflict (already opted out) updates the
+    /// source so a moderator reversal then re-opt-out records the latest actor.
+    async fn opt_out(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+        source: OptOutSource,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO dues_reminder_optout
+                 (guild_id, discord_user_id, opted_out_at, source)
+               VALUES ($1, $2, now(), $3)
+               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET
+                 opted_out_at = EXCLUDED.opted_out_at,
+                 source       = EXCLUDED.source"#,
+            guild.0 as i64,
+            id.0 as i64,
+            source.as_token(),
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Remove the opt-out row. A member with none is a no-op.
+    async fn clear_opt_out(
+        &self,
+        guild: DiscordGuildId,
+        id: DiscordUserId,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            "DELETE FROM dues_reminder_optout WHERE guild_id = $1 AND discord_user_id = $2",
+            guild.0 as i64,
+            id.0 as i64,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// When the reminder sweep last completed for `guild`, or `None` if it never has.
+    async fn last_reminder_run(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Option<DateTime<Utc>>, PersistenceError> {
+        let row = sqlx::query_scalar!(
+            "SELECT last_run_at FROM dues_reminder_run WHERE guild_id = $1",
+            guild.0 as i64,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Upsert the last-run marker for `guild`.
+    async fn set_last_reminder_run(
+        &self,
+        guild: DiscordGuildId,
+        at: DateTime<Utc>,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO dues_reminder_run (guild_id, last_run_at)
+               VALUES ($1, $2)
+               ON CONFLICT (guild_id) DO UPDATE SET last_run_at = EXCLUDED.last_run_at"#,
+            guild.0 as i64,
+            at,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl ReminderTemplates for PgStore {
+    type Error = PersistenceError;
+
+    /// The stored body for `kind`, or `None` to use the built-in default.
+    async fn template(
+        &self,
+        guild: DiscordGuildId,
+        kind: ReminderTemplateKind,
+    ) -> Result<Option<String>, PersistenceError> {
+        let row = sqlx::query_scalar!(
+            "SELECT body FROM dues_reminder_template WHERE guild_id = $1 AND kind = $2",
+            guild.0 as i64,
+            kind.as_token(),
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Upsert the body for `kind`.
+    async fn set_template(
+        &self,
+        guild: DiscordGuildId,
+        kind: ReminderTemplateKind,
+        body: String,
+    ) -> Result<(), PersistenceError> {
+        sqlx::query!(
+            r#"INSERT INTO dues_reminder_template (guild_id, kind, body)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (guild_id, kind) DO UPDATE SET body = EXCLUDED.body"#,
+            guild.0 as i64,
+            kind.as_token(),
+            body,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }

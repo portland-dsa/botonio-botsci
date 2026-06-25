@@ -7,14 +7,15 @@
 use std::time::Duration;
 
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType, ComponentInteraction, ComponentInteractionCollector,
-    ComponentInteractionDataKind, CreateActionRow, CreateButton, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateSelectMenu, CreateSelectMenuKind,
-    EditInteractionResponse, Permissions, RoleId,
+    ActionRowComponent, ButtonStyle, ChannelId, ChannelType, ComponentInteraction,
+    ComponentInteractionCollector, ComponentInteractionDataKind, CreateActionRow, CreateButton,
+    CreateInputText, CreateInteractionResponse, CreateInteractionResponseMessage, CreateModal,
+    CreateSelectMenu, CreateSelectMenuKind, EditInteractionResponse, InputTextStyle, Permissions,
+    RoleId,
 };
 use serenity::futures::StreamExt as _;
 
-use domain::{DiscordChannelId, DiscordGuildId, DiscordRoleId};
+use domain::{DiscordChannelId, DiscordRoleId};
 use engine::audit::AuditLog;
 use engine::backends::util::DiscordUserId;
 use engine::store::{ConfigStore, GuildConfig};
@@ -26,8 +27,11 @@ use crate::render::setup::config_embed;
 const SET_STATUS_ROLES_ID: &str = "setup_set_status_roles";
 const SET_MODERATOR_ID: &str = "setup_set_moderator";
 const SET_CHANNELS_ID: &str = "setup_set_channels";
+const SET_DUES_ID: &str = "setup_set_dues";
 const BACK_ID: &str = "setup_back";
 const SCAN_TOGGLE_ID: &str = "setup_scan_toggle";
+const REMINDERS_TOGGLE_ID: &str = "setup_reminders_toggle";
+const DUES_URL_BUTTON_ID: &str = "setup_dues_url_button";
 
 // Per-setting select-menu custom ids.
 const MOD_ROLE_ID: &str = "setup_role_moderator";
@@ -39,7 +43,13 @@ const MOD_CHAN_ID: &str = "setup_chan_mod_approval";
 const UNVERIFIED_CHAN_ID: &str = "setup_chan_unverified";
 const DUES_CHAN_ID: &str = "setup_chan_dues_expired";
 const VERIFY_LOG_CHAN_ID: &str = "setup_chan_verify_log";
+const DUES_REMINDER_CHAN_ID: &str = "setup_chan_dues_reminder";
 const POST_PROMPT_ID: &str = "setup_post_prompt";
+
+// Dues sign-up URL modal.
+const DUES_URL_MODAL_ID: &str = "setup_dues_url_modal";
+const DUES_URL_FIELD_ID: &str = "setup_dues_url_field";
+const DUES_URL_MODAL_TIMEOUT: Duration = Duration::from_secs(120);
 
 const NAV_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -122,6 +132,16 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 )
                 .await;
             }
+            SET_DUES_ID => {
+                update_panel(
+                    &ctx,
+                    &interaction,
+                    accent,
+                    dues_section(&data.guild_config.load()),
+                    None,
+                )
+                .await;
+            }
             BACK_ID => {
                 update_panel(&ctx, &interaction, accent, panel_buttons(), None).await;
             }
@@ -129,7 +149,7 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 if !ack(&ctx, &interaction).await {
                     continue;
                 }
-                let guild = DiscordGuildId(data.config.guild_id);
+                let guild = data.config.guild();
                 let mut cfg = GuildConfig::clone(&data.guild_config.load());
                 let was_enabled = cfg.scan_enabled;
                 cfg.scan_enabled = !was_enabled;
@@ -172,6 +192,159 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                     }
                 };
                 edit_panel(&ctx, &interaction, accent, panel_buttons(), note.as_deref()).await;
+            }
+            REMINDERS_TOGGLE_ID => {
+                if !ack(&ctx, &interaction).await {
+                    continue;
+                }
+                let guild = data.config.guild();
+                let mut cfg = GuildConfig::clone(&data.guild_config.load());
+                let was_enabled = cfg.reminders_enabled;
+                cfg.reminders_enabled = !was_enabled;
+                let note = if let Err(e) = data.store.save_config(guild, &cfg).await {
+                    tracing::error!(error = %e, "setup: failed to save guild config");
+                    Some("Something went wrong saving that - please try again.".to_owned())
+                } else {
+                    let now_enabled = cfg.reminders_enabled;
+                    data.guild_config.store(std::sync::Arc::new(cfg));
+                    if let Err(e) = data
+                        .auditor
+                        .record(
+                            invoker,
+                            invoker,
+                            "config.set_reminders",
+                            serde_json::json!({
+                                "field": "dues reminders",
+                                "old": was_enabled,
+                                "new": now_enabled
+                            }),
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "setup: failed to audit config change");
+                    }
+                    // Turning reminders on with no dues-reminder channel set means threads
+                    // have nowhere to post; warn rather than enable it silently.
+                    if now_enabled && data.guild_config.load().dues_reminder_channel.is_none() {
+                        Some(
+                            "Dues reminders on. Note: no dues-reminder channel is set - set one \
+                             under Dues reminders so reminder threads have a home."
+                                .to_owned(),
+                        )
+                    } else {
+                        None
+                    }
+                };
+                edit_panel(&ctx, &interaction, accent, panel_buttons(), note.as_deref()).await;
+            }
+            DUES_URL_BUTTON_ID => {
+                // Open a modal to collect the free-text URL, then await its submission.
+                let url_modal = dues_url_modal(data.guild_config.load().dues_signup_url.as_deref());
+                if let Err(e) = interaction
+                    .create_response(
+                        ctx.serenity_context(),
+                        CreateInteractionResponse::Modal(url_modal),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "setup: failed to open dues URL modal");
+                    continue;
+                }
+                // A dismissed modal sends no event; the timeout prevents a hang.
+                let submit = match msg
+                    .await_modal_interaction(ctx.serenity_context())
+                    .author_id(ctx.author().id)
+                    .custom_ids(vec![DUES_URL_MODAL_ID.to_owned()])
+                    .timeout(DUES_URL_MODAL_TIMEOUT)
+                    .await
+                {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let Err(e) = submit
+                    .create_response(
+                        ctx.serenity_context(),
+                        CreateInteractionResponse::Acknowledge,
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "setup: failed to acknowledge dues URL modal submit");
+                    continue;
+                }
+                let raw_url = submit
+                    .data
+                    .components
+                    .iter()
+                    .flat_map(|row| &row.components)
+                    .find_map(|c| match c {
+                        ActionRowComponent::InputText(input)
+                            if input.custom_id == DUES_URL_FIELD_ID =>
+                        {
+                            input.value.clone()
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let guild = data.config.guild();
+                let mut cfg = GuildConfig::clone(&data.guild_config.load());
+                let old_url = cfg.dues_signup_url.clone();
+                let trimmed = raw_url.trim();
+                let note = if !trimmed.is_empty()
+                    && !crate::render::reminders::is_http_signup_url(trimmed)
+                {
+                    // A link button with a non-http(s) URL is rejected by Discord, which would
+                    // fail every reminder send; refuse the value and keep the current one.
+                    Some(
+                        "That doesn't look like a web link - the dues sign-up URL must start with \
+                         http:// or https://. Left it unchanged."
+                            .to_owned(),
+                    )
+                } else {
+                    let new_url = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_owned())
+                    };
+                    cfg.dues_signup_url = new_url.clone();
+                    if let Err(e) = data.store.save_config(guild, &cfg).await {
+                        tracing::error!(error = %e, "setup: failed to save guild config");
+                        Some("Something went wrong saving that - please try again.".to_owned())
+                    } else {
+                        data.guild_config.store(std::sync::Arc::new(cfg));
+                        if let Err(e) = data
+                            .auditor
+                            .record(
+                                invoker,
+                                invoker,
+                                "config.set_dues_url",
+                                serde_json::json!({
+                                    "field": "dues sign-up URL",
+                                    "old": old_url,
+                                    "new": new_url
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "setup: failed to audit config change");
+                        }
+                        if old_url == new_url {
+                            Some(
+                                "That's already the dues sign-up URL - nothing changed.".to_owned(),
+                            )
+                        } else {
+                            Some("Updated the dues sign-up URL.".to_owned())
+                        }
+                    }
+                };
+                let mut edit = EditInteractionResponse::new()
+                    .embed(config_embed(&data.guild_config.load(), accent))
+                    .components(panel_buttons());
+                if let Some(ref n) = note {
+                    edit = edit.content(n);
+                }
+                if let Err(e) = submit.edit_response(ctx.serenity_context(), edit).await {
+                    tracing::warn!(error = %e, "setup: failed to update panel after dues URL change");
+                }
             }
             POST_PROMPT_ID => {
                 if !ack(&ctx, &interaction).await {
@@ -248,31 +421,60 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
                 )
                 .await;
             }
+            DUES_REMINDER_CHAN_ID => {
+                if !ack(&ctx, &interaction).await {
+                    continue;
+                }
+                let note = apply_selection(&ctx, &interaction, invoker).await;
+                edit_panel(
+                    &ctx,
+                    &interaction,
+                    accent,
+                    dues_section(&data.guild_config.load()),
+                    note.as_deref(),
+                )
+                .await;
+            }
             _ => {}
         }
     }
     Ok(())
 }
 
-/// The summary view's buttons.
+/// The summary view's buttons. Two rows: the first holds the five existing nav/action
+/// buttons (at Discord's 5-per-row cap); the second holds the three dues-reminder
+/// controls (channel nav, toggle, URL entry).
 fn panel_buttons() -> Vec<CreateActionRow> {
-    vec![CreateActionRow::Buttons(vec![
-        CreateButton::new(SET_STATUS_ROLES_ID)
-            .label("Status & override roles")
-            .style(ButtonStyle::Primary),
-        CreateButton::new(SET_MODERATOR_ID)
-            .label("Moderator role")
-            .style(ButtonStyle::Secondary),
-        CreateButton::new(SET_CHANNELS_ID)
-            .label("Set channels")
-            .style(ButtonStyle::Secondary),
-        CreateButton::new(SCAN_TOGGLE_ID)
-            .label("Toggle scheduled scan")
-            .style(ButtonStyle::Secondary),
-        CreateButton::new(POST_PROMPT_ID)
-            .label("Post verification prompt")
-            .style(ButtonStyle::Secondary),
-    ])]
+    vec![
+        CreateActionRow::Buttons(vec![
+            CreateButton::new(SET_STATUS_ROLES_ID)
+                .label("Status & override roles")
+                .style(ButtonStyle::Primary),
+            CreateButton::new(SET_MODERATOR_ID)
+                .label("Moderator role")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(SET_CHANNELS_ID)
+                .label("Set channels")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(SCAN_TOGGLE_ID)
+                .label("Toggle scheduled scan")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(POST_PROMPT_ID)
+                .label("Post verification prompt")
+                .style(ButtonStyle::Secondary),
+        ]),
+        CreateActionRow::Buttons(vec![
+            CreateButton::new(SET_DUES_ID)
+                .label("Dues-reminder channel")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(REMINDERS_TOGGLE_ID)
+                .label("Toggle dues reminders")
+                .style(ButtonStyle::Secondary),
+            CreateButton::new(DUES_URL_BUTTON_ID)
+                .label("Set dues sign-up URL")
+                .style(ButtonStyle::Secondary),
+        ]),
+    ]
 }
 
 /// The membership-facing roles: the three status roles plus the additive Manual Override
@@ -332,6 +534,36 @@ fn back_row() -> CreateActionRow {
             .label("Back to summary")
             .style(ButtonStyle::Secondary),
     ])
+}
+
+/// The dues-reminder channel on its own page. The channel-section is at Discord's
+/// 5-row cap, so this control gets a dedicated section. Help text notes that the
+/// channel must be visible to both `Member` and `Dues Expired` so a member's reminder
+/// thread survives their lapse demotion.
+fn dues_section(cfg: &GuildConfig) -> Vec<CreateActionRow> {
+    vec![
+        channel_select(
+            DUES_REMINDER_CHAN_ID,
+            "Dues-reminder channel (visible to Member + Dues Expired)",
+            cfg.dues_reminder_channel,
+        ),
+        back_row(),
+    ]
+}
+
+/// The modal used by the "Set dues sign-up URL" button. Pre-fills the current value
+/// so the moderator can see and edit it rather than re-typing from scratch.
+fn dues_url_modal(current: Option<&str>) -> CreateModal {
+    let input = CreateInputText::new(InputTextStyle::Short, "Dues sign-up URL", DUES_URL_FIELD_ID)
+        .placeholder("https://example.org/dues")
+        .required(false)
+        .max_length(2000);
+    let input = match current {
+        Some(url) => input.value(url),
+        None => input,
+    };
+    CreateModal::new(DUES_URL_MODAL_ID, "Set dues sign-up URL")
+        .components(vec![CreateActionRow::InputText(input)])
 }
 
 fn role_select(id: &str, placeholder: &str, current: Option<DiscordRoleId>) -> CreateActionRow {
@@ -458,7 +690,7 @@ async fn apply_selection(
         );
     }
 
-    let guild = DiscordGuildId(data.config.guild_id);
+    let guild = data.config.guild();
     if let Err(e) = data.store.save_config(guild, &cfg).await {
         tracing::error!(error = %e, "setup: failed to save guild config");
         return Some("Something went wrong saving that - please try again.".to_owned());
@@ -512,6 +744,7 @@ fn set_channel_field(
             "verification-log channel",
             &mut cfg.verification_log_channel,
         ),
+        DUES_REMINDER_CHAN_ID => ("dues-reminder channel", &mut cfg.dues_reminder_channel),
         _ => return None,
     };
     let old = slot.map(|c| c.0);
@@ -587,5 +820,18 @@ mod tests {
             ..Default::default()
         };
         assert!(!roles_are_distinct(&cfg));
+    }
+
+    #[test]
+    fn set_channel_field_dues_reminder() {
+        let mut cfg = GuildConfig::default();
+        let (label, old) =
+            set_channel_field(&mut cfg, DUES_REMINDER_CHAN_ID, DiscordChannelId(20)).unwrap();
+        assert_eq!(label, "dues-reminder channel");
+        assert_eq!(old, None);
+        assert_eq!(cfg.dues_reminder_channel, Some(DiscordChannelId(20)));
+        let (_, old2) =
+            set_channel_field(&mut cfg, DUES_REMINDER_CHAN_ID, DiscordChannelId(21)).unwrap();
+        assert_eq!(old2, Some(20));
     }
 }

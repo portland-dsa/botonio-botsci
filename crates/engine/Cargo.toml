@@ -59,3 +59,10 @@ harness = false
 [[test]]
 name = "channels"
 harness = false
+
+# Behaviour suite for the dues-reminder planner (`engine::reminders::plan` +
+# `select_milestone`). Offline, Cucumber, mocks only. Cast: Sonic (the sweep protagonist),
+# Tails and Amy for per-member gate scenarios.
+[[test]]
+name = "reminders"
+harness = false

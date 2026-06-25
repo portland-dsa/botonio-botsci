@@ -40,6 +40,10 @@ pub trait MemberRead: Send + Sync {
 
     /// The member's currently-held managed status roles.
     async fn held_roles(&self, id: DiscordUserId) -> Result<Vec<Role>, MemberError>;
+
+    /// Whether `id` has a moderator grace override active today. Read through the facade so
+    /// every verify verb honors grace without each re-reading the store directly.
+    async fn active_grace(&self, id: DiscordUserId) -> Result<bool, MemberError>;
 }
 
 /// Member-oriented writes. Independent of [`MemberRead`] because not every writer reads (an

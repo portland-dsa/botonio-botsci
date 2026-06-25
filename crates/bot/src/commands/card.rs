@@ -7,6 +7,7 @@ use serenity::all::User;
 
 use engine::backends::util::DiscordUserId;
 use engine::card::{CardRead, CardView, PresentMember};
+use engine::store::{GraceOverride, GraceStore};
 
 use crate::data::{Context, Error};
 use crate::lookup::{self, LookupOutcome};
@@ -54,7 +55,18 @@ async fn show_for_target(ctx: Context<'_>, target: &User) -> Result<(), Error> {
         is_mod,
     )
     .await;
-    render_outcome(ctx, target, outcome).await
+    // Fetch the grace stamp for `target_id` so the card banner can be shown. A read
+    // failure is non-fatal: log and continue without the banner rather than refuse the
+    // whole lookup.
+    let guild = data.config.guild();
+    let grace = match data.store.grace_override(guild, target_id).await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read grace override for card; omitting banner");
+            None
+        }
+    };
+    render_outcome(ctx, target, outcome, grace).await
 }
 
 /// Turn a [`LookupOutcome`] into the ephemeral reply the member or moderator sees.
@@ -62,6 +74,7 @@ async fn render_outcome(
     ctx: Context<'_>,
     target: &User,
     outcome: LookupOutcome,
+    grace: Option<GraceOverride>,
 ) -> Result<(), Error> {
     let reply = |content: &str| {
         poise::CreateReply::default()
@@ -70,7 +83,14 @@ async fn render_outcome(
     };
     match outcome {
         LookupOutcome::Card(rec) | LookupOutcome::SelfCard(Some(rec)) => {
-            render_view(ctx, CardView::Member(rec), &target.name, false).await?;
+            render_view(
+                ctx,
+                CardView::Member(rec),
+                &target.name,
+                false,
+                grace.as_ref(),
+            )
+            .await?;
         }
         LookupOutcome::SelfCard(None) => {
             ctx.send(reply(
@@ -80,10 +100,10 @@ async fn render_outcome(
             .await?;
         }
         LookupOutcome::OverrideCard(stamp) => {
-            render_view(ctx, CardView::Override(stamp), &target.name, true).await?;
+            render_view(ctx, CardView::Override(stamp), &target.name, true, None).await?;
         }
         LookupOutcome::SelfOverride(stamp) => {
-            render_view(ctx, CardView::Override(stamp), &target.name, false).await?;
+            render_view(ctx, CardView::Override(stamp), &target.name, false, None).await?;
         }
         LookupOutcome::NotFound => {
             ctx.send(reply("No membership record found for that member."))
@@ -116,17 +136,24 @@ async fn render_outcome(
 /// the one place that decides which view draws which embed, so the self-card path and
 /// the menu/lookup path stay in step. [`CardView::Unknown`] has no card; callers render
 /// that with their own "no record" text (the wording differs by context) before
-/// delegating here.
+/// delegating here. `grace` is forwarded to the member-card render as the banner;
+/// it is `None` for override cards (which have no Solidarity Tech record to annotate).
 async fn render_view(
     ctx: Context<'_>,
     view: CardView,
     display_name: &str,
     show_note: bool,
+    grace: Option<&GraceOverride>,
 ) -> Result<(), Error> {
     let embed = match view {
-        CardView::Member(rec) => {
-            render::card::membership_card(&rec, display_name, None, Utc::now().date_naive())
-        }
+        CardView::Member(rec) => render::card::membership_card(
+            &rec,
+            display_name,
+            None,
+            Utc::now().date_naive(),
+            grace,
+            show_note,
+        ),
         CardView::Override(stamp) => render::card::override_card(display_name, &stamp, show_note),
         CardView::Unknown => return Ok(()),
     };
@@ -184,5 +211,17 @@ async fn show_card(ctx: Context<'_>, user: &User) -> Result<(), Error> {
         .map(|m| m.display_name().to_string())
         .unwrap_or_else(|| user.name.clone());
 
-    render_view(ctx, view, &display_name, false).await
+    // Read the grace stamp so the member can see their own grace window if active.
+    // Non-fatal: a read failure omits the banner rather than blocking the card.
+    let guild = data.config.guild();
+    let subject_id = DiscordUserId(user.id.get());
+    let grace = match data.store.grace_override(guild, subject_id).await {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to read grace override for self-card; omitting banner");
+            None
+        }
+    };
+
+    render_view(ctx, view, &display_name, false, grace.as_ref()).await
 }

@@ -13,6 +13,7 @@ use std::sync::Mutex;
 
 use cucumber::{World as _, given, then, when};
 
+use domain::DiscordGuildId;
 use engine::audit::AuditLog;
 use engine::backends::discord::{DiscordClient, FakeDiscord, Role};
 use engine::backends::solidarity_tech::FakeSolidarityTech;
@@ -155,7 +156,7 @@ impl StripWorld {
         let is_overridden = store.get_override(id).await.unwrap().is_some();
 
         let outcome = {
-            let ds = DataStore::new(&st, &discord, &store, &audit);
+            let ds = DataStore::new(&st, &discord, &store, &audit, DiscordGuildId(1));
             Member::new(&ds, Target { id, handle })
                 .strip(DiscordUserId(SONIC), is_overridden, &held)
                 .await

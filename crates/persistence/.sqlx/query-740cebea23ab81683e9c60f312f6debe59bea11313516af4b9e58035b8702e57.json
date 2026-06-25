@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dues_grace_override\n                 (guild_id, discord_user_id, grace_until, granted_by, granted_at, reason)\n               VALUES ($1, $2, $3, $4, now(), $5)\n               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET\n                 grace_until = EXCLUDED.grace_until,\n                 granted_by  = EXCLUDED.granted_by,\n                 granted_at  = EXCLUDED.granted_at,\n                 reason      = EXCLUDED.reason",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Date",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "740cebea23ab81683e9c60f312f6debe59bea11313516af4b9e58035b8702e57"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, mod_approval_channel_id,\n                      unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id, scan_enabled\n               FROM guild_config WHERE guild_id = $1",
+  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, mod_approval_channel_id,\n                      unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id, dues_reminder_channel_id,\n                      dues_signup_url, reminders_enabled, scan_enabled\n               FROM guild_config WHERE guild_id = $1",
   "describe": {
     "columns": [
       {
@@ -104,6 +104,39 @@
       },
       {
         "ordinal": 9,
+        "name": "dues_reminder_channel_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "dues_reminder_channel_id"
+          }
+        }
+      },
+      {
+        "ordinal": 10,
+        "name": "dues_signup_url",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "dues_signup_url"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
+        "name": "reminders_enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "reminders_enabled"
+          }
+        }
+      },
+      {
+        "ordinal": 12,
         "name": "scan_enabled",
         "type_info": "Bool",
         "origin": {
@@ -129,8 +162,11 @@
       true,
       true,
       true,
+      true,
+      true,
+      false,
       false
     ]
   },
-  "hash": "9e5c6a60fa344ef65a92521c10bb111c55a4792eff8a38d863d5b16921039ca6"
+  "hash": "ad49fbd82e7a77ed93de5bbfdb41580397e6b13dcb92ddc8ac3b56841b17306a"
 }

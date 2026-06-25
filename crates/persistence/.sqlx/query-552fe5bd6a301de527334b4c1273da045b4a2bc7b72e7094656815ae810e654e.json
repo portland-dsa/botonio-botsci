@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO dues_reminder_state\n                 (guild_id, discord_user_id, cycle_xdate, last_sent, snoozed, thread_id, updated_at)\n               VALUES ($1, $2, $3, NULL, true, NULL, now())\n               ON CONFLICT (guild_id, discord_user_id) DO UPDATE SET\n                 cycle_xdate = EXCLUDED.cycle_xdate,\n                 snoozed     = true,\n                 updated_at  = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "552fe5bd6a301de527334b4c1273da045b4a2bc7b72e7094656815ae810e654e"
+}

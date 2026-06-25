@@ -12,7 +12,8 @@ use engine::scan::{ScanPlan, ScanThreshold, ScanVerdict, plan};
 use engine::store::{InMemoryStore, Index, MemberRecord};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
-use domain::MigsStatus;
+use chrono::Utc;
+use domain::{DiscordGuildId, MigsStatus};
 
 // The fixed threshold from the migrated plan_tests.
 const THRESH: ScanThreshold = ScanThreshold {
@@ -205,7 +206,17 @@ async fn roster_known_malformed(world: &mut ScanWorld, name: String) {
 #[when("the scan plans a pass")]
 async fn scan_plans_a_pass(world: &mut ScanWorld) {
     let store = InMemoryStore::new(Index::from_records(world.known.clone()));
-    world.plan = Some(plan(&store, &world.roster, THRESH).await.unwrap());
+    world.plan = Some(
+        plan(
+            &store,
+            &world.roster,
+            THRESH,
+            DiscordGuildId(1),
+            Utc::now().date_naive(),
+        )
+        .await
+        .unwrap(),
+    );
 }
 
 // ---------------------------------------------------------------------------

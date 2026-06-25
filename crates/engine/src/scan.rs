@@ -4,13 +4,14 @@
 //! (via `verify::Member::verify`) and the abort alert. Mirrors `bulk::preview`, but returns
 //! the actionable per-member list and the demotion classification, not just counts.
 
-use domain::Role;
+use chrono::NaiveDate;
+use domain::{DiscordGuildId, Role};
 
 use crate::backends::discord::DiscordRosterMember;
 use crate::bulk::already_in_role;
-use crate::store::MemberStore;
+use crate::store::{GraceStore, MemberStore};
 use crate::util::{DiscordHandle, DiscordUserId};
-use crate::verify::{MatchOutcome, decide, locate};
+use crate::verify::{MatchOutcome, decide, effective_role, locate};
 
 /// Standing rank for demotion comparison: `Member` is highest, `Unverified` lowest.
 fn rank(role: Role) -> u8 {
@@ -75,11 +76,17 @@ pub struct ScanPlan {
 /// Plan a reconciliation pass over `members` (already enumerated and scope-filtered by the
 /// caller, as `bulk::preview` expects). Decides each against the cache, collects the role
 /// changes, counts demotions, and computes the tripwire verdict. No writes.
-pub async fn plan<S: MemberStore>(
+pub async fn plan<S, E>(
     store: &S,
     members: &[DiscordRosterMember],
     threshold: ScanThreshold,
-) -> Result<ScanPlan, S::Error> {
+    guild: DiscordGuildId,
+    today: NaiveDate,
+) -> Result<ScanPlan, E>
+where
+    S: MemberStore<Error = E> + GraceStore<Error = E>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     let mut changes = Vec::new();
     let mut demotions = 0usize;
     let mut misses = 0usize;
@@ -89,15 +96,19 @@ pub async fn plan<S: MemberStore>(
     for m in members {
         let located = locate(store, m.id, &m.handle).await?;
         let target = match decide(located, m.id, &m.handle) {
-            MatchOutcome::Matched { record, .. } => match Role::try_from(record.membership()) {
-                Ok(role) => role,
-                Err(_) => {
-                    // No usable standing: never auto-demote a record we cannot decide, and keep
-                    // it out of the demotion count so it cannot feed the mass-demote tripwire.
-                    malformed += 1;
-                    continue;
+            MatchOutcome::Matched { record, .. } => {
+                let grace = store.active_grace(guild, m.id, today).await?;
+                match effective_role(&record, grace) {
+                    Ok(role) => role,
+                    Err(()) => {
+                        // No usable standing and no grace: never auto-demote a record we cannot
+                        // decide, and keep it out of the demotion count so it cannot feed the
+                        // mass-demote tripwire.
+                        malformed += 1;
+                        continue;
+                    }
                 }
-            },
+            }
             MatchOutcome::Miss => {
                 // The cache does not know them: the join check assigns Unverified.
                 misses += 1;
