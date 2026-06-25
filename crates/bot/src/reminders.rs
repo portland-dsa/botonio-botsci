@@ -48,15 +48,18 @@ pub struct ReminderCtx<'a> {
 
 // ---- per-member helper --------------------------------------------------
 
-/// Create or reuse the member's lifecycle thread off `parent_channel`.
+/// Create or reuse the member's lifecycle thread off `parent_channel`, always returning a
+/// thread that currently exists.
 ///
-/// If a thread is already persisted in `reminder_state`, it is returned as-is.
-/// Otherwise a private thread is created, the member is added to it, and the id is
-/// persisted via `set_thread` before returning - so a later failure on the caller's
-/// side reuses the same thread on the next attempt rather than orphaning it.
+/// A thread persisted in `reminder_state` is reused only when it is still live (retitled to
+/// the Lapse notice on a `Lapsed` request). A persisted thread that has been deleted out
+/// from under us - staging cleanup, or a moderator removing it - is recreated and its id
+/// replaced, rather than handing back a dead channel: posting into a deleted thread fails
+/// the whole notice and leaves the member with no thread. With no persisted thread, a fresh
+/// one is created.
 ///
-/// `status` drives the thread title: `Expiring` -> Renewal Notice, `Lapsed` -> Lapse
-/// Notice. On a `Lapsed` request when a thread already exists, the thread is retitled.
+/// `status` drives the thread title: `Expiring`/`Current` -> Renewal Notice, `Lapsed` ->
+/// Lapse Notice.
 #[allow(clippy::too_many_arguments)]
 async fn ensure_lifecycle_thread(
     http: &Http,
@@ -69,7 +72,6 @@ async fn ensure_lifecycle_thread(
     xdate: NaiveDate,
 ) -> Result<ChannelId, crate::error::BotError> {
     let state = store.reminder_state(guild, member).await?;
-    let serenity_user = UserId::new(member.0);
 
     let thread_title = |milestone: Milestone| -> String {
         match milestone {
@@ -83,45 +85,90 @@ async fn ensure_lifecycle_thread(
         ExpiryStatus::Lapsed => Milestone::Lapse,
     };
 
-    let thread_id: i64 = match state.and_then(|s| s.thread_id) {
-        Some(tid) => {
-            // On a Lapse request, retitle the thread if it exists.
-            if milestone == Milestone::Lapse {
-                let thread_channel = ChannelId::new(tid as u64);
-                if let Err(e) = thread_channel
+    // Reuse the persisted thread only when it still exists. A thread deleted out from under
+    // us must be recreated, not reused - posting into a dead channel fails the whole notice.
+    if let Some(tid) = state.and_then(|s| s.thread_id) {
+        let thread_channel = ChannelId::new(tid as u64);
+        if thread_is_live(http, thread_channel).await? {
+            // Live: a Lapse request retitles the (possibly renewal-titled) thread, then reuses it.
+            if milestone == Milestone::Lapse
+                && let Err(e) = thread_channel
                     .edit_thread(http, EditThread::new().name(thread_title(Milestone::Lapse)))
                     .await
-                {
-                    tracing::warn!(id = member.0, error = %e, "ensure_lifecycle_thread: could not retitle thread on lapse");
-                }
+            {
+                tracing::warn!(id = member.0, error = %e, "ensure_lifecycle_thread: could not retitle thread on lapse");
             }
-            tid
+            return Ok(thread_channel);
         }
-        None => {
-            let thread = parent_channel
-                .create_thread(
-                    http,
-                    CreateThread::new(thread_title(milestone))
-                        .kind(ChannelType::PrivateThread)
-                        .auto_archive_duration(AutoArchiveDuration::OneWeek)
-                        .invitable(false),
-                )
-                .await?;
+        tracing::warn!(
+            id = member.0,
+            stored_thread = tid,
+            "stored dues thread no longer exists; creating a fresh one"
+        );
+    }
 
-            thread.id.add_thread_member(http, serenity_user).await?;
+    create_lifecycle_thread(
+        http,
+        store,
+        guild,
+        parent_channel,
+        member,
+        thread_title(milestone),
+        xdate,
+    )
+    .await
+}
 
-            // Discord snowflakes fit in 63 bits; a wrapping cast is lossless
-            // and the reverse cast (tid as u64) recovers the exact value.
-            let tid = thread.id.get() as i64;
+/// Create a fresh private lifecycle thread off `parent_channel`, add the member, and
+/// persist its id (replacing any stale one). Returns the new thread's channel id.
+///
+/// The id is persisted before the caller's message goes out, so a later failure reuses this
+/// thread on the next attempt rather than orphaning it.
+async fn create_lifecycle_thread(
+    http: &Http,
+    store: &PgStore,
+    guild: DiscordGuildId,
+    parent_channel: ChannelId,
+    member: DiscordUserId,
+    title: String,
+    xdate: NaiveDate,
+) -> Result<ChannelId, crate::error::BotError> {
+    let thread = parent_channel
+        .create_thread(
+            http,
+            CreateThread::new(title)
+                .kind(ChannelType::PrivateThread)
+                .auto_archive_duration(AutoArchiveDuration::OneWeek)
+                .invitable(false),
+        )
+        .await?;
 
-            // Persist before the caller's message goes out, so a later failure
-            // reuses this thread rather than orphaning it.
-            store.set_thread(guild, member, xdate, tid).await?;
-            tid
+    thread
+        .id
+        .add_thread_member(http, UserId::new(member.0))
+        .await?;
+
+    // Discord snowflakes fit in 63 bits; a wrapping cast is lossless and the reverse cast
+    // (tid as u64) recovers the exact value.
+    let tid = thread.id.get() as i64;
+    store.set_thread(guild, member, xdate, tid).await?;
+    Ok(thread.id)
+}
+
+/// Whether `channel` still exists. A `404 Unknown Channel` answers `false` (the thread was
+/// deleted); any other error propagates, so a transient Discord or network blip cannot
+/// masquerade as a deletion and trigger a needless recreate that would orphan the real
+/// thread.
+async fn thread_is_live(http: &Http, channel: ChannelId) -> Result<bool, crate::error::BotError> {
+    match http.get_channel(channel).await {
+        Ok(_) => Ok(true),
+        Err(serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp)))
+            if resp.status_code == serenity::http::StatusCode::NOT_FOUND =>
+        {
+            Ok(false)
         }
-    };
-
-    Ok(ChannelId::new(thread_id as u64))
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Send one member their dues notice. Creates or reuses their private thread,
