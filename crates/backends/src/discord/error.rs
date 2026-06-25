@@ -20,9 +20,9 @@ pub enum DiscordError {
     /// override.
     #[error("role {0:?} not found by name on guild")]
     RoleNotFound(&'static str),
-    /// A Manual Override marker write was attempted but no override role is configured.
-    #[error("no Manual Override role is configured")]
-    OverrideRoleUnconfigured,
+    /// A marker-role write was attempted but that marker has no role configured.
+    #[error("no role is configured for the {0:?} marker")]
+    MarkerRoleUnconfigured(super::roles::MarkerRole),
 }
 
 /// Boxes the large `serenity::Error` into [`DiscordError::Serenity`]. thiserror's

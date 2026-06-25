@@ -32,15 +32,13 @@ pub const REVIEW_OVERRIDE_ID: &str = "selfverify_review_override";
 pub const REVIEW_REJECT_ID: &str = "selfverify_review_reject";
 pub const REVIEW_MODAL_ID: &str = "selfverify_review_modal";
 
-/// The message posted into the unverified channel: a short explainer embed and the
-/// button that opens the verification form.
-pub fn verify_prompt(accent: u32) -> CreateMessage {
+/// The message posted into the unverified channel: an explainer embed (body supplied by
+/// the caller) and the button that opens the verification form. Title is bot-owned;
+/// description is the stored or default body so moderators can customise the text.
+pub fn verify_prompt(body: &str, accent: u32) -> CreateMessage {
     let embed = CreateEmbed::new()
         .title("Verify your membership")
-        .description(
-            "Already a dues-paying member? Press the button below and enter the \
-             email on your membership to get verified.",
-        )
+        .description(body)
         .color(accent);
     CreateMessage::new()
         .embed(embed)

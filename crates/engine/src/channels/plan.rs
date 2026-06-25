@@ -11,11 +11,13 @@ use chrono::{DateTime, Utc};
 
 use domain::{DiscordChannelId, DiscordGuildId};
 
-use crate::backends::discord::{ChannelKind, DiscordChannel, PermOverwrite};
+use crate::backends::discord::{
+    ChannelKind, DiscordChannel, OverwriteTarget, PermOverwrite, Permissions,
+};
 
 use super::model::{
     SetupConfig, everyone_can_view, lockdown_member, normalize, overwrites_equal,
-    overwrites_synced, restrict, role_can_view,
+    overwrites_synced, restrict, role_can_view, set_perm,
 };
 
 /// What the plan will do to one channel.
@@ -269,10 +271,41 @@ impl<'a> Classifier<'a> {
             };
         }
         if cfg.dues_expired_channels.contains(&c.id) {
+            // Restricted like the unverified channel (deny @everyone view+post, grant the
+            // dues-expired role view), but the member-facing roles ALSO get
+            // SEND_MESSAGES_IN_THREADS so a member can reply in their own private lifecycle
+            // thread - where the renewal/lapse conversation happens - while still unable to
+            // post in the channel itself (they never get SEND_MESSAGES). Granted explicitly
+            // rather than relying on the server default, so it holds regardless of guild config.
+            let mut ows = restrict(&c.overwrites, cfg, cfg.dues_expired_role);
+            ows = set_perm(
+                &ows,
+                OverwriteTarget::Role(cfg.dues_expired_role),
+                Permissions::SEND_MESSAGES_IN_THREADS,
+                true,
+            );
+            let mut allow_roles = vec![cfg.dues_expired_role];
+            // A member inside the pre-lapse window holds DuesExpiring but is still a Member;
+            // grant VIEW_CHANNEL + thread-posting so they can see and use their lifecycle thread.
+            if let Some(expiring) = cfg.dues_expiring_role {
+                ows = set_perm(
+                    &ows,
+                    OverwriteTarget::Role(expiring),
+                    Permissions::VIEW_CHANNEL,
+                    true,
+                );
+                ows = set_perm(
+                    &ows,
+                    OverwriteTarget::Role(expiring),
+                    Permissions::SEND_MESSAGES_IN_THREADS,
+                    true,
+                );
+                allow_roles.push(expiring);
+            }
             return Classified {
                 action: ChannelAction::ExpiredOnly,
-                desired: Some(restrict(&c.overwrites, cfg, cfg.dues_expired_role)),
-                allow_roles: vec![cfg.dues_expired_role],
+                desired: Some(ows),
+                allow_roles,
             };
         }
         if cfg.exclude_channels.contains(&c.id) {
@@ -390,7 +423,7 @@ mod tests {
         ChannelKind, DiscordChannel, OverwriteTarget, PermOverwrite, Permissions,
     };
 
-    use super::super::model::{VIEW, lockdown_member, restrict};
+    use super::super::model::{lockdown_member, restrict};
     use super::*;
 
     /// Build a `PermOverwrite` with the given target, allow bits, and deny bits.
@@ -425,6 +458,7 @@ mod tests {
             everyone: DiscordRoleId(1),
             member_role: DiscordRoleId(10),
             dues_expired_role: DiscordRoleId(11),
+            dues_expiring_role: None,
             unverified_role: DiscordRoleId(12),
             moderator_role: DiscordRoleId(40),
             bot_user: DiscordUserId(99),
@@ -451,7 +485,7 @@ mod tests {
     #[test]
     fn private_channel_is_left_unchanged() {
         let cfg = cfg();
-        // @everyone VIEW denied -> private
+        // @everyone VIEW_CHANNEL denied -> private
         let private = chan(
             100,
             ChannelKind::Text,
@@ -459,7 +493,7 @@ mod tests {
             vec![ow(
                 OverwriteTarget::Role(cfg.everyone),
                 Permissions::empty(),
-                VIEW,
+                Permissions::VIEW_CHANNEL,
             )],
         );
         let plan = resolve_plan(&[private], &cfg, true, now());
@@ -517,11 +551,11 @@ mod tests {
             Some(300),
             vec![ow(
                 OverwriteTarget::Role(DiscordRoleId(99)),
-                VIEW,
+                Permissions::VIEW_CHANNEL,
                 Permissions::empty(),
             )],
         );
-        // Desynced private child (@everyone VIEW denied)
+        // Desynced private child (@everyone VIEW_CHANNEL denied)
         let desynced_private = chan(
             302,
             ChannelKind::Text,
@@ -529,7 +563,7 @@ mod tests {
             vec![ow(
                 OverwriteTarget::Role(cfg.everyone),
                 Permissions::empty(),
-                VIEW,
+                Permissions::VIEW_CHANNEL,
             )],
         );
         let plan = resolve_plan(&[cat, desynced_public, desynced_private], &cfg, true, now());
@@ -556,7 +590,7 @@ mod tests {
         let mut cfg = cfg();
         cfg.unverified_channels.insert(DiscordChannelId(400));
 
-        // Private channel: @everyone VIEW denied, NO Unverified allow
+        // Private channel: @everyone VIEW_CHANNEL denied, NO Unverified allow
         let private_unverified = chan(
             400,
             ChannelKind::Text,
@@ -564,7 +598,7 @@ mod tests {
             vec![ow(
                 OverwriteTarget::Role(cfg.everyone),
                 Permissions::empty(),
-                VIEW,
+                Permissions::VIEW_CHANNEL,
             )],
         );
         let plan = resolve_plan(&[private_unverified], &cfg, true, now());
@@ -697,7 +731,7 @@ mod tests {
         let cat_ows = vec![ow(
             OverwriteTarget::Role(cfg.everyone),
             Permissions::empty(),
-            VIEW,
+            Permissions::VIEW_CHANNEL,
         )];
         let cat = chan(900, ChannelKind::Category, None, cat_ows.clone());
         // Synced child: same overwrites as parent
@@ -709,7 +743,7 @@ mod tests {
             Some(900),
             vec![ow(
                 OverwriteTarget::Role(DiscordRoleId(10)),
-                VIEW,
+                Permissions::VIEW_CHANNEL,
                 Permissions::empty(),
             )],
         );
@@ -733,6 +767,8 @@ mod tests {
     // dues_expired channel so desync_report tests are paired.
     #[test]
     fn dues_expired_channel_gets_correct_restrict_overwrites() {
+        use super::set_perm;
+
         let mut cfg = cfg();
         cfg.dues_expired_channels.insert(DiscordChannelId(1000));
 
@@ -742,11 +778,18 @@ mod tests {
 
         assert_eq!(p.action, ChannelAction::ExpiredOnly);
         assert!(p.writes);
-        // @everyone must be denied VIEW
-        let expected = restrict(&[], &cfg, cfg.dues_expired_role);
+        // @everyone must be denied VIEW_CHANNEL; dues_expired_role gets VIEW_CHANNEL
+        // (via restrict) plus SEND_MESSAGES_IN_THREADS for thread replies.
+        let base = restrict(&[], &cfg, cfg.dues_expired_role);
+        let expected = set_perm(
+            &base,
+            OverwriteTarget::Role(cfg.dues_expired_role),
+            Permissions::SEND_MESSAGES_IN_THREADS,
+            true,
+        );
         assert!(
             overwrites_equal(&p.final_overwrites, &expected),
-            "dues-expired channel final overwrites must match restrict output"
+            "dues-expired channel final overwrites must match restrict + thread-posting grant"
         );
     }
 }

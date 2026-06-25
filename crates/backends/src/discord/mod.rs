@@ -16,7 +16,7 @@ pub mod channels;
 mod client;
 mod error;
 mod http;
-mod roles;
+pub mod roles;
 
 pub use channels::{
     ChannelKind, DiscordChannel, GuildChannels, OverwriteTarget, PermOverwrite, Permissions,
@@ -24,7 +24,7 @@ pub use channels::{
 pub use client::DiscordClient;
 pub use error::DiscordError;
 pub use http::{DiscordHttp, resolve_managed_roles};
-pub use roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
+pub use roles::{DiscordRosterMember, ManagedRole, MarkerRole, MemberRoles, Role};
 
 #[cfg(feature = "fakes")]
 mod fakes;

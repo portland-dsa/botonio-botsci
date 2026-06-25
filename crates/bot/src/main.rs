@@ -179,7 +179,6 @@ async fn main() -> anyhow::Result<()> {
         floor: cfg.scan_tripwire_floor,
     };
     let scan_pace = cfg.scan_pace;
-    let scan_catchup_gap = cfg.reminder_catchup_gap;
     let scan_accent = cfg.accent_color;
 
     let guild_id = cfg.guild_id;
@@ -264,7 +263,6 @@ async fn main() -> anyhow::Result<()> {
                     scan_interval,
                     scan_threshold,
                     scan_pace,
-                    scan_catchup_gap,
                     scan_accent,
                 );
                 // The first index build already finished before `client.start()`, so

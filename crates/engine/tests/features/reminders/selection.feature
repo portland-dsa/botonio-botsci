@@ -1,22 +1,17 @@
-Feature: Dues-reminder milestone selection
+Feature: Dues notice selection
 
-  Scenario Outline: the milestone a member is due
-    Given Sonic's membership lapses in <days> days
-    And he was last sent the <last_sent> reminder
-    And the sweep is <timeliness>
-    Then the reminder due is <milestone>
+  Scenario Outline: <desc>
+    Given Sonic's dues expire in <days> days
+    And his last sent notice is <last_sent>
+    When the reminder planner runs
+    Then he is due the <notice> notice
 
     Examples:
-      | days | last_sent | timeliness | milestone |
-      | 30   | none      | timely     | Days30    |
-      | 14   | Days30    | timely     | Days14    |
-      | 1    | Days14    | timely     | Day1      |
-      | 20   | Days30    | timely     | none      |
-      | 25   | none      | delayed    | Days30    |
-      | 22   | none      | delayed    | Days14    |
-      | 21   | none      | delayed    | Days14    |
-      | 5    | none      | delayed    | Day1      |
-      | 31   | none      | delayed    | none      |
-      | 100  | none      | delayed    | none      |
-      | -1   | none      | timely     | Expired   |
-      | -3   | Expired   | timely     | none      |
+      | desc                       | days | last_sent | notice  |
+      | in window, nothing sent    | 10   | none      | renewal |
+      | expiry day counts in       | 0    | none      | renewal |
+      | renewal already sent       | 10   | renewal   | none    |
+      | outside window             | 20   | none      | none    |
+      | lapsed                     | -3   | none      | lapse   |
+      | offline through window     | -3   | none      | lapse   |
+      | lapse already sent         | -3   | lapse     | none    |

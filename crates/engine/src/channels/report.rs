@@ -222,7 +222,7 @@ mod tests {
     use crate::backends::discord::{ChannelKind, OverwriteTarget, PermOverwrite, Permissions};
 
     use super::super::model::SetupConfig;
-    use super::super::model::{VIEW, lockdown_member};
+    use super::super::model::lockdown_member;
     use super::super::plan::{ChannelAction, ChannelPlan, PlanCounts, PlannedChannel};
     use super::*;
 
@@ -239,6 +239,7 @@ mod tests {
             everyone: DiscordRoleId(1),
             member_role: DiscordRoleId(10),
             dues_expired_role: DiscordRoleId(11),
+            dues_expiring_role: None,
             unverified_role: DiscordRoleId(12),
             moderator_role: DiscordRoleId(40),
             bot_user: DiscordUserId(99),
@@ -433,7 +434,7 @@ mod tests {
         // deny, and an explicit Unverified allow, so role_can_view returns true.
         let uv_ows = vec![ow(
             OverwriteTarget::Role(cfg.unverified_role),
-            VIEW,
+            Permissions::VIEW_CHANNEL,
             Permissions::empty(),
         )];
         let visible_chan = planned(

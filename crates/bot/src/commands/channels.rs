@@ -105,6 +105,7 @@ pub(crate) fn build_setup_config(
         everyone: DiscordRoleId(guild_id),
         member_role,
         dues_expired_role,
+        dues_expiring_role: cfg.dues_expiring_role,
         unverified_role,
         moderator_role,
         bot_user,

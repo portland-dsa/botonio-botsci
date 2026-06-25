@@ -17,12 +17,12 @@ use chrono::NaiveDate;
 use domain::MigsStatus;
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::channels::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION};
-use engine::reminders::{Milestone, ReminderTemplateKind};
+use engine::reminders::{MessageKind, Milestone};
 use engine::store::{
     BulkQueueEntry, BulkQueueKind, BulkScope, BulkSession, BulkSessionStore, BulkStatus,
     ChannelSnapshotStore, ConfigStore, GraceStore, GuildConfig, IdentityWrite, InMemoryStore,
-    Index, MemberRecord, MemberStore, MissState, OptOutSource, OverrideLog, ReminderStore,
-    ReminderTemplates, RosterWrite,
+    Index, MemberRecord, MemberStore, MessageTemplates, MissState, OptOutSource, OverrideLog,
+    ReminderStore, RosterWrite,
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use persistence::PgStore;
@@ -298,7 +298,7 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
         GuildConfig::default()
     );
 
-    // A fully-populated config including the three new reminders fields round-trips losslessly.
+    // A fully-populated config including the reminders and dues fields round-trips losslessly.
     let full = GuildConfig {
         moderator_role: Some(DiscordRoleId(1)),
         member_role: Some(DiscordRoleId(2)),
@@ -309,7 +309,7 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
         unverified_channel: Some(DiscordChannelId(6)),
         dues_expired_channel: Some(DiscordChannelId(7)),
         verification_log_channel: Some(DiscordChannelId(10)),
-        dues_reminder_channel: Some(DiscordChannelId(11)),
+        dues_expiring_role: Some(DiscordRoleId(11)),
         dues_signup_url: Some("https://example.org/dues".to_owned()),
         reminders_enabled: true,
         scan_enabled: true,
@@ -731,7 +731,7 @@ async fn grace_override_round_trips(pool: sqlx::PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn reminder_state_record_sent_and_snooze(pool: sqlx::PgPool) {
+async fn reminder_state_record_sent_and_expiring_marked(pool: sqlx::PgPool) {
     let store = PgStore::new(pool);
     let guild = domain::DiscordGuildId(801);
     let member = DiscordUserId(8011);
@@ -745,9 +745,9 @@ async fn reminder_state_record_sent_and_snooze(pool: sqlx::PgPool) {
         "no state before first record_sent"
     );
 
-    // Record the Days30 milestone.
+    // Record the Renewal milestone.
     store
-        .record_sent(guild, member, xdate, Milestone::Days30, thread)
+        .record_sent(guild, member, xdate, Milestone::Renewal, thread)
         .await
         .unwrap();
     let state = store
@@ -756,40 +756,85 @@ async fn reminder_state_record_sent_and_snooze(pool: sqlx::PgPool) {
         .unwrap()
         .expect("state must exist after record_sent");
     assert_eq!(state.cycle_xdate, xdate);
-    assert_eq!(state.last_sent, Some(Milestone::Days30));
-    assert!(!state.snoozed, "snoozed starts false");
+    assert_eq!(state.last_sent, Some(Milestone::Renewal));
+    assert!(!state.expiring_marked, "expiring_marked starts false");
     assert_eq!(state.thread_id, Some(thread));
 
-    // Snooze does not change last_sent.
-    store.set_snooze(guild, member, xdate).await.unwrap();
-    let snoozed = store.reminder_state(guild, member).await.unwrap().unwrap();
-    assert!(snoozed.snoozed, "snoozed is true after set_snooze");
-    assert_eq!(snoozed.last_sent, Some(Milestone::Days30));
-
-    // record_sent on the SAME cycle preserves snooze.
+    // set_expiring_marked does not change last_sent.
     store
-        .record_sent(guild, member, xdate, Milestone::Days14, thread)
+        .set_expiring_marked(guild, member, xdate, true)
+        .await
+        .unwrap();
+    let marked = store.reminder_state(guild, member).await.unwrap().unwrap();
+    assert!(
+        marked.expiring_marked,
+        "expiring_marked is true after set_expiring_marked(true)"
+    );
+    assert_eq!(marked.last_sent, Some(Milestone::Renewal));
+
+    // record_sent on the SAME cycle preserves expiring_marked.
+    store
+        .record_sent(guild, member, xdate, Milestone::Lapse, thread)
         .await
         .unwrap();
     let same_cycle = store.reminder_state(guild, member).await.unwrap().unwrap();
     assert!(
-        same_cycle.snoozed,
-        "snoozed preserved when cycle_xdate unchanged"
+        same_cycle.expiring_marked,
+        "expiring_marked preserved when cycle_xdate unchanged"
     );
-    assert_eq!(same_cycle.last_sent, Some(Milestone::Days14));
+    assert_eq!(same_cycle.last_sent, Some(Milestone::Lapse));
 
-    // record_sent on a NEW cycle resets snooze.
+    // record_sent on a NEW cycle resets expiring_marked.
     store
-        .record_sent(guild, member, next_xdate, Milestone::Days30, thread)
+        .record_sent(guild, member, next_xdate, Milestone::Renewal, thread)
         .await
         .unwrap();
     let new_cycle = store.reminder_state(guild, member).await.unwrap().unwrap();
     assert!(
-        !new_cycle.snoozed,
-        "snoozed reset to false on new cycle_xdate"
+        !new_cycle.expiring_marked,
+        "expiring_marked reset to false on new cycle_xdate"
     );
     assert_eq!(new_cycle.cycle_xdate, next_xdate);
-    assert_eq!(new_cycle.last_sent, Some(Milestone::Days30));
+    assert_eq!(new_cycle.last_sent, Some(Milestone::Renewal));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn marked_members_returns_only_marked(pool: sqlx::PgPool) {
+    let store = PgStore::new(pool);
+    let guild = domain::DiscordGuildId(805);
+    let m1 = DiscordUserId(8051);
+    let m2 = DiscordUserId(8052);
+    let xdate = NaiveDate::from_ymd_opt(2026, 12, 31).unwrap();
+
+    // Neither marked initially.
+    assert!(
+        store.marked_members(guild).await.unwrap().is_empty(),
+        "no marked members before any set_expiring_marked"
+    );
+
+    store
+        .set_expiring_marked(guild, m1, xdate, true)
+        .await
+        .unwrap();
+    store
+        .set_expiring_marked(guild, m2, xdate, false)
+        .await
+        .unwrap();
+
+    let marked = store.marked_members(guild).await.unwrap();
+    assert_eq!(marked.len(), 1);
+    assert!(marked.contains(&m1), "m1 should be in marked_members");
+    assert!(!marked.contains(&m2), "m2 should not be in marked_members");
+
+    // Clearing m1's marker removes it from the list.
+    store
+        .set_expiring_marked(guild, m1, xdate, false)
+        .await
+        .unwrap();
+    assert!(
+        store.marked_members(guild).await.unwrap().is_empty(),
+        "no marked members after clearing all"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -805,27 +850,33 @@ async fn set_thread_persists_without_recording_a_send(pool: sqlx::PgPool) {
     assert_eq!(seeded.thread_id, Some(777));
     assert_eq!(seeded.last_sent, None, "set_thread records no milestone");
     assert_eq!(seeded.cycle_xdate, xdate);
-    assert!(!seeded.snoozed);
+    assert!(!seeded.expiring_marked);
 
-    // After a send and a snooze, set_thread updates only the thread id and preserves the rest.
+    // After a send and marking, set_thread updates only the thread id and preserves the rest.
     store
-        .record_sent(guild, member, xdate, Milestone::Days30, 777)
+        .record_sent(guild, member, xdate, Milestone::Renewal, 777)
         .await
         .unwrap();
-    store.set_snooze(guild, member, xdate).await.unwrap();
+    store
+        .set_expiring_marked(guild, member, xdate, true)
+        .await
+        .unwrap();
     store.set_thread(guild, member, xdate, 888).await.unwrap();
     let after = store.reminder_state(guild, member).await.unwrap().unwrap();
     assert_eq!(after.thread_id, Some(888), "thread id updated");
-    assert!(after.snoozed, "snooze preserved by set_thread");
+    assert!(
+        after.expiring_marked,
+        "expiring_marked preserved by set_thread"
+    );
     assert_eq!(
         after.last_sent,
-        Some(Milestone::Days30),
+        Some(Milestone::Renewal),
         "last_sent preserved by set_thread"
     );
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn opt_out_and_last_reminder_run(pool: sqlx::PgPool) {
+async fn opt_out_round_trips(pool: sqlx::PgPool) {
     let store = PgStore::new(pool);
     let guild = domain::DiscordGuildId(802);
     let member = DiscordUserId(8021);
@@ -857,25 +908,6 @@ async fn opt_out_and_last_reminder_run(pool: sqlx::PgPool) {
         !store.is_opted_out(guild, member).await.unwrap(),
         "not opted out after clear_opt_out"
     );
-
-    // last_reminder_run: None before any run.
-    assert!(
-        store.last_reminder_run(guild).await.unwrap().is_none(),
-        "no last_reminder_run before set_last_reminder_run"
-    );
-    let now = chrono::Utc::now();
-    store.set_last_reminder_run(guild, now).await.unwrap();
-    let stored = store
-        .last_reminder_run(guild)
-        .await
-        .unwrap()
-        .expect("last_reminder_run must be present after set");
-    // Timestamps round-trip within 1-second tolerance (timestamptz sub-second precision).
-    let diff = (stored - now).num_seconds().abs();
-    assert!(
-        diff <= 1,
-        "last_reminder_run must round-trip within 1 second"
-    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -886,7 +918,7 @@ async fn reminder_template_round_trips(pool: sqlx::PgPool) {
     // No template stored -> None (built-in default applies).
     assert!(
         store
-            .template(guild, ReminderTemplateKind::Monthly)
+            .template(guild, MessageKind::Monthly)
             .await
             .unwrap()
             .is_none(),
@@ -895,14 +927,11 @@ async fn reminder_template_round_trips(pool: sqlx::PgPool) {
 
     let body = "Hey {{name}}, your dues expire soon!".to_owned();
     store
-        .set_template(guild, ReminderTemplateKind::Monthly, body.clone())
+        .set_template(guild, MessageKind::Monthly, body.clone())
         .await
         .unwrap();
     assert_eq!(
-        store
-            .template(guild, ReminderTemplateKind::Monthly)
-            .await
-            .unwrap(),
+        store.template(guild, MessageKind::Monthly).await.unwrap(),
         Some(body.clone()),
         "stored body round-trips"
     );
@@ -910,22 +939,19 @@ async fn reminder_template_round_trips(pool: sqlx::PgPool) {
     // Upsert overwrites the body.
     let updated = "Updated body".to_owned();
     store
-        .set_template(guild, ReminderTemplateKind::Monthly, updated.clone())
+        .set_template(guild, MessageKind::Monthly, updated.clone())
         .await
         .unwrap();
     assert_eq!(
-        store
-            .template(guild, ReminderTemplateKind::Monthly)
-            .await
-            .unwrap(),
+        store.template(guild, MessageKind::Monthly).await.unwrap(),
         Some(updated),
         "set_template upsert overwrites the prior body"
     );
 
-    // Other kinds are still absent.
+    // Yearly kind was never stored - still absent.
     assert!(
         store
-            .template(guild, ReminderTemplateKind::Expired)
+            .template(guild, MessageKind::Yearly)
             .await
             .unwrap()
             .is_none(),

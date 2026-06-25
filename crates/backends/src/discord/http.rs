@@ -17,8 +17,8 @@ use super::channels::{
 use super::client::DiscordClient;
 use super::error::DiscordError;
 use super::roles::{
-    DiscordRosterMember, ManagedRole, MemberRoles, Role, RoleExt, StatusDiff, diff_status_roles,
-    role_names_for,
+    DiscordRosterMember, ManagedRole, MarkerRole, MemberRoles, Role, RoleExt, StatusDiff,
+    diff_status_roles, role_names_for,
 };
 use domain::DiscordRoleId;
 
@@ -47,9 +47,9 @@ pub struct DiscordHttp {
     /// provenance), kept so [`managed_roles`](DiscordClient::managed_roles) can
     /// echo them without a network round-trip. In `Role::ALL` order.
     managed: Vec<ManagedRole>,
-    /// The configured Manual Override marker role, if any. Held apart from `role_ids`
-    /// (the status trichotomy) so the marker is never resolved into the strip set.
-    override_role_id: Option<RoleId>,
+    /// Marker roles held apart from `role_ids` (the status trichotomy) so a marker
+    /// write never affects the strip set.
+    marker_role_ids: HashMap<MarkerRole, RoleId>,
 }
 
 impl DiscordHttp {
@@ -71,7 +71,7 @@ impl DiscordHttp {
             guild_id,
             role_ids,
             managed,
-            override_role_id: None,
+            marker_role_ids: HashMap::new(),
         }
     }
 
@@ -91,7 +91,7 @@ impl DiscordHttp {
         http: Arc<Http>,
         guild_id: GuildId,
         role_ids: HashMap<Role, RoleId>,
-        override_role_id: Option<RoleId>,
+        marker_role_ids: HashMap<MarkerRole, RoleId>,
     ) -> Self {
         debug_assert!(
             Role::ALL.iter().all(|r| role_ids.contains_key(r)),
@@ -115,7 +115,7 @@ impl DiscordHttp {
             guild_id,
             role_ids,
             managed,
-            override_role_id,
+            marker_role_ids,
         }
     }
 
@@ -357,10 +357,15 @@ impl DiscordClient for DiscordHttp {
         })
     }
 
-    async fn assign_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {
-        let role = self
-            .override_role_id
-            .ok_or(DiscordError::OverrideRoleUnconfigured)?;
+    async fn assign_marker_role(
+        &self,
+        user: DiscordUserId,
+        marker: MarkerRole,
+    ) -> Result<(), DiscordError> {
+        let role = *self
+            .marker_role_ids
+            .get(&marker)
+            .ok_or(DiscordError::MarkerRoleUnconfigured(marker))?;
         self.http
             .add_member_role(
                 self.guild_id,
@@ -372,9 +377,13 @@ impl DiscordClient for DiscordHttp {
         Ok(())
     }
 
-    async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {
-        // No marker role configured means there is no marker to remove - nothing to do.
-        let Some(role) = self.override_role_id else {
+    async fn remove_marker_role(
+        &self,
+        user: DiscordUserId,
+        marker: MarkerRole,
+    ) -> Result<(), DiscordError> {
+        // No role configured for this marker means there is nothing to remove.
+        let Some(role) = self.marker_role_ids.get(&marker).copied() else {
             return Ok(());
         };
         self.http

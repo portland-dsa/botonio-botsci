@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT cycle_xdate, last_sent, snoozed, thread_id\n               FROM dues_reminder_state\n               WHERE guild_id = $1 AND discord_user_id = $2",
+  "query": "SELECT cycle_xdate, last_sent, expiring_marked, thread_id\n               FROM dues_reminder_state\n               WHERE guild_id = $1 AND discord_user_id = $2",
   "describe": {
     "columns": [
       {
@@ -27,12 +27,12 @@
       },
       {
         "ordinal": 2,
-        "name": "snoozed",
+        "name": "expiring_marked",
         "type_info": "Bool",
         "origin": {
           "Table": {
             "table": "dues_reminder_state",
-            "name": "snoozed"
+            "name": "expiring_marked"
           }
         }
       },
@@ -61,5 +61,5 @@
       true
     ]
   },
-  "hash": "a842db7eafb54df11e6499ea66a7615642c28468207cc73788af89b323c024ef"
+  "hash": "4a2f2d38c705e121fe6ef4698c6701b5ac6c83464a97134ba24aaaa294340bbe"
 }

@@ -3,54 +3,24 @@
 use chrono::NaiveDate;
 
 use crate::backends::solidarity_tech::DuesStatus;
-use crate::reminders::{DueReminder, Milestone, ReminderPlan};
+use crate::reminders::{DueReminder, ExpiryStatus, Milestone, ReminderPlan};
 use crate::store::{GraceStore, MemberStore, ReminderStore};
 use domain::DiscordGuildId;
 
 /// The milestone a member is due right now, or `None` if none is.
 ///
-/// `days_until` is `xdate - today`. A lapsed member (`days_until < 0`) is always a
-/// candidate for [`Expired`](Milestone::Expired). Otherwise the candidate is, on a
-/// **timely** sweep, the most urgent pre-lapse milestone whose day has arrived
-/// (`lead_days >= days_until`); on a **delayed** sweep (the bot missed a crossing), the
-/// milestone *nearest* `days_until`, ties broken toward the more urgent mark. The
-/// candidate is returned only when it is strictly more urgent than `last_sent` (so each
-/// fires once and a delayed sweep collapses the backlog to one message).
-pub fn select_milestone(
-    days_until: i64,
-    last_sent: Option<Milestone>,
-    timely: bool,
-) -> Option<Milestone> {
-    let candidate = if days_until < 0 {
-        Milestone::Expired
-    } else if timely {
-        // Most urgent pre-lapse mark whose day has arrived (lead >= days_until).
-        // PRE_LAPSE is longest-lead first, so scan from the most urgent (last) backward.
-        Milestone::PRE_LAPSE
-            .into_iter()
-            .rev()
-            .find(|m| m.lead_days().is_some_and(|lead| lead >= days_until))?
-    } else {
-        // Only a member already inside the outermost reminder window (days_until <= the
-        // widest lead) has reached a mark a catch-up sweep should round to; one further
-        // out has entered no window, so rounding them up would fire a premature nudge.
-        // This mirrors the timely arm, which returns None once days_until exceeds every
-        // lead. Within the window: nearest mark to days_until, ties toward the more urgent
-        // (smaller lead) - iterate most-urgent-first so an exact tie keeps the more urgent.
-        let widest = Milestone::PRE_LAPSE
-            .into_iter()
-            .filter_map(|m| m.lead_days())
-            .max()
-            .expect("PRE_LAPSE always has lead-bearing marks");
-        if days_until > widest {
-            return None;
-        }
-        Milestone::PRE_LAPSE
-            .into_iter()
-            .rev()
-            .min_by_key(|m| (m.lead_days().unwrap() - days_until).abs())?
+/// `status` is built from `xdate - today`. A lapsed member (`ExpiryStatus::Lapsed`)
+/// is always a candidate for [`Lapse`](Milestone::Lapse). A member inside the
+/// 14-day window is a candidate for [`Renewal`](Milestone::Renewal). A member with
+/// current dues has no candidate. The candidate is returned only when it is strictly
+/// more urgent than `last_sent` (so each fires once and a lapse without a prior renewal
+/// collapses straight to `Lapse`).
+pub fn select_milestone(status: ExpiryStatus, last_sent: Option<Milestone>) -> Option<Milestone> {
+    let candidate = match status {
+        ExpiryStatus::Current => return None,
+        ExpiryStatus::Expiring { .. } => Milestone::Renewal,
+        ExpiryStatus::Lapsed => Milestone::Lapse,
     };
-    // Fire only if strictly more urgent than what we have already sent this cycle.
     match last_sent {
         Some(prev) if candidate <= prev => None,
         _ => Some(candidate),
@@ -58,14 +28,13 @@ pub fn select_milestone(
 }
 
 /// Plan the dues reminders due across the cached roster on `today`. Reads each member's
-/// record, grace, opt-out, and cycle state; applies the gates (grace > opt-out > snooze >
-/// auto-renew, with `Expired` bypassing all but grace); and returns the due list. No I/O
-/// beyond the store reads; no writes.
+/// record, grace, opt-out, and cycle state; applies the gates (grace > opt-out >
+/// auto-renew, with `Lapse` bypassing opt-out and auto-renew); and returns the due list.
+/// No I/O beyond the store reads; no writes.
 pub async fn plan<S, E>(
     store: &S,
     guild: DiscordGuildId,
     today: NaiveDate,
-    timely: bool,
 ) -> Result<ReminderPlan, E>
 where
     S: MemberStore<Error = E> + ReminderStore<Error = E> + GraceStore<Error = E>,
@@ -79,29 +48,26 @@ where
         let Some(xdate) = record.expires else {
             continue; // no lapse date: nothing to schedule
         };
-        let days_until = (xdate - today).num_days();
+        let status = ExpiryStatus::from(xdate - today);
 
         // Cycle state, treating a stale cycle as reset.
         let state = store.reminder_state(guild, id).await?;
-        let (last_sent, snoozed) = match state {
-            Some(s) if s.cycle_xdate == xdate => (s.last_sent, s.snoozed),
-            _ => (None, false),
+        let last_sent = match state {
+            Some(s) if s.cycle_xdate == xdate => s.last_sent,
+            _ => None,
         };
 
-        let Some(candidate) = select_milestone(days_until, last_sent, timely) else {
+        let Some(candidate) = select_milestone(status, last_sent) else {
             continue;
         };
 
-        // Gate 1: grace suppresses everything, including Expired.
+        // Gate 1: grace suppresses everything, including Lapse.
         if store.active_grace(guild, id, today).await? {
             continue;
         }
-        // The remaining gates apply only to the pre-lapse nudges; Expired bypasses them.
-        if candidate != Milestone::Expired {
+        // The remaining gates apply only to the pre-lapse nudge; Lapse bypasses them.
+        if candidate != Milestone::Lapse {
             if store.is_opted_out(guild, id).await? {
-                continue;
-            }
-            if snoozed {
                 continue;
             }
             // Auto-renew: either cadence currently Active.
@@ -116,8 +82,49 @@ where
             id,
             milestone: candidate,
             membership_type: record.membership_type,
-            days_until,
+            xdate,
         });
     }
     Ok(ReminderPlan { due })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeDelta;
+
+    #[test]
+    fn expiry_status_boundaries() {
+        assert!(matches!(
+            ExpiryStatus::from(TimeDelta::days(15)),
+            ExpiryStatus::Current
+        ));
+        assert!(matches!(
+            ExpiryStatus::from(TimeDelta::days(14)),
+            ExpiryStatus::Expiring { .. }
+        ));
+        assert!(matches!(
+            ExpiryStatus::from(TimeDelta::days(0)),
+            ExpiryStatus::Expiring { .. }
+        ));
+        assert!(matches!(
+            ExpiryStatus::from(TimeDelta::days(-1)),
+            ExpiryStatus::Lapsed
+        ));
+    }
+
+    #[test]
+    fn select_fires_once_and_collapses_offline_lapse() {
+        let exp = ExpiryStatus::Expiring {
+            time_left: chrono::TimeDelta::days(10),
+        };
+        assert_eq!(select_milestone(exp, None), Some(Milestone::Renewal));
+        assert_eq!(select_milestone(exp, Some(Milestone::Renewal)), None);
+        // Offline through the whole window -> straight to Lapse, never the stale Renewal.
+        assert_eq!(
+            select_milestone(ExpiryStatus::Lapsed, None),
+            Some(Milestone::Lapse)
+        );
+        assert_eq!(select_milestone(ExpiryStatus::Current, None), None);
+    }
 }

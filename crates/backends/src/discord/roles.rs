@@ -80,6 +80,17 @@ pub struct DiscordRosterMember {
     pub bot: bool,
 }
 
+/// A role the bot adds *alongside* a member's status role, never as their standing.
+/// Held apart from the [`Role`] trichotomy, so a status-role write never strips it
+/// and it is never read as a demotion target. The two markers share one write path.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum MarkerRole {
+    /// The hand-approval marker (the "Manual Override" role).
+    ManualOverride,
+    /// Granted while a member is inside the pre-lapse window.
+    DuesExpiring,
+}
+
 /// Decision returned by `diff_status_roles`. Kept separate so the pure logic
 /// is unit-testable without spinning up an `Http` client.
 #[derive(Debug, PartialEq, Eq)]

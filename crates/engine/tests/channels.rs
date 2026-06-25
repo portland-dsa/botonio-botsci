@@ -32,8 +32,10 @@ const BOT_USER: u64 = 99;
 
 // Channel ids used in scenarios.
 const GENERAL_ID: u64 = 100;
-const DUES_DESK_ID: u64 = 101;
+const DUES_EXPIRED_CHAN_ID: u64 = 101;
 const WELCOME_ID: u64 = 102;
+
+const DUES_EXPIRING_ROLE: u64 = 13;
 
 /// Build the base `SetupConfig` with the given channel sets.
 fn make_cfg(
@@ -45,6 +47,7 @@ fn make_cfg(
         everyone: DiscordRoleId(EVERYONE),
         member_role: DiscordRoleId(MEMBER_ROLE),
         dues_expired_role: DiscordRoleId(DUES_EXPIRED_ROLE),
+        dues_expiring_role: Some(DiscordRoleId(DUES_EXPIRING_ROLE)),
         unverified_role: DiscordRoleId(UNVERIFIED_ROLE),
         moderator_role: DiscordRoleId(MODERATOR_ROLE),
         bot_user: DiscordUserId(BOT_USER),
@@ -111,11 +114,9 @@ fn child_chan(
     }
 }
 
-/// Whether the Unverified role can view the final_overwrites of a planned channel.
-fn unverified_can_view(planned: &PlannedChannel) -> bool {
+/// Whether a given role can view the final_overwrites of a planned channel.
+fn role_can_view_planned(planned: &PlannedChannel, role_id: u64) -> bool {
     let find = |t: OverwriteTarget| planned.final_overwrites.iter().find(|o| o.target == t);
-    // @everyone base is effectively true after restrict (they get explicit deny, so false anyway).
-    // We check: @everyone overwrite for VIEW.
     let mut allowed = true; // base
     if let Some(o) = find(OverwriteTarget::Role(DiscordRoleId(EVERYONE))) {
         if o.deny.contains(Permissions::VIEW_CHANNEL) {
@@ -125,10 +126,9 @@ fn unverified_can_view(planned: &PlannedChannel) -> bool {
             allowed = true;
         }
     }
-    // Role overwrite for Unverified.
     let mut role_deny = false;
     let mut role_allow = false;
-    if let Some(o) = find(OverwriteTarget::Role(DiscordRoleId(UNVERIFIED_ROLE))) {
+    if let Some(o) = find(OverwriteTarget::Role(DiscordRoleId(role_id))) {
         role_deny = o.deny.contains(Permissions::VIEW_CHANNEL);
         role_allow = o.allow.contains(Permissions::VIEW_CHANNEL);
     }
@@ -141,6 +141,53 @@ fn unverified_can_view(planned: &PlannedChannel) -> bool {
     allowed
 }
 
+/// Whether a role's overwrite on the planned channel explicitly allows `perm`.
+fn role_overwrite_allows(planned: &PlannedChannel, role_id: u64, perm: Permissions) -> bool {
+    planned
+        .final_overwrites
+        .iter()
+        .find(|o| o.target == OverwriteTarget::Role(DiscordRoleId(role_id)))
+        .is_some_and(|o| o.allow.contains(perm))
+}
+
+/// Whether a role can effectively post in the channel itself (SEND_MESSAGES), under the
+/// same deny-then-allow resolution as viewing.
+fn role_can_post_planned(planned: &PlannedChannel, role_id: u64) -> bool {
+    let find = |t: OverwriteTarget| planned.final_overwrites.iter().find(|o| o.target == t);
+    let mut allowed = true; // base
+    if let Some(o) = find(OverwriteTarget::Role(DiscordRoleId(EVERYONE))) {
+        if o.deny.contains(Permissions::SEND_MESSAGES) {
+            allowed = false;
+        }
+        if o.allow.contains(Permissions::SEND_MESSAGES) {
+            allowed = true;
+        }
+    }
+    if let Some(o) = find(OverwriteTarget::Role(DiscordRoleId(role_id))) {
+        if o.deny.contains(Permissions::SEND_MESSAGES) {
+            allowed = false;
+        }
+        if o.allow.contains(Permissions::SEND_MESSAGES) {
+            allowed = true;
+        }
+    }
+    allowed
+}
+
+/// Map a dues role name used in a scenario to its test id.
+fn dues_role_id(role: &str) -> u64 {
+    match role {
+        "Dues Expired" => DUES_EXPIRED_ROLE,
+        "Dues Expiring" => DUES_EXPIRING_ROLE,
+        other => panic!("unknown dues role {other:?}"),
+    }
+}
+
+/// Whether the Unverified role can view the final_overwrites of a planned channel.
+fn unverified_can_view(planned: &PlannedChannel) -> bool {
+    role_can_view_planned(planned, UNVERIFIED_ROLE)
+}
+
 // ---------------------------------------------------------------------------
 // World
 // ---------------------------------------------------------------------------
@@ -150,6 +197,8 @@ fn unverified_can_view(planned: &PlannedChannel) -> bool {
 struct TailsWorld {
     /// Channels seeded in FakeDiscord.
     channels: Vec<DiscordChannel>,
+    /// Members cast as holding a dues role (name -> role id), for the dues-channel scenarios.
+    cast: std::collections::HashMap<String, u64>,
     /// Whether @everyone base-view is on for this scenario.
     everyone_base_view: bool,
     /// Config built for the scenario.
@@ -183,6 +232,7 @@ impl TailsWorld {
     async fn new() -> Self {
         Self {
             channels: Vec::new(),
+            cast: std::collections::HashMap::new(),
             everyone_base_view: true, // default: @everyone can view (most scenarios are public)
             cfg: None,
             plan: None,
@@ -355,7 +405,7 @@ async fn given_full_plan_for_guard(world: &mut TailsWorld) {
 
 #[given("Tails nominates a dues-expired channel but no unverified channel")]
 async fn given_dues_expired_only(world: &mut TailsWorld) {
-    world.channels.push(public_chan(50, "dues-desk"));
+    world.channels.push(public_chan(50, "dues-expired"));
     world.everyone_base_view = true;
     let cfg = make_cfg([], [50], []); // no unverified_channels
     world.cfg = Some(cfg);
@@ -683,6 +733,57 @@ async fn then_unverified_can_view(world: &mut TailsWorld, name: String) {
     );
 }
 
+#[then(regex = r#"^the Dues Expired role can view "([^"]+)"$"#)]
+async fn then_dues_expired_can_view(world: &mut TailsWorld, name: String) {
+    let p = find_planned_by_name(world, &name);
+    assert!(
+        role_can_view_planned(p, DUES_EXPIRED_ROLE),
+        "Dues Expired role must be able to view {name} in the final overwrites"
+    );
+}
+
+#[then(regex = r#"^the Dues Expiring role can view "([^"]+)"$"#)]
+async fn then_dues_expiring_can_view(world: &mut TailsWorld, name: String) {
+    let p = find_planned_by_name(world, &name);
+    assert!(
+        role_can_view_planned(p, DUES_EXPIRING_ROLE),
+        "Dues Expiring role must be able to view {name} in the final overwrites"
+    );
+}
+
+#[given(
+    regex = r"^(\w+)'s dues (?:are expiring|have lapsed), so they hold the (Dues Expiring|Dues Expired) role$"
+)]
+async fn given_member_holds_dues_role(world: &mut TailsWorld, member: String, role: String) {
+    world.cast.insert(member, dues_role_id(&role));
+}
+
+#[then(regex = r#"^(\w+) can reply in a thread in "([^"]+)"$"#)]
+async fn then_member_can_reply_in_thread(world: &mut TailsWorld, member: String, name: String) {
+    let role = *world
+        .cast
+        .get(&member)
+        .unwrap_or_else(|| panic!("no dues role recorded for {member}"));
+    let p = find_planned_by_name(world, &name);
+    assert!(
+        role_overwrite_allows(p, role, Permissions::SEND_MESSAGES_IN_THREADS),
+        "{member} must be able to reply in a thread in {name} (their dues role needs SEND_MESSAGES_IN_THREADS)"
+    );
+}
+
+#[then(regex = r#"^(\w+) cannot post in "([^"]+)"$"#)]
+async fn then_member_cannot_post(world: &mut TailsWorld, member: String, name: String) {
+    let role = *world
+        .cast
+        .get(&member)
+        .unwrap_or_else(|| panic!("no dues role recorded for {member}"));
+    let p = find_planned_by_name(world, &name);
+    assert!(
+        !role_can_post_planned(p, role),
+        "{member} must NOT be able to post in the {name} channel itself"
+    );
+}
+
 #[then("the guard flags that unverified channel as a lock-out breach")]
 async fn then_guard_flags_breach(world: &mut TailsWorld) {
     let plan = world.plan.as_ref().expect("no plan");
@@ -805,7 +906,7 @@ async fn then_restored_to_snapshot(world: &mut TailsWorld, name: String) {
 fn channel_id_for_name(name: &str) -> u64 {
     match name {
         "general" => GENERAL_ID,
-        "dues-desk" => DUES_DESK_ID,
+        "dues-expired" => DUES_EXPIRED_CHAN_ID,
         "welcome" => WELCOME_ID,
         "rules" => 103,
         "staff-chat" => 201,

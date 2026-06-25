@@ -195,6 +195,9 @@ pub struct GuildConfig {
     /// approval. Optional and outside the status trichotomy: ordinary verification works
     /// without it, and it is never stripped by the status-role logic.
     pub manual_override_role: Option<DiscordRoleId>,
+    /// The additive Dues Expiring marker, granted while a member is inside the pre-lapse
+    /// window; outside the status trichotomy and never stripped by status logic.
+    pub dues_expiring_role: Option<DiscordRoleId>,
     pub mod_approval_channel: Option<DiscordChannelId>,
     pub unverified_channel: Option<DiscordChannelId>,
     pub dues_expired_channel: Option<DiscordChannelId>,
@@ -202,9 +205,6 @@ pub struct GuildConfig {
     /// verification - the member and the email that matched. Unset by default;
     /// when unset the grant still happens and only the log post is skipped.
     pub verification_log_channel: Option<DiscordChannelId>,
-    /// The channel the dues-reminder private threads are parented off. Must be visible to
-    /// both `Member` and `Dues Expired` so a member's thread survives their lapse demotion.
-    pub dues_reminder_channel: Option<DiscordChannelId>,
     /// The external dues sign-up page the reminder "Renew" button links to.
     pub dues_signup_url: Option<String>,
     /// Whether the dues-reminder sweep runs for this guild. Off by default, like
@@ -343,14 +343,17 @@ impl OptOutSource {
 }
 
 /// One member's per-cycle reminder bookkeeping. `cycle_xdate` ties `last_sent` and
-/// `snoozed` to a specific lapse date: when the member's record shows a different
-/// `expires`, the cycle has turned and the planner treats `last_sent`/`snoozed` as
+/// `expiring_marked` to a specific lapse date: when the member's record shows a different
+/// `expires`, the cycle has turned and the planner treats `last_sent`/`expiring_marked` as
 /// reset. `thread_id` is the member's lifecycle thread and survives the reset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReminderCycleState {
     pub cycle_xdate: NaiveDate,
     pub last_sent: Option<crate::reminders::Milestone>,
-    pub snoozed: bool,
+    /// Whether the Dues Expiring marker role is currently held for this cycle. The sweep
+    /// flips this on grant and removal so the marker is written to Discord once on entry
+    /// and once on exit, not every pass.
+    pub expiring_marked: bool,
     pub thread_id: Option<i64>,
 }
 
@@ -452,8 +455,9 @@ pub trait ReminderStore: Send + Sync {
     ) -> Result<Option<ReminderCycleState>, Self::Error>;
 
     /// Record that `milestone` was sent for the cycle ending `cycle_xdate`, in
-    /// `thread_id`. Upserts: sets `last_sent = milestone`, `cycle_xdate`, `thread_id`,
-    /// and (when `cycle_xdate` differs from the stored one) resets `snoozed` to false.
+    /// `thread_id`. Upserts: sets `last_sent = milestone`, `cycle_xdate`, `thread_id`;
+    /// when `cycle_xdate` differs from the stored one, resets `expiring_marked` to false
+    /// and clears `last_sent`. `expiring_marked` is otherwise untouched.
     async fn record_sent(
         &self,
         guild: DiscordGuildId,
@@ -466,8 +470,8 @@ pub trait ReminderStore: Send + Sync {
     /// Persist a member's lifecycle thread id without recording a send. Saves a freshly created
     /// thread before its first message goes out, so a later send/record failure reuses that thread
     /// rather than orphaning it and creating a duplicate next sweep. Upserts: sets `thread_id`,
-    /// preserving `last_sent`/`snoozed`/`cycle_xdate`; a new row is seeded with `cycle_xdate` and
-    /// no recorded milestone.
+    /// preserving `last_sent`/`expiring_marked`/`cycle_xdate`; a new row is seeded with
+    /// `cycle_xdate` and no recorded milestone.
     async fn set_thread(
         &self,
         guild: DiscordGuildId,
@@ -476,13 +480,23 @@ pub trait ReminderStore: Send + Sync {
         thread_id: i64,
     ) -> Result<(), Self::Error>;
 
-    /// Set the snooze for the cycle ending `cycle_xdate` (upserting the row if needed).
-    async fn set_snooze(
+    /// Set the Dues Expiring marker flag for the member's current cycle (upserting the
+    /// row, seeded with `cycle_xdate`, if needed). The sweep flips this on grant/removal
+    /// so a marker is written to Discord once on entry and once on exit, not every pass.
+    async fn set_expiring_marked(
         &self,
         guild: DiscordGuildId,
         id: DiscordUserId,
         cycle_xdate: NaiveDate,
+        marked: bool,
     ) -> Result<(), Self::Error>;
+
+    /// Every member whose cycle state currently has `expiring_marked = true`. Drives the
+    /// one-time cleanup when reminders are disabled.
+    async fn marked_members(
+        &self,
+        guild: DiscordGuildId,
+    ) -> Result<Vec<DiscordUserId>, Self::Error>;
 
     /// Whether `id` has a permanent opt-out.
     async fn is_opted_out(
@@ -505,39 +519,26 @@ pub trait ReminderStore: Send + Sync {
         guild: DiscordGuildId,
         id: DiscordUserId,
     ) -> Result<(), Self::Error>;
-
-    /// When the reminder sweep last completed for `guild`, or `None` if it never has.
-    async fn last_reminder_run(
-        &self,
-        guild: DiscordGuildId,
-    ) -> Result<Option<DateTime<Utc>>, Self::Error>;
-
-    /// Record that the sweep completed for `guild` at `at`.
-    async fn set_last_reminder_run(
-        &self,
-        guild: DiscordGuildId,
-        at: DateTime<Utc>,
-    ) -> Result<(), Self::Error>;
 }
 
-/// Read a guild's editable per-type reminder template bodies. An absent row is `None`;
+/// Read a guild's editable per-type message template bodies. An absent row is `None`;
 /// the bot's render layer supplies the built-in default.
 #[async_trait]
-pub trait ReminderTemplates: Send + Sync {
+pub trait MessageTemplates: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 
     /// The stored body for `kind`, or `None` to use the built-in default.
     async fn template(
         &self,
         guild: DiscordGuildId,
-        kind: crate::reminders::ReminderTemplateKind,
+        kind: crate::reminders::MessageKind,
     ) -> Result<Option<String>, Self::Error>;
 
     /// Upsert the body for `kind`.
     async fn set_template(
         &self,
         guild: DiscordGuildId,
-        kind: crate::reminders::ReminderTemplateKind,
+        kind: crate::reminders::MessageKind,
         body: String,
     ) -> Result<(), Self::Error>;
 }
@@ -754,8 +755,6 @@ pub struct InMemoryStore {
     opt_out: RwLock<HashMap<u64, OptOutSource>>,
     /// Per-template-kind bodies: token string to body text.
     templates: RwLock<HashMap<String, String>>,
-    /// When the reminder sweep last completed.
-    last_reminder_run: RwLock<Option<DateTime<Utc>>>,
 }
 
 impl InMemoryStore {
@@ -771,7 +770,6 @@ impl InMemoryStore {
             reminder_state: RwLock::new(HashMap::new()),
             opt_out: RwLock::new(HashMap::new()),
             templates: RwLock::new(HashMap::new()),
-            last_reminder_run: RwLock::new(None),
         }
     }
 
@@ -1188,12 +1186,13 @@ impl ReminderStore for InMemoryStore {
         let entry = guard.entry(id.0).or_insert(ReminderCycleState {
             cycle_xdate,
             last_sent: None,
-            snoozed: false,
+            expiring_marked: false,
             thread_id: None,
         });
-        // New cycle: reset snooze; same cycle: preserve it.
+        // New cycle: reset the marker and last_sent so the member enters fresh.
         if entry.cycle_xdate != cycle_xdate {
-            entry.snoozed = false;
+            entry.expiring_marked = false;
+            entry.last_sent = None;
         }
         entry.cycle_xdate = cycle_xdate;
         entry.last_sent = Some(milestone);
@@ -1215,19 +1214,20 @@ impl ReminderStore for InMemoryStore {
         let entry = guard.entry(id.0).or_insert(ReminderCycleState {
             cycle_xdate,
             last_sent: None,
-            snoozed: false,
+            expiring_marked: false,
             thread_id: None,
         });
-        // Preserve the cycle, last_sent, and snooze; only stamp the thread id.
+        // Preserve the cycle, last_sent, and expiring_marked; only stamp the thread id.
         entry.thread_id = Some(thread_id);
         Ok(())
     }
 
-    async fn set_snooze(
+    async fn set_expiring_marked(
         &self,
         _guild: DiscordGuildId,
         id: DiscordUserId,
         cycle_xdate: NaiveDate,
+        marked: bool,
     ) -> Result<(), Infallible> {
         let mut guard = self
             .reminder_state
@@ -1236,12 +1236,28 @@ impl ReminderStore for InMemoryStore {
         let entry = guard.entry(id.0).or_insert(ReminderCycleState {
             cycle_xdate,
             last_sent: None,
-            snoozed: false,
+            expiring_marked: false,
             thread_id: None,
         });
         entry.cycle_xdate = cycle_xdate;
-        entry.snoozed = true;
+        entry.expiring_marked = marked;
         Ok(())
+    }
+
+    async fn marked_members(
+        &self,
+        _guild: DiscordGuildId,
+    ) -> Result<Vec<DiscordUserId>, Infallible> {
+        let guard = self
+            .reminder_state
+            .read()
+            .expect("reminder_state lock poisoned");
+        let ids = guard
+            .iter()
+            .filter(|(_, s)| s.expiring_marked)
+            .map(|(id, _)| DiscordUserId(*id))
+            .collect();
+        Ok(ids)
     }
 
     async fn is_opted_out(
@@ -1280,38 +1296,16 @@ impl ReminderStore for InMemoryStore {
             .remove(&id.0);
         Ok(())
     }
-
-    async fn last_reminder_run(
-        &self,
-        _guild: DiscordGuildId,
-    ) -> Result<Option<DateTime<Utc>>, Infallible> {
-        Ok(*self
-            .last_reminder_run
-            .read()
-            .expect("last_reminder_run lock poisoned"))
-    }
-
-    async fn set_last_reminder_run(
-        &self,
-        _guild: DiscordGuildId,
-        at: DateTime<Utc>,
-    ) -> Result<(), Infallible> {
-        *self
-            .last_reminder_run
-            .write()
-            .expect("last_reminder_run lock poisoned") = Some(at);
-        Ok(())
-    }
 }
 
 #[async_trait]
-impl ReminderTemplates for InMemoryStore {
+impl MessageTemplates for InMemoryStore {
     type Error = Infallible;
 
     async fn template(
         &self,
         _guild: DiscordGuildId,
-        kind: crate::reminders::ReminderTemplateKind,
+        kind: crate::reminders::MessageKind,
     ) -> Result<Option<String>, Infallible> {
         Ok(self
             .templates
@@ -1324,7 +1318,7 @@ impl ReminderTemplates for InMemoryStore {
     async fn set_template(
         &self,
         _guild: DiscordGuildId,
-        kind: crate::reminders::ReminderTemplateKind,
+        kind: crate::reminders::MessageKind,
         body: String,
     ) -> Result<(), Infallible> {
         self.templates

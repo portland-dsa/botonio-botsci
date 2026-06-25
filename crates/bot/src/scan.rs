@@ -31,7 +31,6 @@ pub fn spawn_scan_loop(
     interval: Duration,
     threshold: ScanThreshold,
     pace: Duration,
-    catchup_gap: Duration,
     accent: u32,
 ) {
     tokio::spawn(async move {
@@ -49,7 +48,6 @@ pub fn spawn_scan_loop(
                 bot_user_id,
                 threshold,
                 pace,
-                catchup_gap,
                 accent,
             )
             .await;
@@ -68,7 +66,6 @@ async fn run_once(
     bot_user_id: DiscordUserId,
     threshold: ScanThreshold,
     pace: Duration,
-    catchup_gap: Duration,
     accent: u32,
 ) {
     let cfg = guild_config.load();
@@ -76,7 +73,7 @@ async fn run_once(
     if !cfg.scan_enabled {
         // The scheduled scan is off, but the dues-reminder sweep toggles independently (see
         // GuildConfig). Run it on its own and skip the role-sync pass.
-        run_reminder_sweep_if_enabled(&cfg, http, store, guild, pace, catchup_gap, accent).await;
+        run_reminder_sweep_if_enabled(&cfg, http, store, guild, guild_id, pace, accent).await;
         return;
     }
     let Some(discord) = build_role_writer(http.clone(), guild_id, &cfg) else {
@@ -202,10 +199,10 @@ async fn run_once(
 
     // Dues-reminder sweep: runs after the role-sync apply completes. The tripwire-abort and
     // scan-error paths return early above, so the sweep is naturally skipped on an aborted pass.
-    run_reminder_sweep_if_enabled(&cfg, http, store, guild, pace, catchup_gap, accent).await;
+    run_reminder_sweep_if_enabled(&cfg, http, store, guild, guild_id, pace, accent).await;
 }
 
-/// Run the dues-reminder sweep when the guild has it enabled and a dues-reminder channel set.
+/// Run the dues-reminder sweep when the guild has it enabled and a dues-expired channel set.
 /// Split out of `run_once` so it runs whether or not the scheduled scan is enabled - the two
 /// toggle independently (see `GuildConfig`) - while still being skipped on a tripwire abort,
 /// whose early return is reached before either call site.
@@ -214,25 +211,29 @@ async fn run_reminder_sweep_if_enabled(
     http: &Arc<Http>,
     store: &Arc<PgStore>,
     guild: DiscordGuildId,
+    guild_id: u64,
     pace: Duration,
-    catchup_gap: Duration,
     accent: u32,
 ) {
     if !cfg.reminders_enabled {
         return;
     }
-    let Some(chan) = cfg.dues_reminder_channel else {
-        tracing::debug!("reminders enabled but no dues-reminder channel configured; skipping");
+    let Some(chan) = cfg.dues_expired_channel else {
+        tracing::debug!("reminders enabled but no dues-expired channel configured; skipping");
+        return;
+    };
+    let Some(discord) = build_role_writer(http.clone(), guild_id, cfg) else {
+        tracing::debug!("reminder sweep skipped: managed roles not configured");
         return;
     };
     crate::reminders::run_reminder_sweep(crate::reminders::ReminderCtx {
         http: http.as_ref(),
         store: store.as_ref(),
+        discord: &discord,
         guild,
         today: chrono::Utc::now().date_naive(),
         parent_channel: ChannelId::new(chan.0),
         signup_url: cfg.dues_signup_url.as_deref(),
-        catchup_gap,
         pace,
         accent,
     })

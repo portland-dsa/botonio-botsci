@@ -20,7 +20,7 @@ use crate::util::{DiscordChannelId, DiscordGuildId, DiscordUserId};
 use super::channels::{DiscordChannel, GuildChannels, PermOverwrite};
 use super::client::DiscordClient;
 use super::error::DiscordError;
-use super::roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
+use super::roles::{DiscordRosterMember, ManagedRole, MarkerRole, MemberRoles, Role};
 
 /// A [`DiscordClient`] operation a [`FakeDiscord`] can be told to fail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -29,8 +29,8 @@ pub enum DiscordOp {
     SetRole,
     RemoveRoles,
     MembersPage,
-    AssignOverrideMarker,
-    RemoveOverrideMarker,
+    AssignMarkerRole,
+    RemoveMarkerRole,
 }
 
 /// An in-memory [`DiscordClient`] for offline tests. See the module docs.
@@ -39,7 +39,7 @@ pub struct FakeDiscord {
     guild: DiscordGuildId,
     managed: Vec<ManagedRole>,
     roles: Mutex<HashMap<DiscordUserId, Vec<Role>>>,
-    markers: Mutex<HashSet<DiscordUserId>>,
+    markers: Mutex<HashSet<(DiscordUserId, MarkerRole)>>,
     roster: Mutex<Vec<DiscordRosterMember>>,
     fail: Mutex<HashSet<DiscordOp>>,
     /// Seeded channel list; [`set_channel_overwrites`] reflects writes back in.
@@ -112,9 +112,9 @@ impl FakeDiscord {
             .unwrap_or_default()
     }
 
-    /// Whether `member` currently holds the Manual Override marker.
-    pub fn has_marker(&self, member: DiscordUserId) -> bool {
-        self.markers.lock().unwrap().contains(&member)
+    /// Whether `member` currently holds `marker`.
+    pub fn has_marker(&self, member: DiscordUserId, marker: MarkerRole) -> bool {
+        self.markers.lock().unwrap().contains(&(member, marker))
     }
 
     fn guard(&self, op: DiscordOp) -> Result<(), DiscordError> {
@@ -197,15 +197,23 @@ impl DiscordClient for FakeDiscord {
         })
     }
 
-    async fn assign_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {
-        self.guard(DiscordOp::AssignOverrideMarker)?;
-        self.markers.lock().unwrap().insert(user);
+    async fn assign_marker_role(
+        &self,
+        user: DiscordUserId,
+        marker: MarkerRole,
+    ) -> Result<(), DiscordError> {
+        self.guard(DiscordOp::AssignMarkerRole)?;
+        self.markers.lock().unwrap().insert((user, marker));
         Ok(())
     }
 
-    async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError> {
-        self.guard(DiscordOp::RemoveOverrideMarker)?;
-        self.markers.lock().unwrap().remove(&user);
+    async fn remove_marker_role(
+        &self,
+        user: DiscordUserId,
+        marker: MarkerRole,
+    ) -> Result<(), DiscordError> {
+        self.guard(DiscordOp::RemoveMarkerRole)?;
+        self.markers.lock().unwrap().remove(&(user, marker));
         Ok(())
     }
 
@@ -245,6 +253,21 @@ mod tests {
     use super::super::channels::{ChannelKind, OverwriteTarget, Permissions};
     use super::*;
     use domain::DiscordRoleId;
+
+    #[tokio::test]
+    async fn marker_roles_are_tracked_independently() {
+        let fake = FakeDiscord::new();
+        let u = DiscordUserId(1);
+        fake.assign_marker_role(u, MarkerRole::DuesExpiring)
+            .await
+            .unwrap();
+        assert!(fake.has_marker(u, MarkerRole::DuesExpiring));
+        assert!(!fake.has_marker(u, MarkerRole::ManualOverride));
+        fake.remove_marker_role(u, MarkerRole::DuesExpiring)
+            .await
+            .unwrap();
+        assert!(!fake.has_marker(u, MarkerRole::DuesExpiring));
+    }
 
     fn make_channel(id: u64, kind: ChannelKind, parent_id: Option<u64>) -> DiscordChannel {
         DiscordChannel {

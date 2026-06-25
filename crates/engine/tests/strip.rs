@@ -15,7 +15,7 @@ use cucumber::{World as _, given, then, when};
 
 use domain::DiscordGuildId;
 use engine::audit::AuditLog;
-use engine::backends::discord::{DiscordClient, FakeDiscord, Role};
+use engine::backends::discord::{DiscordClient, FakeDiscord, Role, roles::MarkerRole};
 use engine::backends::solidarity_tech::FakeSolidarityTech;
 use engine::store::{InMemoryStore, Index, MemberRecord, MemberStore, OverrideLog};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
@@ -135,7 +135,7 @@ impl StripWorld {
         }
         for uid in &self.markers {
             discord
-                .assign_override_marker(DiscordUserId(*uid))
+                .assign_marker_role(DiscordUserId(*uid), MarkerRole::ManualOverride)
                 .await
                 .unwrap();
         }
@@ -224,7 +224,10 @@ async fn roles_stripped(world: &mut StripWorld, name: String) {
 async fn marker_cleared(world: &mut StripWorld, name: String) {
     let (id, _) = actor(&name);
     let discord = world.discord.as_ref().expect("no strip ran");
-    assert!(!discord.has_marker(id), "{name}'s marker should be cleared");
+    assert!(
+        !discord.has_marker(id, MarkerRole::ManualOverride),
+        "{name}'s marker should be cleared"
+    );
 }
 
 #[then(regex = r"^(\w+)'s cache link is cleared$")]

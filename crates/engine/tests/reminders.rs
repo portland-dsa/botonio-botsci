@@ -1,10 +1,9 @@
 //! Behaviour suite for the dues-reminder planner (`engine::reminders::plan` +
 //! `select_milestone`).
 //!
-//! Cast: Sonic is the outline protagonist (milestone selection); Tails and Amy are the
-//! gate scenarios' members. Each scenario seeds one `InMemoryStore` and either calls
-//! `select_milestone` directly (selection outline) or drives `plan` over the store
-//! (gate scenarios).
+//! Cast: Sonic is the selection-outline protagonist; Tails and Amy appear in the
+//! gate scenarios. Each scenario seeds one `InMemoryStore` and calls `plan` over it,
+//! or calls `select_milestone` directly for the outline.
 
 use chrono::NaiveDate;
 use cucumber::{World as _, given, then, when};
@@ -13,7 +12,7 @@ use domain::{DiscordGuildId, MigsStatus};
 
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::reminders::plan as reminder_plan;
-use engine::reminders::{Milestone, ReminderPlan, select_milestone};
+use engine::reminders::{ExpiryStatus, Milestone, ReminderPlan, select_milestone};
 use engine::store::{GraceStore, InMemoryStore, Index, MemberRecord, OptOutSource, ReminderStore};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
@@ -24,7 +23,7 @@ use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 /// The fixed guild used for all `plan` gate scenarios.
 const GUILD: DiscordGuildId = DiscordGuildId(1);
 
-/// A stable "today" for gate scenarios so xdate arithmetic is deterministic.
+/// A stable "today" for all scenarios so xdate arithmetic is deterministic.
 fn today() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 6, 24).unwrap()
 }
@@ -70,17 +69,17 @@ struct RemindersWorld {
     // --- selection outline state ---
     days_until: i64,
     last_sent: Option<Milestone>,
-    timely: bool,
     selection_result: Option<Option<Milestone>>,
 
     // --- gate scenario state (seeded into InMemoryStore before `plan` runs) ---
     records: Vec<MemberRecord>,
-    /// (guild, id, until, granted_by) for active graces to seed.
+    /// (id, until) for active graces to seed.
     graces: Vec<(DiscordUserId, NaiveDate)>,
-    /// (guild, id, xdate) for snoozes to seed.
-    snoozes: Vec<(DiscordUserId, NaiveDate)>,
     /// ids to opt out.
     opt_outs: Vec<DiscordUserId>,
+    /// ids whose reminder state should be seeded with a stale cycle_xdate so the
+    /// planner treats last_sent as reset.
+    stale_cycles: Vec<DiscordUserId>,
     plan_result: Option<ReminderPlan>,
 }
 
@@ -89,7 +88,6 @@ impl std::fmt::Debug for RemindersWorld {
         f.debug_struct("RemindersWorld")
             .field("days_until", &self.days_until)
             .field("last_sent", &self.last_sent)
-            .field("timely", &self.timely)
             .field("records", &self.records.len())
             .finish_non_exhaustive()
     }
@@ -100,12 +98,11 @@ impl RemindersWorld {
         Self {
             days_until: 0,
             last_sent: None,
-            timely: true,
             selection_result: None,
             records: Vec::new(),
             graces: Vec::new(),
-            snoozes: Vec::new(),
             opt_outs: Vec::new(),
+            stale_cycles: Vec::new(),
             plan_result: None,
         }
     }
@@ -120,19 +117,23 @@ impl RemindersWorld {
                 .await
                 .unwrap();
         }
-        for (id, cycle_xdate) in &self.snoozes {
-            store.set_snooze(GUILD, *id, *cycle_xdate).await.unwrap();
-        }
         for id in &self.opt_outs {
             store
                 .opt_out(GUILD, *id, OptOutSource::Member)
                 .await
                 .unwrap();
         }
+        // Seed a stale cycle: record_sent on a date that cannot match the member's current
+        // xdate so the planner resets last_sent to None - the "offline through a cycle" case.
+        let stale_xdate = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        for id in &self.stale_cycles {
+            store
+                .record_sent(GUILD, *id, stale_xdate, Milestone::Renewal, 0)
+                .await
+                .unwrap();
+        }
 
-        let result = reminder_plan(&store, GUILD, today(), self.timely)
-            .await
-            .unwrap();
+        let result = reminder_plan(&store, GUILD, today()).await.unwrap();
         self.plan_result = Some(result);
     }
 }
@@ -141,39 +142,36 @@ impl RemindersWorld {
 // Selection outline steps
 // ---------------------------------------------------------------------------
 
-#[given(regex = r"^Sonic's membership lapses in (-?\d+) days$")]
-async fn sonic_lapses_in(world: &mut RemindersWorld, days: i64) {
+#[given(regex = r"^Sonic's dues expire in (-?\d+) days$")]
+async fn sonic_dues_expire_in(world: &mut RemindersWorld, days: i64) {
     world.days_until = days;
 }
 
-#[given(regex = r"^he was last sent the (\w+) reminder$")]
-async fn last_sent(world: &mut RemindersWorld, milestone_str: String) {
-    world.last_sent = match milestone_str.as_str() {
+#[given(regex = r"^his last sent notice is (\w+)$")]
+async fn last_sent_notice(world: &mut RemindersWorld, token: String) {
+    world.last_sent = match token.as_str() {
         "none" => None,
-        "Days30" => Some(Milestone::Days30),
-        "Days14" => Some(Milestone::Days14),
-        "Day1" => Some(Milestone::Day1),
-        "Expired" => Some(Milestone::Expired),
-        other => panic!("unknown milestone token {other}"),
+        s => {
+            Some(Milestone::from_token(s).unwrap_or_else(|| panic!("unknown milestone token {s}")))
+        }
     };
 }
 
-#[given(regex = r"^the sweep is (timely|delayed)$")]
-async fn sweep_timeliness(world: &mut RemindersWorld, mode: String) {
-    world.timely = mode == "timely";
+#[when(regex = r"^the reminder planner runs$")]
+async fn reminder_planner_runs(world: &mut RemindersWorld) {
+    let status = ExpiryStatus::from(chrono::TimeDelta::days(world.days_until));
+    let result = select_milestone(status, world.last_sent);
+    world.selection_result = Some(result);
 }
 
-#[then(regex = r"^the reminder due is (\w+)$")]
-async fn reminder_due_is(world: &mut RemindersWorld, milestone_str: String) {
-    let result = select_milestone(world.days_until, world.last_sent, world.timely);
-    world.selection_result = Some(result);
-    let expected: Option<Milestone> = match milestone_str.as_str() {
+#[then(regex = r"^he is due the (\w+) notice$")]
+async fn he_is_due_notice(world: &mut RemindersWorld, token: String) {
+    let result = world.selection_result.expect("planner not run yet");
+    let expected: Option<Milestone> = match token.as_str() {
         "none" => None,
-        "Days30" => Some(Milestone::Days30),
-        "Days14" => Some(Milestone::Days14),
-        "Day1" => Some(Milestone::Day1),
-        "Expired" => Some(Milestone::Expired),
-        other => panic!("unknown milestone token {other}"),
+        s => {
+            Some(Milestone::from_token(s).unwrap_or_else(|| panic!("unknown milestone token {s}")))
+        }
     };
     assert_eq!(
         result, expected,
@@ -208,8 +206,8 @@ async fn tails_active_grace(world: &mut RemindersWorld) {
     world.graces.push((id, until));
 }
 
-#[given(regex = r"^Amy's membership lapses in (\d+) days$")]
-async fn amy_lapses_in(world: &mut RemindersWorld, days: i64) {
+#[given(regex = r"^Amy's dues expire in (\d+) days$")]
+async fn amy_dues_expire_in(world: &mut RemindersWorld, days: i64) {
     let xdate = today() + chrono::Duration::days(days);
     world
         .records
@@ -227,19 +225,6 @@ async fn amy_monthly_dues_active(world: &mut RemindersWorld) {
     }
 }
 
-#[given(regex = r"^Amy is snoozed for this cycle$")]
-async fn amy_snoozed(world: &mut RemindersWorld) {
-    let (id, _) = actor("Amy");
-    // The xdate must match whatever Amy's record has.
-    let xdate = world
-        .records
-        .iter()
-        .find(|r| r.discord_user_id == Some(id))
-        .and_then(|r| r.expires)
-        .expect("Amy's record must be seeded before snooze");
-    world.snoozes.push((id, xdate));
-}
-
 #[given(regex = r"^Tails has no expiry date$")]
 async fn tails_no_expiry(world: &mut RemindersWorld) {
     world.records.push(record_with_xdate("Tails", None, true));
@@ -248,7 +233,7 @@ async fn tails_no_expiry(world: &mut RemindersWorld) {
 #[given(regex = r"^Tails is unlinked$")]
 async fn tails_unlinked(world: &mut RemindersWorld) {
     // A record with no Discord id - unlinked.
-    let xdate = today() + chrono::Duration::days(14);
+    let xdate = today() + chrono::Duration::days(10);
     world
         .records
         .push(record_with_xdate("Tails", Some(xdate), false));
@@ -256,13 +241,16 @@ async fn tails_unlinked(world: &mut RemindersWorld) {
 
 #[given(regex = r"^Amy's last cycle was for a different xdate$")]
 async fn amy_stale_cycle(world: &mut RemindersWorld) {
-    // Seed a ReminderCycleState with an old xdate so the planner treats it as reset.
-    // We model this by storing a snooze for a cycle that differs from Amy's current xdate.
-    // The plan logic: if `state.cycle_xdate != xdate`, reset. So we put a snooze on a
-    // past xdate - that snooze is for a stale cycle and will be ignored.
+    // The planner resets last_sent when `state.cycle_xdate != record.expires`. Seed a
+    // `record_sent` on a past date so the stored cycle_xdate cannot match Amy's current
+    // xdate - the planner then treats the member as if no notice was sent this cycle.
     let (id, _) = actor("Amy");
-    let stale_xdate = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
-    world.snoozes.push((id, stale_xdate));
+    world
+        .records
+        .iter()
+        .find(|r| r.discord_user_id == Some(id))
+        .expect("Amy's record must be seeded before stale cycle");
+    world.stale_cycles.push(id);
 }
 
 // ---------------------------------------------------------------------------
@@ -271,7 +259,6 @@ async fn amy_stale_cycle(world: &mut RemindersWorld) {
 
 #[when(regex = r"^the reminder sweep is planned$")]
 async fn reminder_sweep_planned(world: &mut RemindersWorld) {
-    world.timely = true;
     world.run_plan().await;
 }
 
@@ -291,12 +278,12 @@ fn any_due(plan: &ReminderPlan, name: &str) -> bool {
     plan.due.iter().any(|r| r.id == id)
 }
 
-#[then(regex = r"^Tails is due the Expired reminder$")]
-async fn tails_due_expired(world: &mut RemindersWorld) {
+#[then(regex = r"^Tails is due the lapse notice$")]
+async fn tails_due_lapse(world: &mut RemindersWorld) {
     let plan = world.plan_result.as_ref().expect("plan not run");
     assert!(
-        is_due(plan, "Tails", Milestone::Expired),
-        "expected Tails to be due Expired; plan: {:?}",
+        is_due(plan, "Tails", Milestone::Lapse),
+        "expected Tails to be due Lapse; plan: {:?}",
         plan
     );
 }
@@ -321,15 +308,10 @@ async fn amy_due_none(world: &mut RemindersWorld) {
     );
 }
 
-#[then(regex = r"^Amy is due the (\w+) reminder$")]
-async fn amy_due_milestone(world: &mut RemindersWorld, milestone_str: String) {
-    let milestone = match milestone_str.as_str() {
-        "Days30" => Milestone::Days30,
-        "Days14" => Milestone::Days14,
-        "Day1" => Milestone::Day1,
-        "Expired" => Milestone::Expired,
-        other => panic!("unknown milestone {other}"),
-    };
+#[then(regex = r"^Amy is due the (\w+) notice$")]
+async fn amy_due_notice(world: &mut RemindersWorld, token: String) {
+    let milestone = Milestone::from_token(token.as_str())
+        .unwrap_or_else(|| panic!("unknown milestone {token}"));
     let plan = world.plan_result.as_ref().expect("plan not run");
     assert!(
         is_due(plan, "Amy", milestone),

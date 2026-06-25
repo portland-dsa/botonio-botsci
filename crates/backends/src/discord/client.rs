@@ -7,7 +7,7 @@ use crate::util::{DiscordChannelId, DiscordGuildId, DiscordUserId};
 
 use super::channels::{GuildChannels, PermOverwrite};
 use super::error::DiscordError;
-use super::roles::{DiscordRosterMember, ManagedRole, MemberRoles, Role};
+use super::roles::{DiscordRosterMember, ManagedRole, MarkerRole, MemberRoles, Role};
 
 /// Async, object-safe interface for the bot's guild role operations.
 ///
@@ -76,15 +76,21 @@ pub trait DiscordClient: Send + Sync {
         cursor: Option<&str>,
     ) -> Result<MemberPage<DiscordRosterMember>, DiscordError>;
 
-    /// Add the configured Manual Override marker role to `user`, leaving their status
-    /// roles untouched. Errors with [`DiscordError::OverrideRoleUnconfigured`] when no
-    /// marker role is configured.
-    async fn assign_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError>;
+    /// Add `marker` to `user`, leaving their status roles untouched. Errors with
+    /// [`DiscordError::MarkerRoleUnconfigured`] when that marker has no role configured.
+    async fn assign_marker_role(
+        &self,
+        user: DiscordUserId,
+        marker: MarkerRole,
+    ) -> Result<(), DiscordError>;
 
-    /// Remove the Manual Override marker role from `user`. A no-op (still `Ok`) when the
-    /// member does not hold it, and likewise when no marker role is configured - there is
-    /// then nothing to remove.
-    async fn remove_override_marker(&self, user: DiscordUserId) -> Result<(), DiscordError>;
+    /// Remove `marker` from `user`. A no-op (still `Ok`) when the member does not hold it,
+    /// or when that marker has no role configured - there is then nothing to remove.
+    async fn remove_marker_role(
+        &self,
+        user: DiscordUserId,
+        marker: MarkerRole,
+    ) -> Result<(), DiscordError>;
 
     /// Reads every channel in the guild with its permission overwrites, plus
     /// whether the `@everyone` guild role grants `VIEW_CHANNEL` at the base level.

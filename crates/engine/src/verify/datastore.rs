@@ -2,6 +2,7 @@
 
 use crate::audit::AuditLog;
 use crate::backends::discord::DiscordClient;
+use crate::backends::discord::roles::MarkerRole;
 use crate::backends::solidarity_tech::SolidarityTechClient;
 use crate::store::{GraceStore, IdentityWrite, MemberRecord, MemberStore, OverrideLog};
 use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
@@ -164,14 +165,14 @@ where
 
     async fn set_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError> {
         self.discord
-            .assign_override_marker(id)
+            .assign_marker_role(id, MarkerRole::ManualOverride)
             .await
             .map_err(|e| MemberError::Discord(e.to_string()))
     }
 
     async fn clear_override_marker(&self, id: DiscordUserId) -> Result<(), MemberError> {
         self.discord
-            .remove_override_marker(id)
+            .remove_marker_role(id, MarkerRole::ManualOverride)
             .await
             .map_err(|e| MemberError::Discord(e.to_string()))
     }

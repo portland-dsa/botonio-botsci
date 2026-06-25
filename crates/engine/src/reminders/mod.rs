@@ -5,84 +5,95 @@
 mod plan;
 pub use plan::{plan, select_milestone};
 
+use chrono::TimeDelta;
+
 use crate::backends::solidarity_tech::MembershipType;
 use crate::util::DiscordUserId;
 
+/// The single pre-lapse window, in days. Entering it triggers both the renewal reminder
+/// and the Dues Expiring role; past it (negative days) is a lapse.
+pub const PRE_LAPSE_WINDOW_DAYS: i64 = 14;
+
+/// Where a member sits relative to their dues lapse - the typed replacement for a bare
+/// day count. Built from `xdate - today`. Distinct from `domain::MembershipStatus`
+/// (Solidarity Tech standing): this is the dues timing axis.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExpiryStatus {
+    /// More than the window away - dues current, no notice due.
+    Current,
+    /// Inside the window (`0 ..= PRE_LAPSE_WINDOW_DAYS` days left, expiry day included);
+    /// carries the time left for the sweep's log line.
+    Expiring { time_left: TimeDelta },
+    /// Past the lapse date.
+    Lapsed,
+}
+
+impl From<TimeDelta> for ExpiryStatus {
+    /// Classify on whole days, so sub-day precision never makes "expires today" ambiguous.
+    fn from(time_left: TimeDelta) -> Self {
+        match time_left.num_days() {
+            d if d > PRE_LAPSE_WINDOW_DAYS => Self::Current,
+            d if d >= 0 => Self::Expiring { time_left },
+            _ => Self::Lapsed,
+        }
+    }
+}
+
 /// One point on a member's lapse timeline, ordered by urgency (the variant order is the
-/// `Ord` order): the three pre-lapse nudges and the post-lapse notice. The single ordered
-/// marker `Option<Milestone>` in [`ReminderCycleState`](crate::store::ReminderCycleState)
+/// `Ord` order): the pre-lapse renewal notice, then the post-lapse notice. The single
+/// ordered marker `Option<Milestone>` in [`ReminderCycleState`](crate::store::ReminderCycleState)
 /// records how far a member has been notified this cycle; a milestone is due only when it
 /// is strictly more urgent than that marker.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum Milestone {
-    /// ~30 days before the lapse date.
-    Days30,
-    /// ~14 days before.
-    Days14,
-    /// The day before (1 day out).
-    Day1,
-    /// The dues date has passed; the one notice that ignores snooze and opt-out.
-    Expired,
+    /// The single pre-lapse renewal notice, sent inside the 14-day window.
+    Renewal,
+    /// The dues date has passed; sent once on lapse regardless of opt-out and auto-renew.
+    Lapse,
 }
 
 impl Milestone {
-    /// The three pre-lapse milestones, longest lead first.
-    pub const PRE_LAPSE: [Milestone; 3] = [Milestone::Days30, Milestone::Days14, Milestone::Day1];
-
-    /// Days of lead time before the lapse date this milestone marks, or `None` for
-    /// [`Expired`](Milestone::Expired), which fires after the date rather than before it.
-    pub fn lead_days(self) -> Option<i64> {
-        match self {
-            Milestone::Days30 => Some(30),
-            Milestone::Days14 => Some(14),
-            Milestone::Day1 => Some(1),
-            Milestone::Expired => None,
-        }
-    }
-
     /// The stable token stored in `dues_reminder_state.last_sent`.
     pub fn as_token(self) -> &'static str {
         match self {
-            Milestone::Days30 => "days30",
-            Milestone::Days14 => "days14",
-            Milestone::Day1 => "day1",
-            Milestone::Expired => "expired",
+            Milestone::Renewal => "renewal",
+            Milestone::Lapse => "lapse",
         }
     }
 
     /// Decode a stored token; `None` for an unrecognized value (the caller turns that
-    /// into a typed error, never a silent guess), as `MissState::from_token` does.
+    /// into a typed error, never a silent guess).
     pub fn from_token(s: &str) -> Option<Self> {
         match s {
-            "days30" => Some(Milestone::Days30),
-            "days14" => Some(Milestone::Days14),
-            "day1" => Some(Milestone::Day1),
-            "expired" => Some(Milestone::Expired),
+            "renewal" => Some(Milestone::Renewal),
+            "lapse" => Some(Milestone::Lapse),
             _ => None,
         }
     }
 }
 
-/// Which dues type's template a reminder uses; `Expired` is its own single template,
-/// not per-type. Built from a member's [`MembershipType`] for a pre-lapse nudge, or
-/// fixed to `Expired` for the lapse notice.
+/// Which template a message uses: the dues-cadence renewal templates and the non-dues
+/// message kinds. Built from a member's [`MembershipType`] for a renewal notice, or
+/// chosen directly for banner, unverified, and lapse notices.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ReminderTemplateKind {
+pub enum MessageKind {
     Monthly,
     Yearly,
     OneTime,
     IncomeBased,
-    Expired,
+    Unverified,
+    DuesBanner,
 }
 
-impl ReminderTemplateKind {
+impl MessageKind {
     pub fn as_token(self) -> &'static str {
         match self {
             Self::Monthly => "monthly",
             Self::Yearly => "yearly",
             Self::OneTime => "one_time",
             Self::IncomeBased => "income_based",
-            Self::Expired => "expired",
+            Self::Unverified => "unverified",
+            Self::DuesBanner => "dues_banner",
         }
     }
 
@@ -92,13 +103,14 @@ impl ReminderTemplateKind {
             "yearly" => Some(Self::Yearly),
             "one_time" => Some(Self::OneTime),
             "income_based" => Some(Self::IncomeBased),
-            "expired" => Some(Self::Expired),
+            "unverified" => Some(Self::Unverified),
+            "dues_banner" => Some(Self::DuesBanner),
             _ => None,
         }
     }
 
-    /// The pre-lapse template kind for a member's dues cadence. (The `Expired` kind is
-    /// chosen by the caller for the lapse notice, not derived from a type.)
+    /// The renewal-notice template kind for a member's dues cadence. (The `Lapse` notice
+    /// is chosen by the caller directly, not derived from a type.)
     pub fn from_membership_type(t: MembershipType) -> Self {
         match t {
             MembershipType::Monthly => Self::Monthly,
@@ -110,13 +122,13 @@ impl ReminderTemplateKind {
 }
 
 /// One member's due reminder for this sweep: who, which milestone, the dues type (for
-/// the template), and the true days remaining (for the rendered deadline line).
+/// the template), and the lapse date (for the rendered deadline line).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DueReminder {
     pub id: DiscordUserId,
     pub milestone: Milestone,
     pub membership_type: Option<MembershipType>,
-    pub days_until: i64,
+    pub xdate: chrono::NaiveDate,
 }
 
 /// The members due a reminder this sweep, in roster order. The bot applies each, paced.
@@ -130,8 +142,6 @@ mod tests {
     use super::*;
     #[test]
     fn urgency_order_is_ascending() {
-        assert!(Milestone::Days30 < Milestone::Days14);
-        assert!(Milestone::Days14 < Milestone::Day1);
-        assert!(Milestone::Day1 < Milestone::Expired);
+        assert!(Milestone::Renewal < Milestone::Lapse);
     }
 }
