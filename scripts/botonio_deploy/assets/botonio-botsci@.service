@@ -53,6 +53,13 @@ AmbientCapabilities=
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged ~@resources
+# Re-add the chown family that `~@privileged` strips: on start the SSO server hands its
+# runtime directory and unix socket to this environment's SSO group with a chown(2). The bot
+# owns both and joins the group via SupplementaryGroups, so the call needs no privilege - but
+# chown is in @privileged, so without this it is killed with SIGSYS (status=31/SYS) the moment
+# the socket binds. CapabilityBoundingSet stays empty, so this still cannot chown to an
+# arbitrary owner; it permits only the own-file/own-group handoff.
+SystemCallFilter=@chown
 # AF_UNIX is REQUIRED: sd_notify speaks over a Unix datagram socket; omit it and the unit
 # never reaches "ready". AF_INET/AF_INET6 are the gateway + backend HTTPS.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
