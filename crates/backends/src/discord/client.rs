@@ -106,4 +106,11 @@ pub trait DiscordClient: Send + Sync {
         id: DiscordChannelId,
         overwrites: &[PermOverwrite],
     ) -> Result<(), DiscordError>;
+
+    /// The member's current managed status role in the guild, or `None` when the id
+    /// is not a member there. `Some(Role::Member)` means they hold the configured
+    /// Member role specifically (id-matched, so it survives a `DISCORD_ROLE_*_ID`
+    /// override); a present member holding no managed role is `Some(Role::Unverified)`.
+    /// This is the SSO endpoint's authoritative "in the server with role X" answer.
+    async fn member_status_role(&self, user: DiscordUserId) -> Result<Option<Role>, DiscordError>;
 }

@@ -143,28 +143,37 @@ fn dues_page(cfg: &GuildConfig) -> Vec<CreateActionRow> {
 
 /// Moderation page: the moderator role select, then a row with the Automatic Membership
 /// Checks toggle and grey Back.
-fn moderation_page(cfg: &GuildConfig) -> Vec<CreateActionRow> {
+fn moderation_page(cfg: &GuildConfig, sso_deploy_enabled: bool) -> Vec<CreateActionRow> {
+    let mut toggles = vec![toggle_button(
+        SCAN_TOGGLE_ID,
+        "Automatic Membership Checks",
+        cfg.scan_enabled,
+    )];
+    // The SSO toggle shows only when the deploy enables SSO (BOT_SSO_ENABLED) - the other
+    // half of the two-gate model. Without it the per-guild toggle would be inert, so it is
+    // hidden rather than shown as a dead control.
+    if sso_deploy_enabled {
+        toggles.push(toggle_button(SSO_TOGGLE_ID, "SSO", cfg.sso_enabled));
+    }
+    toggles.push(back_button());
     vec![
         role_select(MOD_ROLE_ID, "Moderator role", cfg.moderator_role),
-        CreateActionRow::Buttons(vec![
-            toggle_button(
-                SCAN_TOGGLE_ID,
-                "Automatic Membership Checks",
-                cfg.scan_enabled,
-            ),
-            back_button(),
-        ]),
+        CreateActionRow::Buttons(toggles),
     ]
 }
 
 /// The components for `page`, read against the current config.
-pub(super) fn page_components(page: Page, cfg: &GuildConfig) -> Vec<CreateActionRow> {
+pub(super) fn page_components(
+    page: Page,
+    cfg: &GuildConfig,
+    sso_deploy_enabled: bool,
+) -> Vec<CreateActionRow> {
     match page {
         Page::Landing => landing_page(),
         Page::Verification => verification_page(cfg),
         Page::Membership => membership_page(cfg),
         Page::Dues => dues_page(cfg),
-        Page::Moderation => moderation_page(cfg),
+        Page::Moderation => moderation_page(cfg, sso_deploy_enabled),
     }
 }
 
@@ -214,6 +223,26 @@ fn publish_button(id: &str, posted: bool, post_label: &str, update_label: &str) 
     CreateButton::new(id)
         .label(if posted { update_label } else { post_label })
         .style(ButtonStyle::Primary)
+}
+
+/// The disable-SSO confirmation rendered into the panel in place of the Moderation page:
+/// the verbatim warning as an embed plus a red "Yes, disable SSO" and a grey "Cancel".
+/// Disabling SSO removes the admin-panel login path, so it is gated behind this explicit
+/// confirm; enabling needs none and never reaches here.
+pub(super) fn sso_disable_confirm(accent: u32) -> (CreateEmbed, Vec<CreateActionRow>) {
+    let embed = CreateEmbed::new()
+        .title("Disable SSO?")
+        .description(SSO_DISABLE_WARNING)
+        .color(accent);
+    let buttons = CreateActionRow::Buttons(vec![
+        CreateButton::new(SSO_DISABLE_CONFIRM_ID)
+            .label("Yes, disable SSO")
+            .style(ButtonStyle::Danger),
+        CreateButton::new(SSO_DISABLE_CANCEL_ID)
+            .label("Cancel")
+            .style(ButtonStyle::Secondary),
+    ]);
+    (embed, vec![buttons])
 }
 
 fn role_select(id: &str, placeholder: &str, current: Option<DiscordRoleId>) -> CreateActionRow {

@@ -38,7 +38,10 @@ use crate::data::{Context, Error};
 use crate::render::reminders::default_body;
 use crate::render::setup::landing_embed;
 
-use handlers::{apply_selection, post_banner, post_prompt, toggle_reminders, toggle_scan};
+use handlers::{
+    apply_selection, confirm_disable_sso, post_banner, post_prompt, toggle_reminders, toggle_scan,
+    toggle_sso,
+};
 use modals::{edit_message, set_dues_url};
 use pages::{landing_page, page_components, page_embeds};
 
@@ -52,6 +55,17 @@ const BACK_ID: &str = "setup_back";
 // Toggles.
 const SCAN_TOGGLE_ID: &str = "setup_scan_toggle";
 const REMINDERS_TOGGLE_ID: &str = "setup_reminders_toggle";
+
+// SSO toggle (Moderation page; shown only when BOT_SSO_ENABLED is set on the deploy).
+// Enabling flips immediately; disabling routes through an in-panel confirm because it
+// removes the admin-panel login path.
+const SSO_TOGGLE_ID: &str = "setup_sso_toggle";
+const SSO_DISABLE_CONFIRM_ID: &str = "setup_sso_disable_confirm";
+const SSO_DISABLE_CANCEL_ID: &str = "setup_sso_disable_cancel";
+/// The verbatim warning shown before a disable - disabling SSO is the lockout-risk
+/// direction (it removes the admin-panel login path), so it is confirmed.
+const SSO_DISABLE_WARNING: &str = "This will prevent the admin panel from working because leaders will no longer be able \
+     to log in. Are you 100% sure you want to do this?";
 
 // Per-setting role select-menu custom ids.
 const MOD_ROLE_ID: &str = "setup_role_moderator";
@@ -183,6 +197,13 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
             REMINDERS_TOGGLE_ID => {
                 toggle_reminders(&ctx, &interaction, accent, invoker).await;
             }
+            SSO_TOGGLE_ID => {
+                toggle_sso(&ctx, &interaction, accent, invoker).await;
+            }
+            SSO_DISABLE_CONFIRM_ID => {
+                confirm_disable_sso(&ctx, &interaction, accent, invoker).await;
+            }
+            SSO_DISABLE_CANCEL_ID => nav(&ctx, &interaction, accent, Page::Moderation).await,
 
             // ---- role selects (Membership page) ----------------------------
             MEMBER_ROLE_ID | DUES_ROLE_ID | DUES_EXPIRING_ROLE_ID | OVERRIDE_ROLE_ID => {
@@ -323,7 +344,7 @@ async fn nav(ctx: &Context<'_>, interaction: &ComponentInteraction, accent: u32,
     let cfg = ctx.data().guild_config.load();
     let message = CreateInteractionResponseMessage::new()
         .embeds(page_embeds(page, &cfg, accent))
-        .components(page_components(page, &cfg));
+        .components(page_components(page, &cfg, ctx.data().sso_deploy_enabled));
     if let Err(e) = interaction
         .create_response(
             ctx.serenity_context(),
@@ -348,7 +369,7 @@ async fn redraw(
     let cfg = ctx.data().guild_config.load();
     let mut edit = EditInteractionResponse::new()
         .embeds(page_embeds(page, &cfg, accent))
-        .components(page_components(page, &cfg));
+        .components(page_components(page, &cfg, ctx.data().sso_deploy_enabled));
     if let Some(note) = note {
         edit = edit.content(note);
     }
@@ -373,7 +394,7 @@ async fn redraw_via(
     let cfg = ctx.data().guild_config.load();
     let mut edit = EditInteractionResponse::new()
         .embeds(page_embeds(page, &cfg, accent))
-        .components(page_components(page, &cfg));
+        .components(page_components(page, &cfg, ctx.data().sso_deploy_enabled));
     if let Some(note) = note {
         edit = edit.content(note);
     }

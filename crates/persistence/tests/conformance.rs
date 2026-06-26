@@ -313,6 +313,7 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
         dues_signup_url: Some("https://example.org/dues".to_owned()),
         reminders_enabled: true,
         scan_enabled: true,
+        sso_enabled: true,
         // Each posted-message reference round-trips as its (channel, message) id pair.
         unverified_prompt: Some(MessageRef {
             channel: DiscordChannelId(6),

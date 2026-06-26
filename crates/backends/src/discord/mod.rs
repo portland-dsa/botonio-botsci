@@ -16,6 +16,7 @@ pub mod channels;
 mod client;
 mod error;
 mod http;
+pub mod oauth;
 pub mod roles;
 
 pub use channels::{
@@ -24,6 +25,9 @@ pub use channels::{
 pub use client::DiscordClient;
 pub use error::DiscordError;
 pub use http::{DiscordHttp, resolve_managed_roles};
+pub use oauth::{
+    AccessToken, AuthorizeUrl, DiscordOAuthClient, DiscordOAuthHttp, PkceVerifier, State,
+};
 pub use roles::{DiscordRosterMember, ManagedRole, MarkerRole, MemberRoles, Role};
 
 #[cfg(feature = "fakes")]
@@ -31,3 +35,6 @@ mod fakes;
 
 #[cfg(feature = "fakes")]
 pub use fakes::{DiscordOp, FakeDiscord};
+
+#[cfg(feature = "fakes")]
+pub use oauth::FakeDiscordOAuth;

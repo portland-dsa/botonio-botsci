@@ -26,6 +26,7 @@ struct GuildConfigRow {
     dues_signup_url: Option<String>,
     reminders_enabled: bool,
     scan_enabled: bool,
+    sso_enabled: bool,
     unverified_prompt_channel_id: Option<i64>,
     unverified_prompt_message_id: Option<i64>,
     dues_banner_channel_id: Option<i64>,
@@ -59,6 +60,7 @@ impl From<GuildConfigRow> for GuildConfig {
             dues_signup_url: r.dues_signup_url,
             reminders_enabled: r.reminders_enabled,
             scan_enabled: r.scan_enabled,
+            sso_enabled: r.sso_enabled,
             unverified_prompt: msg_ref(
                 r.unverified_prompt_channel_id,
                 r.unverified_prompt_message_id,
@@ -79,7 +81,7 @@ impl ConfigStore for PgStore {
                       unverified_role_id, manual_override_role_id, dues_expiring_role_id,
                       mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,
                       verification_log_channel_id,
-                      dues_signup_url, reminders_enabled, scan_enabled,
+                      dues_signup_url, reminders_enabled, scan_enabled, sso_enabled,
                       unverified_prompt_channel_id, unverified_prompt_message_id,
                       dues_banner_channel_id, dues_banner_message_id
                FROM guild_config WHERE guild_id = $1"#,
@@ -108,9 +110,9 @@ impl ConfigStore for PgStore {
                   verification_log_channel_id,
                   dues_signup_url, reminders_enabled, scan_enabled,
                   unverified_prompt_channel_id, unverified_prompt_message_id,
-                  dues_banner_channel_id, dues_banner_message_id, updated_at)
+                  dues_banner_channel_id, dues_banner_message_id, sso_enabled, updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                       $15, $16, $17, $18, now())
+                       $15, $16, $17, $18, $19, now())
                ON CONFLICT (guild_id) DO UPDATE SET
                  moderator_role_id            = EXCLUDED.moderator_role_id,
                  member_role_id               = EXCLUDED.member_role_id,
@@ -125,6 +127,7 @@ impl ConfigStore for PgStore {
                  dues_signup_url              = EXCLUDED.dues_signup_url,
                  reminders_enabled            = EXCLUDED.reminders_enabled,
                  scan_enabled                 = EXCLUDED.scan_enabled,
+                 sso_enabled                  = EXCLUDED.sso_enabled,
                  unverified_prompt_channel_id = EXCLUDED.unverified_prompt_channel_id,
                  unverified_prompt_message_id = EXCLUDED.unverified_prompt_message_id,
                  dues_banner_channel_id       = EXCLUDED.dues_banner_channel_id,
@@ -148,6 +151,7 @@ impl ConfigStore for PgStore {
             ref_msg(config.unverified_prompt),
             ref_chan(config.dues_banner),
             ref_msg(config.dues_banner),
+            config.sso_enabled,
         )
         .execute(&self.pool)
         .await?;
