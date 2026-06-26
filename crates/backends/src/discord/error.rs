@@ -23,6 +23,19 @@ pub enum DiscordError {
     /// A marker-role write was attempted but that marker has no role configured.
     #[error("no role is configured for the {0:?} marker")]
     MarkerRoleUnconfigured(super::roles::MarkerRole),
+    /// The Discord OAuth code-for-token exchange failed (bad code, expired, or a
+    /// transport error). Detail is logged at the call site, never surfaced - the
+    /// SSO flow renders one uniform denial regardless.
+    #[error("OAuth code exchange failed")]
+    OAuthExchange,
+    /// Reading the verified user from `GET /users/@me` failed.
+    #[error("reading the OAuth user failed")]
+    OAuthUserRead(#[source] reqwest::Error),
+    /// `GET /users/@me` succeeded but returned a body whose `id` was not a numeric
+    /// snowflake. Kept distinct from [`OAuthExchange`] so a malformed userinfo response is
+    /// not mistaken for a code-exchange (credential) failure - it is a user-read fault.
+    #[error("the OAuth user response had a non-numeric id")]
+    OAuthUserMalformed,
 }
 
 /// Boxes the large `serenity::Error` into [`DiscordError::Serenity`]. thiserror's

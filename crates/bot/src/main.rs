@@ -18,6 +18,7 @@ mod reminders;
 mod render;
 mod scan;
 mod self_verify;
+mod sso;
 
 use std::sync::Arc;
 
@@ -181,6 +182,19 @@ async fn main() -> anyhow::Result<()> {
     let scan_pace = cfg.scan_pace;
     let scan_accent = cfg.accent_color;
 
+    // SSO: read config now (before the setup closure captures `cfg`), then pass
+    // the captured pieces into `build_sso_state` when `ready` fires.
+    let sso_cfg = crate::sso::config::SsoConfig::from_env();
+    let sso_auditor = auditor.clone();
+    // Hold the SSO server task so the shutdown path can await its graceful drain before the
+    // runtime is dropped - an in-flight /sso/complete then finishes like a gateway
+    // interaction instead of being hard-cancelled at main return. Unix-only (so is the server).
+    #[cfg(unix)]
+    let sso_task: std::sync::Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    #[cfg(unix)]
+    let setup_sso_task = sso_task.clone();
+
     let guild_id = cfg.guild_id;
     let token = secrecy::ExposeSecret::expose_secret(&cfg.token).to_owned();
 
@@ -248,10 +262,13 @@ async fn main() -> anyhow::Result<()> {
             let self_verify_limiter = setup_self_verify_limiter;
             let solidarity_tech = setup_solidarity_tech;
             let guild_config = setup_guild_config;
+            #[cfg(unix)]
+            let sso_task = setup_sso_task;
             Box::pin(async move {
                 let gid = serenity::all::GuildId::new(guild_id);
                 poise::builtins::register_in_guild(ctx, &framework.options().commands, gid).await?;
                 tracing::info!("commands registered; bot is ready to serve");
+                let bot_user_id = engine::backends::util::DiscordUserId(ready.user.id.get());
                 crate::scan::spawn_scan_loop(
                     ctx.http.clone(),
                     scan_store,
@@ -259,12 +276,53 @@ async fn main() -> anyhow::Result<()> {
                     scan_solidarity_tech,
                     scan_guild_config,
                     guild_id,
-                    engine::backends::util::DiscordUserId(ready.user.id.get()),
+                    bot_user_id,
                     scan_interval,
                     scan_threshold,
                     scan_pace,
                     scan_accent,
                 );
+                // Bring up the SSO unix-socket server when enabled. A misconfigured-but-
+                // enabled endpoint is a hard error logged here; the bot keeps serving Discord
+                // while the SSO path stays down rather than starting half-provisioned.
+                #[cfg_attr(not(unix), allow(unused_variables))]
+                let sso_cfg = sso_cfg;
+                if sso_cfg.enabled {
+                    match build_sso_state(
+                        &sso_cfg,
+                        ctx.http.clone(),
+                        sso_auditor,
+                        guild_config.clone(),
+                        guild_id,
+                        bot_user_id,
+                    ) {
+                        #[cfg_attr(not(unix), allow(unused_variables))]
+                        Ok((state, socket_path, socket_group, bearer)) => {
+                            #[cfg(unix)]
+                            {
+                                let handle = tokio::spawn(async move {
+                                    if let Err(e) = crate::sso::server::serve(
+                                        state,
+                                        socket_path,
+                                        socket_group,
+                                        bearer,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(target: "sso_abuse", error = %e, "sso: server task exited");
+                                    }
+                                });
+                                *sso_task.lock().expect("sso task lock poisoned") = Some(handle);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "sso: ENABLED but could not start - check provisioning"
+                            );
+                        }
+                    }
+                }
                 // The first index build already finished before `client.start()`, so
                 // reaching this point means gateway-ready AND index-built - exactly the
                 // condition systemd should treat as READY=1.
@@ -280,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
                     http: ctx.http.clone(),
                     solidarity_tech,
                     bot_user_id: ready.user.id,
+                    sso_deploy_enabled: sso_cfg.enabled,
                 })
             })
         })
@@ -336,6 +395,17 @@ async fn main() -> anyhow::Result<()> {
     });
 
     client.start().await?;
+
+    // The gateway has stopped; give any in-flight SSO request a bounded window to finish its
+    // graceful drain before main returns and the runtime is dropped.
+    #[cfg(unix)]
+    {
+        let draining = sso_task.lock().expect("sso task lock poisoned").take();
+        if let Some(handle) = draining {
+            tracing::info!("draining the SSO server before exit");
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await;
+        }
+    }
     Ok(())
 }
 
@@ -378,7 +448,7 @@ async fn run_migrate() -> anyhow::Result<()> {
 
 /// Resolve when the process is asked to terminate.
 #[cfg(unix)]
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
     let mut int = signal(SignalKind::interrupt()).expect("install SIGINT handler");
@@ -390,8 +460,96 @@ async fn shutdown_signal() {
 
 /// On non-Unix (local Windows development), Ctrl-C is the shutdown signal.
 #[cfg(not(unix))]
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Assemble [`SsoState`], the socket path, and the caller bearer from a validated
+/// config and the bot's already-live handles.
+///
+/// Returns the triple needed to spawn [`crate::sso::server::serve`], or an
+/// [`SsoError`] if any required secret is missing, the signing key is bad, or the
+/// redirect URI is empty. Fail-closed: a partial provisioning is a hard error rather
+/// than a degraded start.
+///
+/// The `DiscordHttp` is built from `guild_config`'s managed role map; if the roles
+/// have not yet been configured in `/setup`, this returns an error - the SSO path
+/// requires a fully configured guild.
+///
+/// [`SsoState`]: crate::sso::server::SsoState
+/// [`SsoError`]: crate::sso::config::SsoError
+#[cfg_attr(not(unix), allow(dead_code))]
+fn build_sso_state(
+    cfg: &crate::sso::config::SsoConfig,
+    http: Arc<serenity::http::Http>,
+    auditor: Arc<persistence::Auditor>,
+    guild_config: Arc<arc_swap::ArcSwap<engine::store::GuildConfig>>,
+    guild_id: u64,
+    bot_user_id: engine::backends::util::DiscordUserId,
+) -> Result<
+    (
+        crate::sso::server::SsoState,
+        std::path::PathBuf,
+        Option<String>,
+        secrecy::SecretString,
+    ),
+    crate::sso::config::SsoError,
+> {
+    use crate::sso::assertion::Signer;
+    use crate::sso::config::{SsoError, load_secrets};
+    use crate::sso::server::SsoState;
+    use crate::sso::store::PendingAuthStore;
+    use engine::backends::discord::DiscordOAuthHttp;
+    use engine::util::DiscordGuildId;
+
+    let secrets = load_secrets(cfg)?;
+
+    // The SSO flow's `discord.member_status_role` needs the managed role map. Validate at
+    // boot that the roles are configured - fail the bind if not (fail closed) rather than
+    // guessing. The complete handler rebuilds the writer from the live config on every
+    // request, so a later /setup role change takes effect without a restart; the map is
+    // never frozen at boot, like every other write path (see `Data::role_writer`).
+    crate::guild_config::build_role_writer(http.clone(), guild_id, &guild_config.load())
+        .ok_or(SsoError::Missing("managed roles not configured in /setup"))?;
+
+    let oauth = DiscordOAuthHttp::new(
+        secrets.oauth_client_id,
+        secrets.oauth_client_secret,
+        cfg.redirect_uri.clone(),
+    )
+    .map_err(|_| SsoError::Missing("BOT_SSO_REDIRECT_URI (invalid URI)"))?;
+
+    let signer = Signer::new(
+        secrets.signing_key,
+        "botonio".to_owned(),
+        cfg.audience.clone(),
+        DiscordGuildId(guild_id),
+        cfg.kid.clone(),
+        cfg.ttl_secs,
+    );
+
+    let store = PendingAuthStore::new(cfg.store_cap, cfg.store_ttl);
+    let begin_limiter = crate::lookup::RateLimiter::new(cfg.begin_rate_per_min);
+
+    let state = SsoState {
+        oauth: Arc::new(oauth),
+        http,
+        guild_id,
+        auditor,
+        signer: Arc::new(signer),
+        store: Arc::new(store),
+        bot_id: bot_user_id,
+        audience: cfg.audience.as_str().into(),
+        begin_limiter: Arc::new(begin_limiter),
+        guild_config,
+    };
+
+    Ok((
+        state,
+        cfg.socket_path.clone(),
+        cfg.socket_group.clone(),
+        secrets.bearer,
+    ))
 }
 
 /// The refresh task shares the gateway's Solidarity Tech client (an `Arc`) and the

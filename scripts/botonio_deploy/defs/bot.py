@@ -13,12 +13,21 @@ from . import SecretTokens, EnvVars
 
 
 class BotSecretTokens(Enum):
-    """The ``SecretTokens`` provisioned per bot instance (Solidarity Tech is production-only)."""
+    """The ``SecretTokens`` provisioned per bot instance (Solidarity Tech is production-only).
+
+    The three SSO credentials are always provisioned even when ``BOT_SSO_ENABLED`` is unset;
+    the bot ignores them until that flag is on, but the ``.cred`` files must be present or
+    systemd fails credential loading at start. Zoe encrypts the real values once
+    workspace-sync is ready and the OAuth app is registered.
+    """
 
     DiscordBotToken = SecretTokens.DiscordBotToken
     SolidarityTechToken = SecretTokens.SolidarityTechToken
     DbMigrationPassword = SecretTokens.DbMigrationPassword
     AuditHashKey = SecretTokens.AuditHashKey
+    SsoOauthClientSecret = SecretTokens.SsoOauthClientSecret
+    SsoSigningKey = SecretTokens.SsoSigningKey
+    SsoCallerBearer = SecretTokens.SsoCallerBearer
 
 
 class BotEnvironmentValues(StrEnum):
@@ -31,3 +40,7 @@ class BotEnvironmentValues(StrEnum):
     GoodStandingUserId = EnvVars.GoodStandingUserId
     ExpiringUserId = EnvVars.ExpiringUserId
     LapsedUserId = EnvVars.LapsedUserId
+
+    # SSO role-check (non-secret; the client id is public, the redirect uri is the relay callback)
+    SsoOauthClientId = EnvVars.SsoOauthClientId
+    SsoRedirectUri = EnvVars.SsoRedirectUri

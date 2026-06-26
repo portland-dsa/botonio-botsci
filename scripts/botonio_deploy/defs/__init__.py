@@ -37,6 +37,9 @@ class SecretTokens(StrEnum):
     DbMigrationPassword = "db_migration_password"
     AuditHashKey = "audit_hash_key"
     B2ApplicationKey = "b2_application_key"
+    SsoOauthClientSecret = "sso_oauth_client_secret"
+    SsoSigningKey = "sso_signing_key"
+    SsoCallerBearer = "sso_caller_bearer"
 
 
 class EnvVars(StrEnum):
@@ -46,6 +49,12 @@ class EnvVars(StrEnum):
     GoodStandingUserId = "good_standing_id"
     ExpiringUserId = "expiring_standing_id"
     LapsedUserId = "lapsed_user_id"
+
+    # SSO role-check (non-secret per-env config): the OAuth client id is public and the redirect
+    # uri is the relay's callback, so they render in via substitution like the values above
+    # rather than being hand-edited into the rendered unit.
+    SsoOauthClientId = "sso_oauth_client_id"
+    SsoRedirectUri = "sso_redirect_uri"
 
     # B2 Stuff
     B2BucketName = "b2_bucket_name"

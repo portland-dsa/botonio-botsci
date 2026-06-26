@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, dues_expiring_role_id,\n                      mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id,\n                      dues_signup_url, reminders_enabled, scan_enabled,\n                      unverified_prompt_channel_id, unverified_prompt_message_id,\n                      dues_banner_channel_id, dues_banner_message_id\n               FROM guild_config WHERE guild_id = $1",
+  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, dues_expiring_role_id,\n                      mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id,\n                      dues_signup_url, reminders_enabled, scan_enabled, sso_enabled,\n                      unverified_prompt_channel_id, unverified_prompt_message_id,\n                      dues_banner_channel_id, dues_banner_message_id\n               FROM guild_config WHERE guild_id = $1",
   "describe": {
     "columns": [
       {
@@ -148,6 +148,17 @@
       },
       {
         "ordinal": 13,
+        "name": "sso_enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "sso_enabled"
+          }
+        }
+      },
+      {
+        "ordinal": 14,
         "name": "unverified_prompt_channel_id",
         "type_info": "Int8",
         "origin": {
@@ -158,7 +169,7 @@
         }
       },
       {
-        "ordinal": 14,
+        "ordinal": 15,
         "name": "unverified_prompt_message_id",
         "type_info": "Int8",
         "origin": {
@@ -169,7 +180,7 @@
         }
       },
       {
-        "ordinal": 15,
+        "ordinal": 16,
         "name": "dues_banner_channel_id",
         "type_info": "Int8",
         "origin": {
@@ -180,7 +191,7 @@
         }
       },
       {
-        "ordinal": 16,
+        "ordinal": 17,
         "name": "dues_banner_message_id",
         "type_info": "Int8",
         "origin": {
@@ -210,11 +221,12 @@
       true,
       false,
       false,
+      false,
       true,
       true,
       true,
       true
     ]
   },
-  "hash": "57fedbefe93139259ceaffef28b2ceebbd9b9e14d7a2fdc0c75371b91a956fa3"
+  "hash": "aef121ce39f3b82690819c9bf66001cf7e8346b13a3358a1ae9dd3eb9c5e7eb0"
 }

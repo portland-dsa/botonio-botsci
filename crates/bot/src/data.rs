@@ -36,6 +36,10 @@ pub struct Data {
     pub solidarity_tech: Arc<SolidarityTechHttp>,
     /// The bot's own user id, captured once at `ready`.
     pub bot_user_id: UserId,
+    /// Whether SSO is enabled for this deploy (`BOT_SSO_ENABLED`), captured once at
+    /// startup. The `/setup` panel shows the per-guild SSO toggle only when this is set -
+    /// the deploy half of the two-gate model; without it the per-guild toggle is inert.
+    pub sso_deploy_enabled: bool,
 }
 
 impl Data {

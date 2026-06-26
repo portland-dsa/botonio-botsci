@@ -163,6 +163,101 @@ async fn cleanup_markers_on_off(ctx: &Context<'_>) {
 }
 
 // ====================================================================
+// SSO toggle (Moderation page)
+// ====================================================================
+
+/// The SSO enable/disable toggle. Enabling flips immediately, like the other toggles.
+/// Disabling is the lockout-risk direction - it removes the admin-panel login path - so
+/// instead of flipping it renders the confirm view into the panel; the disable itself
+/// happens in [`confirm_disable_sso`] once the moderator confirms.
+pub(super) async fn toggle_sso(
+    ctx: &Context<'_>,
+    interaction: &ComponentInteraction,
+    accent: u32,
+    invoker: DiscordUserId,
+) {
+    if ctx.data().guild_config.load().sso_enabled {
+        // Disabling: show the confirm view in place. A direct message update (like `nav`),
+        // not an `ack` + `redraw`; the flip waits for the confirm button.
+        let (embed, components) = super::pages::sso_disable_confirm(accent);
+        let message = CreateInteractionResponseMessage::new()
+            .embed(embed)
+            .components(components);
+        if let Err(e) = interaction
+            .create_response(
+                ctx.serenity_context(),
+                CreateInteractionResponse::UpdateMessage(message),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "setup: failed to show the SSO disable confirm; continuing");
+        }
+        return;
+    }
+    // Enabling: immediate, mirroring the other toggles.
+    set_sso_enabled(ctx, interaction, accent, invoker, true, None).await;
+}
+
+/// Apply a confirmed SSO disable (the "Yes, disable SSO" button), then redraw the
+/// Moderation page noting the change.
+pub(super) async fn confirm_disable_sso(
+    ctx: &Context<'_>,
+    interaction: &ComponentInteraction,
+    accent: u32,
+    invoker: DiscordUserId,
+) {
+    set_sso_enabled(
+        ctx,
+        interaction,
+        accent,
+        invoker,
+        false,
+        Some("SSO disabled."),
+    )
+    .await;
+}
+
+/// Set `sso_enabled` to `new`, persist, audit, and redraw the Moderation page. Shared by
+/// the immediate enable path and the confirmed-disable path; mirrors the other toggles.
+async fn set_sso_enabled(
+    ctx: &Context<'_>,
+    interaction: &ComponentInteraction,
+    accent: u32,
+    invoker: DiscordUserId,
+    new: bool,
+    success_note: Option<&str>,
+) {
+    if !ack(ctx, interaction).await {
+        return;
+    }
+    let data = ctx.data();
+    let guild = data.config.guild();
+    let mut cfg = GuildConfig::clone(&data.guild_config.load());
+    let was_enabled = cfg.sso_enabled;
+    cfg.sso_enabled = new;
+    let note = if let Err(e) = data.store.save_config(guild, &cfg).await {
+        tracing::error!(error = %e, "setup: failed to save guild config");
+        Some("Something went wrong saving that - please try again.".to_owned())
+    } else {
+        data.guild_config.store(std::sync::Arc::new(cfg));
+        if let Err(e) = data
+            .auditor
+            .record(
+                invoker,
+                invoker,
+                "config.set_sso",
+                serde_json::json!({ "field": "sso", "old": was_enabled, "new": new }),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "setup: failed to audit config change");
+        }
+        success_note.map(str::to_owned)
+    };
+    redraw(ctx, interaction, accent, Page::Moderation, note.as_deref()).await;
+}
+
+// ====================================================================
 // Posting actions
 // ====================================================================
 

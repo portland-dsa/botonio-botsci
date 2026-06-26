@@ -53,6 +53,18 @@ pub struct DiscordHttp {
 }
 
 impl DiscordHttp {
+    /// Returns every managed [`Role`] whose configured id is present in `roles`.
+    ///
+    /// Matches by role id (so `DISCORD_ROLE_*_ID` name overrides don't hide a
+    /// held role) and returns in [`Role::ALL`] priority order.
+    fn managed_roles_held(&self, roles: &[RoleId]) -> Vec<Role> {
+        let held_ids: HashSet<RoleId> = roles.iter().copied().collect();
+        Role::ALL
+            .into_iter()
+            .filter(|r| self.role_ids.get(r).is_some_and(|id| held_ids.contains(id)))
+            .collect()
+    }
+
     /// Builds the client from an already-authenticated `Http` and the
     /// pre-resolved managed roles.
     ///
@@ -300,15 +312,51 @@ impl DiscordClient for DiscordHttp {
             .into_iter()
             .map(|r| (r.id, r.name))
             .collect();
-        let held_ids: HashSet<RoleId> = member.roles.iter().copied().collect();
         let all_names = role_names_for(&member.roles, &names);
-        // Match managed roles by id (so name overrides don't hide a held role),
-        // against the member's role set for O(1) lookups.
-        let held = Role::ALL
-            .into_iter()
-            .filter(|r| self.role_ids.get(r).is_some_and(|id| held_ids.contains(id)))
-            .collect();
+        let held = self.managed_roles_held(&member.roles);
         Ok(MemberRoles { all_names, held })
+    }
+
+    async fn member_status_role(&self, user: DiscordUserId) -> Result<Option<Role>, DiscordError> {
+        let member = match self
+            .http
+            .get_member(self.guild_id, UserId::new(user.0))
+            .await
+        {
+            Ok(m) => m,
+            // A non-member returns 404; that is "not in the guild", not an error.
+            Err(serenity::Error::Http(ref http_err))
+                if http_err.status_code() == Some(reqwest::StatusCode::NOT_FOUND) =>
+            {
+                return Ok(None);
+            }
+            Err(e) => {
+                // Distinguish a persistent permission/intent misconfiguration (403) from a
+                // transient error: a 403 fails *every* SSO check (the bot lacks the
+                // GUILD_MEMBERS intent or the member-read permission), so surface it
+                // distinctly rather than letting it read as a probe in the uniform abuse
+                // warning the denial emits downstream. A 5xx/429 still fails closed as a
+                // plain read error.
+                let forbidden = matches!(
+                    &e,
+                    serenity::Error::Http(h)
+                        if h.status_code() == Some(reqwest::StatusCode::FORBIDDEN)
+                );
+                if forbidden {
+                    tracing::error!(
+                        error = %e,
+                        "discord: member read forbidden - SSO role checks will all fail until \
+                         the GUILD_MEMBERS intent and the member-read permission are granted"
+                    );
+                }
+                return Err(e.into());
+            }
+        };
+        // `managed_roles_held` filters `Role::ALL`, so `held` is already in
+        // [Member, DuesExpired, Unverified] precedence order; the highest-priority held role
+        // is simply its first element, and no managed role held means Unverified.
+        let held = self.managed_roles_held(&member.roles);
+        Ok(Some(held.first().copied().unwrap_or(Role::Unverified)))
     }
 
     async fn members_page(
@@ -335,11 +383,7 @@ impl DiscordClient for DiscordHttp {
         let projected = members
             .into_iter()
             .map(|m| {
-                let held_ids: std::collections::HashSet<RoleId> = m.roles.iter().copied().collect();
-                let held = Role::ALL
-                    .into_iter()
-                    .filter(|r| self.role_ids.get(r).is_some_and(|id| held_ids.contains(id)))
-                    .collect();
+                let held = self.managed_roles_held(&m.roles);
                 DiscordRosterMember {
                     id: DiscordUserId(m.user.id.get()),
                     handle: DiscordHandle(m.user.name.clone()),

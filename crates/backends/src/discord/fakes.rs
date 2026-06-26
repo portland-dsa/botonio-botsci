@@ -48,6 +48,9 @@ pub struct FakeDiscord {
     everyone_base_view: Mutex<bool>,
     /// Log of every [`set_channel_overwrites`] call, in call order.
     overwrite_writes: Mutex<Vec<(DiscordChannelId, Vec<PermOverwrite>)>>,
+    /// Per-member status for [`member_status_role`]: present = guild member with
+    /// that role, absent = not in the guild (`None` return).
+    member_status: Mutex<HashMap<DiscordUserId, Role>>,
 }
 
 impl FakeDiscord {
@@ -63,7 +66,16 @@ impl FakeDiscord {
             channels: Mutex::new(Vec::new()),
             everyone_base_view: Mutex::new(false),
             overwrite_writes: Mutex::new(Vec::new()),
+            member_status: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Seed `user`'s guild membership status for [`member_status_role`].
+    ///
+    /// A seeded user is a guild member holding `role`; an unseeded user returns
+    /// `None` (not in the guild).
+    pub fn seed_status(&self, user: DiscordUserId, role: Role) {
+        self.member_status.lock().unwrap().insert(user, role);
     }
 
     /// Seed the managed status roles `member` currently holds.
@@ -215,6 +227,10 @@ impl DiscordClient for FakeDiscord {
         self.guard(DiscordOp::RemoveMarkerRole)?;
         self.markers.lock().unwrap().remove(&(user, marker));
         Ok(())
+    }
+
+    async fn member_status_role(&self, user: DiscordUserId) -> Result<Option<Role>, DiscordError> {
+        Ok(self.member_status.lock().unwrap().get(&user).copied())
     }
 
     async fn read_channels(&self) -> Result<GuildChannels, DiscordError> {

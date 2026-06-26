@@ -70,6 +70,12 @@ pub struct GuildConfig {
     /// Whether the scheduled membership scan runs for this guild. Off by default - the
     /// scan reconciles roles and can demote, so it is opt-in via /setup.
     pub scan_enabled: bool,
+    /// Whether a moderator has enabled SSO for this guild - the runtime half of the
+    /// two-gate model. The bot answers an SSO check only when this is set *and* the deploy
+    /// flag `BOT_SSO_ENABLED` bound the socket; the toggle can only further-restrict, never
+    /// override the deploy flag. Off by default. Disabling it is the lockout-risk direction
+    /// (it removes the admin-panel login path), so `/setup` confirms a disable.
+    pub sso_enabled: bool,
 }
 
 /// Read and replace one guild's [`GuildConfig`]. Fallible and async from the start

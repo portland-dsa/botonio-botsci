@@ -56,6 +56,14 @@ SystemCallFilter=~@privileged ~@resources
 # AF_UNIX is REQUIRED: sd_notify speaks over a Unix datagram socket; omit it and the unit
 # never reaches "ready". AF_INET/AF_INET6 are the gateway + backend HTTPS.
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# /run/botonio-%i is this instance's runtime dir for the SSO unix-domain socket, so the
+# staging and production instances are isolated. systemd creates it owned by the service
+# user and its primary group at mode 2750; the bot then hands the directory and the socket
+# to this environment's SSO group (set via SupplementaryGroups in the drop-in plus a chown
+# in the bot), so the 0660 socket admits exactly the bot and this environment's
+# workspace-sync. ProtectSystem=strict always permits RuntimeDirectory, so the bind succeeds.
+RuntimeDirectory=botonio-%i
+RuntimeDirectoryMode=2750
 
 # Egress hardening: deny the internal/private networks the bot never needs.
 # Public egress (Discord, the backend APIs) and loopback (systemd-resolved
