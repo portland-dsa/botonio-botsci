@@ -32,6 +32,29 @@ Environment=BOT_SCAN_TRIPWIRE_PERCENT=20
 Environment=BOT_SCAN_TRIPWIRE_FLOOR=5
 Environment=BOT_SCAN_PACE_MS=250
 
+# SSO role-check endpoint. The three credentials are delivered into $$CREDENTIALS_DIRECTORY
+# (never the process environment) and loaded by the bot on startup when BOT_SSO_ENABLED=1.
+# Leave BOT_SSO_ENABLED unset until workspace-sync is deployed and the three real credentials
+# are provisioned; with it unset the socket never binds and the SSO path is entirely inert.
+#
+# To enable: create the botonio-staging-sso group with the bot's and workspace-sync's service
+# users as its only members, set BOT_SSO_ENABLED=1 here, set sso_oauth_client_id and
+# sso_redirect_uri in secrets/staging.enc.yaml (they render into the lines below, like
+# discord_guild_id), and provision the three .cred files. botonio-staging-sso is a
+# SUPPLEMENTARY group: the bot's primary group stays its own, so handing the socket to this
+# group never exposes the bot's credential directory to workspace-sync.
+SupplementaryGroups=botonio-staging-sso
+LoadCredentialEncrypted=sso_oauth_client_secret:/etc/botonio-botsci/bot/staging/sso_oauth_client_secret.cred
+LoadCredentialEncrypted=sso_signing_key:/etc/botonio-botsci/bot/staging/sso_signing_key.cred
+LoadCredentialEncrypted=sso_caller_bearer:/etc/botonio-botsci/bot/staging/sso_caller_bearer.cred
+Environment=BOT_SSO_ENABLED=1
+Environment=BOT_SSO_SOCKET_PATH=/run/botonio-staging/sso.sock
+Environment=BOT_SSO_SOCKET_GROUP=botonio-staging-sso
+Environment=BOT_SSO_AUDIENCE=workspace-sync
+Environment=BOT_SSO_REDIRECT_URI=${sso_redirect_uri}
+Environment=BOT_SSO_OAUTH_CLIENT_ID=${sso_oauth_client_id}
+Environment=BOT_SSO_KEY_ID=v1
+
 # Local membership cache (Postgres). The runtime connection authenticates by peer over
 # the Unix socket - no password (the long-running process holds no DB secret). The
 # migrate phase (ExecStartPre) uses the migration credential below over TCP loopback.
