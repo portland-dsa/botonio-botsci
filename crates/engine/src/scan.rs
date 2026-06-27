@@ -9,7 +9,7 @@ use domain::{DiscordGuildId, Role};
 
 use crate::backends::discord::DiscordRosterMember;
 use crate::bulk::already_in_role;
-use crate::store::{GraceStore, MemberStore};
+use crate::store::{GraceStore, MemberStore, OverrideLog};
 use crate::util::{DiscordHandle, DiscordUserId};
 use crate::verify::{MatchOutcome, decide, effective_role, locate};
 
@@ -70,6 +70,10 @@ pub struct ScanPlan {
     pub misses: usize,
     pub conflicts: usize,
     pub malformed: usize,
+    /// Members held at their hand-approved standing this pass: a planned demotion was
+    /// skipped because they carry an active manual-override stamp. Not a demotion, so it
+    /// never feeds the tripwire.
+    pub overridden: usize,
     pub verdict: ScanVerdict,
 }
 
@@ -84,7 +88,7 @@ pub async fn plan<S, E>(
     today: NaiveDate,
 ) -> Result<ScanPlan, E>
 where
-    S: MemberStore<Error = E> + GraceStore<Error = E>,
+    S: MemberStore<Error = E> + GraceStore<Error = E> + OverrideLog<Error = E>,
     E: std::error::Error + Send + Sync + 'static,
 {
     let mut changes = Vec::new();
@@ -92,6 +96,7 @@ where
     let mut misses = 0usize;
     let mut conflicts = 0usize;
     let mut malformed = 0usize;
+    let mut overridden = 0usize;
 
     for m in members {
         let located = locate(store, m.id, &m.handle).await?;
@@ -125,6 +130,15 @@ where
         }
         let demotion = is_demotion(&m.held, target);
         if demotion {
+            // A manually-overridden member is held at their hand-approved standing: the
+            // scheduled scan never demotes them, the same way an active grace override is
+            // never demoted. Checked only on the demotion path, so an unaffected member
+            // costs no extra read. (The hold is indefinite today; a DB-backed expiry can
+            // retire a stale override later.)
+            if store.get_override(m.id).await?.is_some() {
+                overridden += 1;
+                continue;
+            }
             demotions += 1;
         }
         changes.push(PlannedChange {
@@ -154,6 +168,7 @@ where
         misses,
         conflicts,
         malformed,
+        overridden,
         verdict,
     })
 }

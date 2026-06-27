@@ -193,6 +193,7 @@ async fn run_once(
         misses = scan_plan.misses,
         conflicts = scan_plan.conflicts,
         malformed = scan_plan.malformed,
+        overridden = scan_plan.overridden,
         failed,
         "scheduled scan complete"
     );

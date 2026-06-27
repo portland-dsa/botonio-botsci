@@ -95,6 +95,8 @@ struct FakeMembers {
     marker_fails: bool,
     /// Per-member grace expiry date; `None` means no grace.
     grace: HashMap<u64, NaiveDate>,
+    /// Pre-seeded manual-override stamps; `active_override` reads this set.
+    overrides: HashSet<u64>,
 }
 
 impl FakeMembers {
@@ -107,6 +109,10 @@ impl FakeMembers {
 
     fn set_grace(&mut self, id: DiscordUserId, until: NaiveDate) {
         self.grace.insert(id.0, until);
+    }
+
+    fn set_override(&mut self, id: DiscordUserId) {
+        self.overrides.insert(id.0);
     }
 
     /// Seed a record into the id/handle/email maps the reads consult.
@@ -181,6 +187,10 @@ impl MemberRead for FakeMembers {
             .get(&id.0)
             .map(|&until| until >= today)
             .unwrap_or(false))
+    }
+
+    async fn active_override(&self, id: DiscordUserId) -> Result<bool, MemberError> {
+        Ok(self.overrides.contains(&id.0))
     }
 }
 
@@ -307,6 +317,8 @@ struct VerifyWorld {
     fake: Option<FakeMembers>,
     /// Optional grace expiry to seed into the fake before running the verb.
     grace_until: Option<NaiveDate>,
+    /// Seed a manual-override stamp on the target before running the verb.
+    overridden: bool,
 }
 
 impl std::fmt::Debug for VerifyWorld {
@@ -332,6 +344,7 @@ impl VerifyWorld {
             last_target: None,
             fake: None,
             grace_until: None,
+            overridden: false,
         }
     }
 
@@ -347,6 +360,9 @@ impl VerifyWorld {
         fake.marker_fails = self.marker_fails;
         if let Some(until) = self.grace_until {
             fake.set_grace(target, until);
+        }
+        if self.overridden {
+            fake.set_override(target);
         }
         fake
     }
@@ -875,6 +891,11 @@ async fn active_grace(world: &mut VerifyWorld, _name: String) {
         .checked_add_days(chrono::Days::new(30))
         .unwrap();
     world.grace_until = Some(far_future);
+}
+
+#[given(regex = r"^(\w+) has an active manual override$")]
+async fn active_manual_override(world: &mut VerifyWorld, _name: String) {
+    world.overridden = true;
 }
 
 #[given(regex = r"^(\w+)'s grace override has expired$")]
