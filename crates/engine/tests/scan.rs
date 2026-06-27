@@ -9,7 +9,7 @@ use cucumber::{World as _, given, then, when};
 
 use engine::backends::discord::DiscordRosterMember;
 use engine::scan::{ScanPlan, ScanThreshold, ScanVerdict, plan};
-use engine::store::{InMemoryStore, Index, MemberRecord};
+use engine::store::{InMemoryStore, Index, MemberRecord, OverrideLog};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 use chrono::Utc;
@@ -30,6 +30,7 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
         "Shadow" => 4,
         "Ghost" => 8,
         "Rouge" => 7,
+        "Amy" => 5,
         other => panic!("unknown actor {other}"),
     };
     (DiscordUserId(raw), DiscordHandle(name.to_lowercase()))
@@ -97,6 +98,7 @@ fn malformed_record(name: &str) -> MemberRecord {
 struct ScanWorld {
     roster: Vec<DiscordRosterMember>,
     known: Vec<MemberRecord>,
+    overridden: Vec<DiscordUserId>,
     plan: Option<ScanPlan>,
 }
 
@@ -105,6 +107,7 @@ impl std::fmt::Debug for ScanWorld {
         f.debug_struct("ScanWorld")
             .field("roster_len", &self.roster.len())
             .field("known_len", &self.known.len())
+            .field("overridden_len", &self.overridden.len())
             .field("plan", &self.plan)
             .finish()
     }
@@ -115,6 +118,7 @@ impl ScanWorld {
         Self {
             roster: Vec::new(),
             known: Vec::new(),
+            overridden: Vec::new(),
             plan: None,
         }
     }
@@ -199,6 +203,19 @@ async fn roster_known_malformed(world: &mut ScanWorld, name: String) {
     world.known.push(malformed_record(&name));
 }
 
+#[given(
+    regex = r"^(\w+) is in the roster holding the Member role, manually overridden, unknown to us$"
+)]
+async fn roster_overridden_unknown(world: &mut ScanWorld, name: String) {
+    let (id, _) = actor(&name);
+    // No `known` record: an overridden member is unknown to Solidarity Tech (a Miss),
+    // which without the guard would be demoted to Unverified.
+    world
+        .roster
+        .push(roster_member(&name, vec![domain::Role::Member]));
+    world.overridden.push(id);
+}
+
 // ---------------------------------------------------------------------------
 // When steps
 // ---------------------------------------------------------------------------
@@ -206,6 +223,13 @@ async fn roster_known_malformed(world: &mut ScanWorld, name: String) {
 #[when("the scan plans a pass")]
 async fn scan_plans_a_pass(world: &mut ScanWorld) {
     let store = InMemoryStore::new(Index::from_records(world.known.clone()));
+    // A moderator hand-approved these members; the scan must hold them at Member.
+    for id in &world.overridden {
+        store
+            .stamp_override(*id, DiscordUserId(999), None)
+            .await
+            .unwrap();
+    }
     world.plan = Some(
         plan(
             &store,
@@ -257,6 +281,12 @@ async fn scan_counts_conflicts(world: &mut ScanWorld, count: usize) {
 async fn scan_counts_malformed(world: &mut ScanWorld, count: usize) {
     let p = world.plan.as_ref().expect("no plan");
     assert_eq!(p.malformed, count, "malformed count mismatch");
+}
+
+#[then(regex = r"^the scan holds (\d+) member(?:s)? by override$")]
+async fn scan_holds_by_override(world: &mut ScanWorld, count: usize) {
+    let p = world.plan.as_ref().expect("no plan");
+    assert_eq!(p.overridden, count, "overridden count mismatch");
 }
 
 #[then("the scan proceeds")]

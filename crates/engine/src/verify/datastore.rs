@@ -88,6 +88,15 @@ where
             .await
             .map_err(|e| MemberError::Store(e.to_string()))
     }
+
+    async fn active_override(&self, id: DiscordUserId) -> Result<bool, MemberError> {
+        Ok(self
+            .store
+            .get_override(id)
+            .await
+            .map_err(|e| MemberError::Store(e.to_string()))?
+            .is_some())
+    }
 }
 
 #[async_trait::async_trait]
