@@ -52,7 +52,7 @@ CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged ~@resources
+SystemCallFilter=~@privileged @resources
 # Re-add the chown family that `~@privileged` strips: on start the SSO server hands its
 # runtime directory and unix socket to this environment's SSO group with a chown(2). The bot
 # owns both and joins the group via SupplementaryGroups, so the call needs no privilege - but
