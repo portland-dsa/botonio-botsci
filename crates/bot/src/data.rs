@@ -15,6 +15,7 @@ use crate::error::BotError;
 use crate::guild_config::build_role_writer;
 use crate::lookup::RateLimiter;
 use crate::refresh::Cooldown;
+use crate::self_verify::ReviewCooldown;
 
 /// Shared state every command receives via `Context`.
 pub struct Data {
@@ -27,6 +28,9 @@ pub struct Data {
     pub rate_limiter: Arc<RateLimiter>,
     /// Per-member throttle for the self-service verification flow.
     pub self_verify_limiter: Arc<RateLimiter>,
+    /// Per-member, once-a-day cooldown on self-verify moderator review-request
+    /// posts, so a re-spamming member cannot flood the mod-approval channel.
+    pub self_verify_review_cooldown: Arc<ReviewCooldown>,
     /// The process-wide throttle for the on-demand `/refresh-cache` command.
     pub refresh_cooldown: Arc<Cooldown>,
     /// The gateway's shared HTTP, kept so the role-write client can be rebuilt from

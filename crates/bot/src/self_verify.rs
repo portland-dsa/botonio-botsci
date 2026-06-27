@@ -398,6 +398,17 @@ async fn post_review_request(
     email: &Email,
     reason: ReviewReason,
 ) {
+    // One review request per member per day: a re-spamming member who keeps missing would
+    // otherwise post a fresh request every attempt. Verification still ran above, so a
+    // now-valid member was already auto-granted; only the duplicate post is dropped. The
+    // member still sees the uniform reply at the call site either way.
+    if !data
+        .self_verify_review_cooldown
+        .check(DiscordUserId(submit.user.id.get()), Instant::now())
+    {
+        tracing::debug!("self-verify: review request suppressed by the daily cooldown");
+        return;
+    }
     let Some(channel) = data.guild_config.load().mod_approval_channel else {
         tracing::warn!(
             "self-verify needs a moderator review but no mod-approval channel is set; skipping"
