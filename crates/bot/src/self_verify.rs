@@ -2,7 +2,9 @@
 //! verify themselves against Solidarity Tech with no moderator approval. This file
 //! holds the pure name double-check and the gateway interaction handler.
 
-use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serenity::all::{
     ChannelId, ComponentInteraction, Context, CreateInteractionResponse,
@@ -101,6 +103,52 @@ const UNIFORM_FAILURE: &str = "We couldn't verify you automatically. A moderator
 const BACKEND_ERROR: &str = "Something went wrong on my end - please try again in a moment.";
 const RATE_LIMITED: &str = "You're going a little fast - please wait a moment and try again.";
 const SUCCESS: &str = "You're verified! Welcome.";
+
+/// One self-verify moderator review request per member per this window. Fixed on
+/// purpose: "once a day" is the policy, not a setting, so there is no config knob.
+pub const REVIEW_REQUEST_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Per-member cooldown on self-verify moderator review-request posts, held in
+/// process memory and keyed on the immutable Discord user id.
+///
+/// A member who keeps re-submitting the self-verify form would otherwise post a
+/// fresh review request to the mod-approval channel every time; this caps that to
+/// one per member per [`REVIEW_REQUEST_COOLDOWN`]. The verification itself is never
+/// gated - only the review-request post on a miss - so a member who was just added to
+/// Solidarity Tech and re-tries is still auto-granted. State resets on restart, which
+/// is acceptable: this is an anti-flood guard, not a security control, and at worst a
+/// redeploy lets one duplicate request through per member. The map holds one entry per
+/// member who has missed - bounded and small for a chapter server - so it needs no
+/// eviction, like the other in-memory throttles in this crate.
+pub struct ReviewCooldown {
+    window: Duration,
+    last: Mutex<HashMap<DiscordUserId, Instant>>,
+}
+
+impl ReviewCooldown {
+    /// A cooldown of length `window`.
+    pub fn new(window: Duration) -> Self {
+        Self {
+            window,
+            last: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Try to claim a review-request post for `who` at `now`. Returns `true` (and
+    /// records the spend) when this member has had no request posted inside the window;
+    /// `false` when one is still cooling down, so the caller skips the post. `now` is a
+    /// parameter so the policy tests without sleeping; callers pass [`Instant::now`].
+    pub fn check(&self, who: DiscordUserId, now: Instant) -> bool {
+        let mut last = self.last.lock().expect("review-cooldown lock poisoned");
+        if let Some(prev) = last.get(&who)
+            && now.saturating_duration_since(*prev) < self.window
+        {
+            return false;
+        }
+        last.insert(who, now);
+        true
+    }
+}
 
 /// Route a raw gateway interaction. Acts only on the self-verify button and modal, and
 /// only when they arrive from the guild this bot serves; every other interaction (poise
@@ -834,5 +882,45 @@ mod name_check_tests {
             name_check(Some("Amy Rose Hedgehog"), "Amy Rose", "H"),
             NameCheck::Match
         );
+    }
+}
+
+#[cfg(test)]
+mod review_cooldown_tests {
+    use super::*;
+
+    #[test]
+    fn first_request_for_a_member_is_allowed() {
+        let cooldown = ReviewCooldown::new(REVIEW_REQUEST_COOLDOWN);
+        assert!(cooldown.check(DiscordUserId(1), Instant::now()));
+    }
+
+    #[test]
+    fn a_second_request_inside_the_window_is_suppressed() {
+        let cooldown = ReviewCooldown::new(REVIEW_REQUEST_COOLDOWN);
+        let who = DiscordUserId(1);
+        let t0 = Instant::now();
+        assert!(cooldown.check(who, t0));
+        // An hour later, still well inside the 24h window.
+        assert!(!cooldown.check(who, t0 + Duration::from_secs(3600)));
+    }
+
+    #[test]
+    fn a_request_at_or_after_the_window_is_allowed_again() {
+        let cooldown = ReviewCooldown::new(REVIEW_REQUEST_COOLDOWN);
+        let who = DiscordUserId(1);
+        let t0 = Instant::now();
+        assert!(cooldown.check(who, t0));
+        // Exactly one window later: elapsed == window is not "inside" it, so allowed.
+        assert!(cooldown.check(who, t0 + REVIEW_REQUEST_COOLDOWN));
+    }
+
+    #[test]
+    fn members_are_independent() {
+        let cooldown = ReviewCooldown::new(REVIEW_REQUEST_COOLDOWN);
+        let now = Instant::now();
+        assert!(cooldown.check(DiscordUserId(1), now));
+        // A different member is unaffected by the first member's spend.
+        assert!(cooldown.check(DiscordUserId(2), now));
     }
 }
