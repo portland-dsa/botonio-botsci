@@ -8,8 +8,5 @@ useDefault = true
 
 [allowlist]
 description = "Non-secret definitional strings: fake/public Discord IDs and deploy token-name enums (key names, never values)"
-paths = [
-    '''crates/domain/src/ids\.rs''',
-    '''scripts/botonio_deploy/defs/__init__\.py''',
-]
+paths = ['''crates/domain/src/ids\.rs''', '''scripts/botonio_deploy/cli.py''']
 regexes = []

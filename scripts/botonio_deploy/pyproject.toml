@@ -1,14 +1,18 @@
 [project]
 name = "botonio-deploy"
-version = "0.1.0"
+version = "0.2.0"
 description = "Provision and deploy the botonio-botsci box from its encrypted secrets."
-requires-python = ">=3.10"
-# cyclopts is the only direct dependency; uv.lock pins it and its (pure-Python) transitives.
-dependencies = ["cyclopts>=3"]
+requires-python = ">=3.11"
+dependencies = ["che-deploya"]
+scripts = { botonio-deploy = "botonio_deploy.cli:main" }
+
 
 [tool.uv]
 # Not a wheel: `uv sync` just gives a dev venv with cyclopts to run/test against.
 package = false
+
+[tool.uv.sources]
+che-deploya = { git = "https://github.com/portland-dsa/che-deploya", tag = "v0.2.0" }
 
 [tool.pyright]
 # We develop on Windows but target the Linux box - tell the type checker the platform so the
