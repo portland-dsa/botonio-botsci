@@ -164,6 +164,7 @@ BOT_SSO_SIGNING_KEY=<From step 3.1>
 BOT_SSO_CALLER_BEARER=testbearer132 # In prod you should generate this, but it doesn't matter here
 BOT_SSO_SOCKET_PATH=/tmp/botonio-sso.sock
 BOT_SSO_REDIRECT_URI=<From step 2>
+BOT_SSO_AUDIENCE=rosadmin
 ```
 
 #### 5. Discord Setup
