@@ -314,6 +314,7 @@ async fn guild_config_round_trips(pool: sqlx::PgPool) {
         reminders_enabled: true,
         scan_enabled: true,
         sso_enabled: true,
+        ping_enabled: true,
         // Each posted-message reference round-trips as its (channel, message) id pair.
         unverified_prompt: Some(MessageRef {
             channel: DiscordChannelId(6),

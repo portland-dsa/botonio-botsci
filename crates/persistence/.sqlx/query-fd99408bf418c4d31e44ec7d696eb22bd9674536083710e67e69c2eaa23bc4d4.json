@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, dues_expiring_role_id,\n                      mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id,\n                      dues_signup_url, reminders_enabled, scan_enabled, sso_enabled,\n                      unverified_prompt_channel_id, unverified_prompt_message_id,\n                      dues_banner_channel_id, dues_banner_message_id\n               FROM guild_config WHERE guild_id = $1",
+  "query": "SELECT moderator_role_id, member_role_id, dues_expired_role_id,\n                      unverified_role_id, manual_override_role_id, dues_expiring_role_id,\n                      mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,\n                      verification_log_channel_id,\n                      dues_signup_url, reminders_enabled, scan_enabled, sso_enabled,\n                      unverified_prompt_channel_id, unverified_prompt_message_id,\n                      dues_banner_channel_id, dues_banner_message_id, ping_enabled\n               FROM guild_config WHERE guild_id = $1",
   "describe": {
     "columns": [
       {
@@ -200,6 +200,17 @@
             "name": "dues_banner_message_id"
           }
         }
+      },
+      {
+        "ordinal": 18,
+        "name": "ping_enabled",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "guild_config",
+            "name": "ping_enabled"
+          }
+        }
       }
     ],
     "parameters": {
@@ -225,8 +236,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "aef121ce39f3b82690819c9bf66001cf7e8346b13a3358a1ae9dd3eb9c5e7eb0"
+  "hash": "fd99408bf418c4d31e44ec7d696eb22bd9674536083710e67e69c2eaa23bc4d4"
 }

@@ -257,6 +257,42 @@ async fn set_sso_enabled(
     redraw(ctx, interaction, accent, Page::Moderation, note.as_deref()).await;
 }
 
+pub(super) async fn toggle_ping(
+    ctx: &Context<'_>,
+    interaction: &ComponentInteraction,
+    accent: u32,
+    invoker: DiscordUserId,
+) {
+    if !ack(ctx, interaction).await {
+        return;
+    }
+    let data = ctx.data();
+    let guild = data.config.guild();
+    let mut cfg = GuildConfig::clone(&data.guild_config.load());
+    let was_enabled = cfg.ping_enabled;
+    cfg.ping_enabled = !cfg.ping_enabled;
+    let note = if let Err(e) = data.store.save_config(guild, &cfg).await {
+        tracing::error!(error = %e, "setup: failed to save guild config");
+        Some("Something went wrong saving that - please try again.".to_owned())
+    } else {
+        data.guild_config.store(std::sync::Arc::new(cfg));
+        if let Err(e) = data
+            .auditor
+            .record(
+                invoker,
+                invoker,
+                "config.toggle_ping",
+                serde_json::json!({ "field": "ping", "old": was_enabled, "new": !was_enabled }),
+            )
+            .await
+        {
+            tracing::warn!(error = %e, "setup: failed to audit config change");
+        }
+        None
+    };
+    redraw(ctx, interaction, accent, Page::Moderation, note.as_deref()).await;
+}
+
 // ====================================================================
 // Posting actions
 // ====================================================================

@@ -13,6 +13,9 @@ const REPLY: &str = "The old drive is dying, and the new drive struggles to be b
 
 /// Reply to a non-bot message in the served guild that mentions us.
 pub async fn on_message(ctx: &Context, message: &Message, data: &Data) -> Result<(), Error> {
+    if !data.guild_config.load().ping_enabled {
+        return Ok(());
+    }
     // Never answer other bots (or ourselves) - that is how reply loops start.
     if message.author.bot {
         return Ok(());

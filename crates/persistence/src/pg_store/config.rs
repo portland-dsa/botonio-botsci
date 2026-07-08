@@ -31,6 +31,7 @@ struct GuildConfigRow {
     unverified_prompt_message_id: Option<i64>,
     dues_banner_channel_id: Option<i64>,
     dues_banner_message_id: Option<i64>,
+    ping_enabled: bool,
 }
 
 impl From<GuildConfigRow> for GuildConfig {
@@ -66,6 +67,7 @@ impl From<GuildConfigRow> for GuildConfig {
                 r.unverified_prompt_message_id,
             ),
             dues_banner: msg_ref(r.dues_banner_channel_id, r.dues_banner_message_id),
+            ping_enabled: r.ping_enabled,
         }
     }
 }
@@ -83,7 +85,7 @@ impl ConfigStore for PgStore {
                       verification_log_channel_id,
                       dues_signup_url, reminders_enabled, scan_enabled, sso_enabled,
                       unverified_prompt_channel_id, unverified_prompt_message_id,
-                      dues_banner_channel_id, dues_banner_message_id
+                      dues_banner_channel_id, dues_banner_message_id, ping_enabled
                FROM guild_config WHERE guild_id = $1"#,
             guild.0 as i64
         )
@@ -110,9 +112,10 @@ impl ConfigStore for PgStore {
                   verification_log_channel_id,
                   dues_signup_url, reminders_enabled, scan_enabled,
                   unverified_prompt_channel_id, unverified_prompt_message_id,
-                  dues_banner_channel_id, dues_banner_message_id, sso_enabled, updated_at)
+                  dues_banner_channel_id, dues_banner_message_id, sso_enabled, ping_enabled,
+                  updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                       $15, $16, $17, $18, $19, now())
+                       $15, $16, $17, $18, $19, $20, now())
                ON CONFLICT (guild_id) DO UPDATE SET
                  moderator_role_id            = EXCLUDED.moderator_role_id,
                  member_role_id               = EXCLUDED.member_role_id,
@@ -128,6 +131,7 @@ impl ConfigStore for PgStore {
                  reminders_enabled            = EXCLUDED.reminders_enabled,
                  scan_enabled                 = EXCLUDED.scan_enabled,
                  sso_enabled                  = EXCLUDED.sso_enabled,
+                 ping_enabled                 = EXCLUDED.ping_enabled,
                  unverified_prompt_channel_id = EXCLUDED.unverified_prompt_channel_id,
                  unverified_prompt_message_id = EXCLUDED.unverified_prompt_message_id,
                  dues_banner_channel_id       = EXCLUDED.dues_banner_channel_id,
@@ -152,6 +156,7 @@ impl ConfigStore for PgStore {
             ref_chan(config.dues_banner),
             ref_msg(config.dues_banner),
             config.sso_enabled,
+            config.ping_enabled,
         )
         .execute(&self.pool)
         .await?;

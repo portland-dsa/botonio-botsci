@@ -1,0 +1,33 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO guild_config\n                 (guild_id, moderator_role_id, member_role_id, dues_expired_role_id,\n                  unverified_role_id, manual_override_role_id, dues_expiring_role_id,\n                  mod_approval_channel_id, unverified_channel_id, dues_expired_channel_id,\n                  verification_log_channel_id,\n                  dues_signup_url, reminders_enabled, scan_enabled,\n                  unverified_prompt_channel_id, unverified_prompt_message_id,\n                  dues_banner_channel_id, dues_banner_message_id, sso_enabled, ping_enabled,\n                  updated_at)\n               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,\n                       $15, $16, $17, $18, $19, $20, now())\n               ON CONFLICT (guild_id) DO UPDATE SET\n                 moderator_role_id            = EXCLUDED.moderator_role_id,\n                 member_role_id               = EXCLUDED.member_role_id,\n                 dues_expired_role_id         = EXCLUDED.dues_expired_role_id,\n                 unverified_role_id           = EXCLUDED.unverified_role_id,\n                 manual_override_role_id      = EXCLUDED.manual_override_role_id,\n                 dues_expiring_role_id        = EXCLUDED.dues_expiring_role_id,\n                 mod_approval_channel_id      = EXCLUDED.mod_approval_channel_id,\n                 unverified_channel_id        = EXCLUDED.unverified_channel_id,\n                 dues_expired_channel_id      = EXCLUDED.dues_expired_channel_id,\n                 verification_log_channel_id  = EXCLUDED.verification_log_channel_id,\n                 dues_signup_url              = EXCLUDED.dues_signup_url,\n                 reminders_enabled            = EXCLUDED.reminders_enabled,\n                 scan_enabled                 = EXCLUDED.scan_enabled,\n                 sso_enabled                  = EXCLUDED.sso_enabled,\n                 ping_enabled                 = EXCLUDED.ping_enabled,\n                 unverified_prompt_channel_id = EXCLUDED.unverified_prompt_channel_id,\n                 unverified_prompt_message_id = EXCLUDED.unverified_prompt_message_id,\n                 dues_banner_channel_id       = EXCLUDED.dues_banner_channel_id,\n                 dues_banner_message_id       = EXCLUDED.dues_banner_message_id,\n                 updated_at                   = now()",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Bool",
+        "Bool",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "20c357243e2a52839b1f8fa751095f5f515fc8a3dbfbd0765b0417fa29340090"
+}

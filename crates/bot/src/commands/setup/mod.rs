@@ -34,6 +34,7 @@ use engine::backends::util::DiscordUserId;
 use engine::reminders::MessageKind;
 use engine::store::MessageTemplates;
 
+use crate::commands::setup::handlers::toggle_ping;
 use crate::data::{Context, Error};
 use crate::render::reminders::default_body;
 use crate::render::setup::landing_embed;
@@ -66,6 +67,9 @@ const SSO_DISABLE_CANCEL_ID: &str = "setup_sso_disable_cancel";
 /// direction (it removes the admin-panel login path), so it is confirmed.
 const SSO_DISABLE_WARNING: &str = "This will prevent the admin panel from working because leaders will no longer be able \
      to log in. Are you 100% sure you want to do this?";
+
+/// Toggle botonio's ping on and off
+const PING_TOGGLE_ID: &str = "setup_ping_toggle";
 
 // Per-setting role select-menu custom ids.
 const MOD_ROLE_ID: &str = "setup_role_moderator";
@@ -310,6 +314,10 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
             // ---- dues sign-up URL modal ------------------------------------
             DUES_URL_BUTTON_ID => {
                 set_dues_url(&ctx, &interaction, &msg, accent, invoker).await;
+            }
+
+            PING_TOGGLE_ID => {
+                toggle_ping(&ctx, &interaction, accent, invoker).await;
             }
 
             _ => {}
