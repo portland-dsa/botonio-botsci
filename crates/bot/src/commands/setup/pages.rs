@@ -144,11 +144,14 @@ fn dues_page(cfg: &GuildConfig) -> Vec<CreateActionRow> {
 /// Moderation page: the moderator role select, then a row with the Automatic Membership
 /// Checks toggle and grey Back.
 fn moderation_page(cfg: &GuildConfig, sso_deploy_enabled: bool) -> Vec<CreateActionRow> {
-    let mut toggles = vec![toggle_button(
-        SCAN_TOGGLE_ID,
-        "Automatic Membership Checks",
-        cfg.scan_enabled,
-    )];
+    let mut toggles = vec![
+        toggle_button(
+            SCAN_TOGGLE_ID,
+            "Automatic Membership Checks",
+            cfg.scan_enabled,
+        ),
+        toggle_button(PING_TOGGLE_ID, "Automatic @mention Reply", cfg.ping_enabled),
+    ];
     // The SSO toggle shows only when the deploy enables SSO (BOT_SSO_ENABLED) - the other
     // half of the two-gate model. Without it the per-guild toggle would be inert, so it is
     // hidden rather than shown as a dead control.

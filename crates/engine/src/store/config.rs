@@ -76,6 +76,8 @@ pub struct GuildConfig {
     /// override the deploy flag. Off by default. Disabling it is the lockout-risk direction
     /// (it removes the admin-panel login path), so `/setup` confirms a disable.
     pub sso_enabled: bool,
+    /// Whether botonio should reply to pings with a stock message or not
+    pub ping_enabled: bool,
 }
 
 /// Read and replace one guild's [`GuildConfig`]. Fallible and async from the start
