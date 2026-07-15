@@ -37,3 +37,11 @@ Feature: The scheduled scan plans role changes and guards against mass demotion
     And the scan counts 0 demotions
     And the scan would change 0 members
     And the scan proceeds
+
+  Scenario: A manually-overridden member is held at Member and never demoted
+    Given Amy is in the roster holding the Member role, manually overridden, unknown to us
+    When the scan plans a pass
+    Then the scan holds 1 member by override
+    And the scan counts 0 demotions
+    And the scan would change 0 members
+    And the scan proceeds

@@ -117,6 +117,13 @@ async fn main() -> anyhow::Result<()> {
     let self_verify_limiter = Arc::new(crate::lookup::RateLimiter::new(
         cfg.self_verify_rate_per_min,
     ));
+    // Per-member daily cooldown on self-verify moderator review-request posts, so a
+    // member who keeps re-submitting cannot flood the mod-approval channel. Fixed
+    // window, no config knob. Captured directly by the setup closure, like
+    // `refresh_cooldown` - no `setup_*` clone needed (nothing else uses it).
+    let self_verify_review_cooldown = Arc::new(crate::self_verify::ReviewCooldown::new(
+        crate::self_verify::REVIEW_REQUEST_COOLDOWN,
+    ));
     // The /refresh-cache throttle: a single process-wide window, shared by all moderators.
     // Built here and moved into Data; nothing else needs it.
     let refresh_cooldown = Arc::new(refresh::Cooldown::new(refresh::REFRESH_COOLDOWN));
@@ -333,6 +340,7 @@ async fn main() -> anyhow::Result<()> {
                     auditor,
                     rate_limiter,
                     self_verify_limiter,
+                    self_verify_review_cooldown,
                     refresh_cooldown,
                     guild_config,
                     http: ctx.http.clone(),

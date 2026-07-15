@@ -282,6 +282,24 @@ impl<M: Heal> Member<'_, M> {
     /// audit failure refuses the grant), assigns the role, then best-effort repairs the stored
     /// identity link.
     pub async fn verify(&self, invoker: DiscordUserId) -> Result<VerifyOutcome, MemberError> {
+        // A hand-approved member is held at Member regardless of Solidarity Tech - the manual
+        // override is a standing vouch that outranks the ST decision, the same way an active
+        // grace forces Member, but it applies even when ST has no record at all, so neither a
+        // miss nor a lapsed/malformed record can demote them. (Also re-grants Member to anyone a
+        // prior scan demoted before this guard existed.)
+        if self.store.active_override(self.target.id).await? {
+            self.store
+                .record(
+                    invoker,
+                    self.target.id,
+                    "member_verify",
+                    verify_detail("verified", Some(Role::Member), VerifyMethod::Override),
+                )
+                .await?;
+            self.assign_or_record_failure(invoker, Role::Member, VerifyMethod::Override)
+                .await?;
+            return Ok(VerifyOutcome::Verified(Role::Member));
+        }
         let located = self
             .store
             .lookup(self.target.id, &self.target.handle)
@@ -354,6 +372,25 @@ impl<M: Heal> Member<'_, M> {
         invoker: DiscordUserId,
         held: &[Role],
     ) -> Result<ResyncOutcome, MemberError> {
+        // As in `verify`, an active manual override holds the member at Member regardless of
+        // Solidarity Tech. Honour the resync skip-no-op contract: already at Member means no
+        // write and no audit.
+        if self.store.active_override(self.target.id).await? {
+            if crate::bulk::already_in_role(held, Role::Member) {
+                return Ok(ResyncOutcome::Unchanged(Role::Member));
+            }
+            self.store
+                .record(
+                    invoker,
+                    self.target.id,
+                    "member_verify",
+                    verify_detail("verified", Some(Role::Member), VerifyMethod::Override),
+                )
+                .await?;
+            self.assign_or_record_failure(invoker, Role::Member, VerifyMethod::Override)
+                .await?;
+            return Ok(ResyncOutcome::Changed(Role::Member));
+        }
         let located = self
             .store
             .lookup(self.target.id, &self.target.handle)
