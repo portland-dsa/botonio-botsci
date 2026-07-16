@@ -47,7 +47,7 @@ SupplementaryGroups=botonio-production-sso
 LoadCredentialEncrypted=sso_oauth_client_secret:/etc/botonio-botsci/bot/production/sso_oauth_client_secret.cred
 LoadCredentialEncrypted=sso_signing_key:/etc/botonio-botsci/bot/production/sso_signing_key.cred
 LoadCredentialEncrypted=sso_caller_bearer:/etc/botonio-botsci/bot/production/sso_caller_bearer.cred
-# Environment=BOT_SSO_ENABLED=1 # TODO: ENABLE THIS DUMMY WHEN WORKSPACE SYNC IS READY TO HIT PROD
+Environment=BOT_SSO_ENABLED=1
 Environment=BOT_SSO_SOCKET_PATH=/run/botonio-production/sso.sock
 Environment=BOT_SSO_SOCKET_GROUP=botonio-production-sso
 Environment=BOT_SSO_AUDIENCE=rosadmin
