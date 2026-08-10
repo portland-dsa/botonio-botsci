@@ -10,6 +10,7 @@ use domain::{DiscordGuildId, Role};
 
 use super::decision::{HealAction, Located};
 use super::facade::{Heal, MemberError, MemberRead, MemberWrite};
+use super::member::{Hold, hold_for};
 
 /// The production [`MemberRead`] / [`MemberWrite`] / [`Heal`] implementor: holds borrows of the
 /// four backends, stringifies each backend's error into [`MemberError`] in one place, and owns
@@ -81,12 +82,14 @@ where
             .held)
     }
 
-    async fn active_grace(&self, id: DiscordUserId) -> Result<bool, MemberError> {
+    async fn hold(&self, record: &MemberRecord, id: DiscordUserId) -> Result<Hold, MemberError> {
         let today = chrono::Utc::now().date_naive();
-        self.store
+        let moderator_grace = self
+            .store
             .active_grace(self.guild, id, today)
             .await
-            .map_err(|e| MemberError::Store(e.to_string()))
+            .map_err(|e| MemberError::Store(e.to_string()))?;
+        Ok(hold_for(record, moderator_grace, today))
     }
 
     async fn active_override(&self, id: DiscordUserId) -> Result<bool, MemberError> {

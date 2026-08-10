@@ -240,7 +240,7 @@ async fn preview_unmanaged(world: &mut BulkWorld) {
         .await
         .unwrap();
     let store = InMemoryStore::new(Index::from_records(known.clone()));
-    world.tally = Some(bulk::preview(&store, &members).await.unwrap());
+    world.tally = Some(bulk::preview(&store, &members, chrono::Utc::now().date_naive()).await.unwrap());
 }
 
 #[when("Sonic previews a whole-server sweep")]
@@ -253,7 +253,7 @@ async fn preview_whole_guild(world: &mut BulkWorld) {
         .await
         .unwrap();
     let store = InMemoryStore::new(Index::from_records(known.clone()));
-    world.tally = Some(bulk::preview(&store, &members).await.unwrap());
+    world.tally = Some(bulk::preview(&store, &members, chrono::Utc::now().date_naive()).await.unwrap());
 }
 
 #[when("Sonic resumes the session")]

@@ -180,13 +180,18 @@ impl MemberRead for FakeMembers {
         Ok(self.roles_of(id))
     }
 
-    async fn active_grace(&self, id: DiscordUserId) -> Result<bool, MemberError> {
+    async fn hold(
+        &self,
+        record: &MemberRecord,
+        id: DiscordUserId,
+    ) -> Result<engine::verify::Hold, MemberError> {
         let today = chrono::Utc::now().date_naive();
-        Ok(self
+        let moderator_grace = self
             .grace
             .get(&id.0)
             .map(|&until| until >= today)
-            .unwrap_or(false))
+            .unwrap_or(false);
+        Ok(engine::verify::hold_for(record, moderator_grace, today))
     }
 
     async fn active_override(&self, id: DiscordUserId) -> Result<bool, MemberError> {

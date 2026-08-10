@@ -5,6 +5,7 @@ use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use domain::Role;
 
 use super::decision::{HealAction, Located};
+use super::member::Hold;
 
 /// Everything a member facade operation can fail with - the one concrete error the verbs
 /// surface. Each backend's associated error is stringified once, inside [`DataStore`], rather
@@ -41,9 +42,10 @@ pub trait MemberRead: Send + Sync {
     /// The member's currently-held managed status roles.
     async fn held_roles(&self, id: DiscordUserId) -> Result<Vec<Role>, MemberError>;
 
-    /// Whether `id` has a moderator grace override active today. Read through the facade so
-    /// every verify verb honors grace without each re-reading the store directly.
-    async fn active_grace(&self, id: DiscordUserId) -> Result<bool, MemberError>;
+    /// The [`Hold`] in force for `record` today - a moderator grace window, the temporary
+    /// payment-processing window, or none. Read through the facade so every verify verb honors
+    /// a hold without each re-reading the store directly.
+    async fn hold(&self, record: &MemberRecord, id: DiscordUserId) -> Result<Hold, MemberError>;
 
     /// Whether `id` carries an active manual-override stamp. Read through the facade so the
     /// verify verbs hold a hand-approved member at Member without each re-reading the store.

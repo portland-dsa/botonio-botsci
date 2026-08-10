@@ -3,6 +3,15 @@ name = "engine"
 version = "0.2.1"
 edition = "2024"
 
+[features]
+# TEMPORARY: upstream marks a member Lapsed for about two days while their renewal
+# payment processes. `lapse-grace` holds such a record at Member for a short window
+# past its expiry date so the bot stops demoting members it will re-promote within
+# days. On by default so the shipped binary and CI both carry it; remove the feature
+# and its `#[cfg]` blocks once the upstream defect is fixed.
+default = ["lapse-grace"]
+lapse-grace = []
+
 [dependencies]
 domain = { path = "../domain" }
 backends = { path = "../backends" }

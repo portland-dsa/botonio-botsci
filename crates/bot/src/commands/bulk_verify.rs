@@ -238,7 +238,7 @@ pub async fn bulk_verify(
         }
     };
     let total = members.len();
-    let tally = bulk::preview(&*data.store, &members).await?;
+    let tally = bulk::preview(&*data.store, &members, chrono::Utc::now().date_naive()).await?;
 
     // --- Preview/confirm ---
     sweep_handle
