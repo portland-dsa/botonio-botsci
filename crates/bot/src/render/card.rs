@@ -5,6 +5,7 @@ use serenity::all::{CreateEmbed, CreateEmbedFooter};
 
 use domain::{MigsStatus, Role};
 use engine::store::{GraceOverride, MemberRecord, OverrideRecord};
+use engine::verify::{Hold, effective_role, hold_for};
 
 pub const COLOR_GREEN: u32 = 0x3b_a5_5d;
 pub const COLOR_AMBER: u32 = 0xfa_a6_1a;
@@ -33,6 +34,10 @@ pub fn membership_card(
     };
     let color = card_color(rec, today);
     let status_line = status_line(rec, today);
+    // The role the member actually holds, which a hold can lift above their raw standing.
+    // The status line and colour deliberately keep reporting what Solidarity Tech says, so
+    // a moderator sees both the record and the reason the bot departed from it.
+    let hold = hold_for(rec, grace.is_some_and(|g| g.until >= today), today);
 
     let mut embed = CreateEmbed::new()
         .title(title)
@@ -42,7 +47,16 @@ pub fn membership_card(
     if let Some(name) = &rec.full_name {
         embed = embed.field("Name", name, false);
     }
-    embed = embed.field("Role", role_label(rec), false);
+    embed = embed.field("Role", role_label(rec, hold), false);
+    #[cfg(feature = "lapse-grace")]
+    if hold == Hold::PaymentProcessing {
+        embed = embed.field(
+            "Dues",
+            "⏳ Held at Member - recorded as lapsed, but the expiry date is recent enough \
+             that the renewal payment is most likely still processing.",
+            false,
+        );
+    }
     if let Some(j) = rec.join_date {
         embed = embed.field("Join Date", j.format("%b %-d, %Y").to_string(), true);
     }
@@ -110,8 +124,11 @@ pub fn override_card(display_name: &str, stamp: &OverrideRecord, show_note: bool
         ))
 }
 
-fn role_label(rec: &MemberRecord) -> &'static str {
-    Role::try_from(rec.membership())
+/// The role the member actually holds - the standing-derived one unless a [`Hold`] lifts
+/// them to `Member`. Derived from the same decision the verify path writes, so the card
+/// cannot disagree with the role on the member.
+fn role_label(rec: &MemberRecord, hold: Hold) -> &'static str {
+    effective_role(rec, hold)
         .map(Role::as_str)
         .unwrap_or("Unknown")
 }

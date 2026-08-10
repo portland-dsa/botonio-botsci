@@ -108,6 +108,36 @@ async fn run_once(
         }
     };
 
+    // Reported before the verdict branch: the count describes what Solidarity Tech sent us,
+    // not what the bot wrote, so an aborted pass should still surface it.
+    #[cfg(feature = "lapse-grace")]
+    if scan_plan.held_processing > 0 {
+        match cfg.verification_log_channel {
+            Some(channel) => {
+                let embed = crate::render::scan::lapse_grace_embed(
+                    scan_plan.held_processing,
+                    scan_plan.scanned,
+                );
+                if let Err(e) = ChannelId::new(channel.0)
+                    .send_message(
+                        http.as_ref(),
+                        serenity::all::CreateMessage::new().embed(embed),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "scheduled scan: failed to post the dues-hold summary");
+                }
+            }
+            None => {
+                tracing::info!(
+                    held = scan_plan.held_processing,
+                    "scheduled scan held members inside the payment-processing window, but no \
+                     verification-log channel is set to report it - set one in /setup"
+                );
+            }
+        }
+    }
+
     if let ScanVerdict::Abort { demotions, scanned } = scan_plan.verdict {
         tracing::error!(
             demotions,
