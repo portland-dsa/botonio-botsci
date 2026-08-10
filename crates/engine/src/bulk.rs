@@ -4,7 +4,7 @@
 //! collector live in the bot (a live interaction has no offline surface); these are
 //! the pieces that can be unit-tested without a gateway.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use domain::Role;
 
@@ -12,7 +12,7 @@ use crate::backends::discord::{DiscordClient, DiscordError, DiscordRosterMember}
 use crate::paging::drain_pages;
 use crate::seam::NoProgress;
 use crate::store::{BulkScope, MemberStore};
-use crate::verify::{MatchOutcome, decide, locate};
+use crate::verify::{MatchOutcome, decide, effective_role, hold_for, locate};
 
 /// Returns the staleness window (7 days). An in-progress session older than this
 /// is treated as abandoned, evaluated lazily at command entry (there is no background
@@ -94,6 +94,7 @@ pub struct PreviewTally {
 pub async fn preview<S: MemberStore>(
     store: &S,
     members: &[DiscordRosterMember],
+    today: NaiveDate,
 ) -> Result<PreviewTally, S::Error> {
     let mut counts = [0usize; Role::ALL.len()];
     let mut unchanged = 0usize;
@@ -103,20 +104,25 @@ pub async fn preview<S: MemberStore>(
     for m in members {
         let located = locate(store, m.id, &m.handle).await?;
         match decide(located, m.id, &m.handle) {
-            MatchOutcome::Matched { record, .. } => match Role::try_from(record.membership()) {
-                Ok(role) => {
-                    if already_in_role(&m.held, role) {
-                        unchanged += 1;
-                    } else {
-                        let idx = Role::ALL
-                            .iter()
-                            .position(|&r| r == role)
-                            .expect("role in ALL");
-                        counts[idx] += 1;
+            // The preview has never read the grace store, so a hand-graced member has always
+            // been counted from their raw standing here; `false` preserves that exactly. The
+            // payment-processing hold needs no store read, so it *is* reflected.
+            MatchOutcome::Matched { record, .. } => {
+                match effective_role(&record, hold_for(&record, false, today)) {
+                    Ok(role) => {
+                        if already_in_role(&m.held, role) {
+                            unchanged += 1;
+                        } else {
+                            let idx = Role::ALL
+                                .iter()
+                                .position(|&r| r == role)
+                                .expect("role in ALL");
+                            counts[idx] += 1;
+                        }
                     }
+                    Err(_) => malformed += 1,
                 }
-                Err(_) => malformed += 1,
-            },
+            }
             MatchOutcome::Miss => misses += 1,
             MatchOutcome::Conflict => conflicts += 1,
         }

@@ -11,7 +11,10 @@ use crate::backends::discord::DiscordRosterMember;
 use crate::bulk::already_in_role;
 use crate::store::{GraceStore, MemberStore, OverrideLog};
 use crate::util::{DiscordHandle, DiscordUserId};
-use crate::verify::{MatchOutcome, decide, effective_role, locate};
+use crate::verify::{MatchOutcome, decide, effective_role, hold_for, locate};
+
+#[cfg(feature = "lapse-grace")]
+use crate::verify::Hold;
 
 /// Standing rank for demotion comparison: `Member` is highest, `Unverified` lowest.
 fn rank(role: Role) -> u8 {
@@ -74,6 +77,11 @@ pub struct ScanPlan {
     /// skipped because they carry an active manual-override stamp. Not a demotion, so it
     /// never feeds the tripwire.
     pub overridden: usize,
+    /// Members whose `Lapsed` record was inside the temporary payment-processing window,
+    /// so they kept `Member` instead of being demoted. Reported to the verification-log
+    /// channel each pass so the upstream defect's lifetime stays visible; always `0` when
+    /// the `lapse-grace` feature is off.
+    pub held_processing: usize,
     pub verdict: ScanVerdict,
 }
 
@@ -97,15 +105,27 @@ where
     let mut conflicts = 0usize;
     let mut malformed = 0usize;
     let mut overridden = 0usize;
+    #[cfg(feature = "lapse-grace")]
+    let mut held_processing = 0usize;
+    #[cfg(not(feature = "lapse-grace"))]
+    let held_processing = 0usize;
 
     for m in members {
         let located = locate(store, m.id, &m.handle).await?;
         let target = match decide(located, m.id, &m.handle) {
             MatchOutcome::Matched { record, .. } => {
-                let grace = store.active_grace(guild, m.id, today).await?;
-                match effective_role(&record, grace) {
+                let moderator_grace = store.active_grace(guild, m.id, today).await?;
+                let hold = hold_for(&record, moderator_grace, today);
+                // Counted here rather than beside the change push: a held member usually
+                // already holds Member, so `already_in_role` skips them below - tallying
+                // there would report zero for exactly the members the hold is protecting.
+                #[cfg(feature = "lapse-grace")]
+                if hold == Hold::PaymentProcessing {
+                    held_processing += 1;
+                }
+                match effective_role(&record, hold) {
                     Ok(role) => role,
-                    Err(()) => {
+                    Err(_) => {
                         // No usable standing and no grace: never auto-demote a record we cannot
                         // decide, and keep it out of the demotion count so it cannot feed the
                         // mass-demote tripwire.
@@ -169,6 +189,7 @@ where
         conflicts,
         malformed,
         overridden,
+        held_processing,
         verdict,
     })
 }

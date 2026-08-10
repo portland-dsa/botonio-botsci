@@ -2,7 +2,7 @@
 
 use crate::store::MemberRecord;
 use crate::util::{DiscordHandle, DiscordUserId, Email};
-use domain::Role;
+use domain::{MalformedMembership, Role};
 
 use super::decision::{EmailMatchOutcome, HealAction, MatchOutcome, decide, match_by_email};
 use super::facade::{Heal, MemberError, MemberRead, MemberWrite};
@@ -102,18 +102,84 @@ pub enum EmailGrant {
     NotFound,
 }
 
-/// The role to assign for a matched record, with the grace override applied: an active grace
-/// forces `Member` (ignoring `xdate` and membership status); otherwise the role is the
-/// standing-derived one. `Err(())` means a matched record with no usable standing and no grace -
-/// the "malformed" branch the callers already handle.
-pub(crate) fn effective_role(
-    record: &crate::store::MemberRecord,
-    grace_active: bool,
-) -> Result<Role, ()> {
-    if grace_active {
-        return Ok(Role::Member);
+/// How long past its expiry date a `Lapsed` record is still treated as current.
+///
+/// Seven days covers the observed two-day processing window plus a weekend and a retry,
+/// while keeping a genuinely lapsed member's unearned grace to under a week.
+#[cfg(feature = "lapse-grace")]
+const PAYMENT_PROCESSING_DAYS: i64 = 7;
+
+/// Whether `record` sits inside the window where a `Lapsed` standing is more likely an
+/// upstream payment-processing artifact than a real lapse.
+///
+/// Requires both a `Lapsed` standing and an `expires` date to anchor against: a `Lapsed`
+/// record with no expiry has nothing to measure, so it decides on standing alone exactly as
+/// it did before this workaround existed. A *future* expiry yields a negative day count and
+/// so is covered too - a record claiming to be lapsed before its own expiry date is
+/// self-contradictory, which is the shape the defect would take if the upstream data shifts
+/// again.
+#[cfg(feature = "lapse-grace")]
+fn payment_processing(record: &MemberRecord, today: chrono::NaiveDate) -> bool {
+    if record.standing != Some(domain::MigsStatus::Lapsed) {
+        return false;
     }
-    Role::try_from(record.membership()).map_err(|_| ())
+    let Some(xdate) = record.expires else {
+        return false;
+    };
+    (today - xdate).num_days() <= PAYMENT_PROCESSING_DAYS
+}
+
+/// Why a member is held at [`Role::Member`] despite what Solidarity Tech says about them.
+///
+/// A hold is the *reason* a role decision departs from the record's standing, so a caller can
+/// report which one applied rather than only that one did - the scheduled scan counts
+/// [`PaymentProcessing`](Hold::PaymentProcessing) holds so the upstream defect's lifetime
+/// stays visible without reading logs on the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hold {
+    /// No hold - the record's standing decides the role.
+    None,
+    /// A moderator granted an explicit grace window through `/grace set`.
+    Moderator,
+    /// The record is `Lapsed` but still inside the payment-processing window.
+    ///
+    /// Temporary: this variant and every `#[cfg]` beside it go when the upstream defect is
+    /// fixed.
+    #[cfg(feature = "lapse-grace")]
+    PaymentProcessing,
+}
+
+/// The hold in force for `record` on `today`.
+///
+/// `moderator_grace` is the caller's already-read [`GraceStore`](crate::store::GraceStore)
+/// answer, and it wins: a hand-granted window is never mistaken for the automatic one, so
+/// `/grace set` and `/grace clear` behave exactly as a moderator expects even while the
+/// temporary workaround is live.
+pub fn hold_for(record: &MemberRecord, moderator_grace: bool, today: chrono::NaiveDate) -> Hold {
+    if moderator_grace {
+        return Hold::Moderator;
+    }
+    #[cfg(feature = "lapse-grace")]
+    if payment_processing(record, today) {
+        return Hold::PaymentProcessing;
+    }
+    #[cfg(not(feature = "lapse-grace"))]
+    let _ = (record, today);
+    Hold::None
+}
+
+/// The role to assign for a matched record, with any [`Hold`] applied: a held member is forced
+/// to `Member` (ignoring `expires` and membership status); otherwise the role is the
+/// standing-derived one. A [`MalformedMembership`] error means a matched record with no usable
+/// standing and no hold - the "malformed" branch the callers already handle.
+pub fn effective_role(record: &MemberRecord, hold: Hold) -> Result<Role, MalformedMembership> {
+    match hold {
+        Hold::Moderator => return Ok(Role::Member),
+        #[cfg(feature = "lapse-grace")]
+        Hold::PaymentProcessing => return Ok(Role::Member),
+        Hold::None => {}
+    }
+    Role::try_from(record.membership())
 }
 
 /// The non-identifying audit detail for a verify-family outcome: the outcome verb, the method,
@@ -124,6 +190,92 @@ fn verify_detail(outcome: &str, role: Option<Role>, method: VerifyMethod) -> ser
             serde_json::json!({ "outcome": outcome, "role": r.as_str(), "method": method.as_str() })
         }
         None => serde_json::json!({ "outcome": outcome, "method": method.as_str() }),
+    }
+}
+
+#[cfg(all(test, feature = "lapse-grace"))]
+mod payment_processing_tests {
+    use super::*;
+    use crate::util::{Email, StUserId};
+    use chrono::NaiveDate;
+
+    fn today() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 8, 10).expect("valid date")
+    }
+
+    /// A record with `standing` whose expiry sits `days_ago` days before [`today`].
+    fn record(standing: Option<domain::MigsStatus>, days_ago: i64) -> MemberRecord {
+        MemberRecord {
+            st_user_id: StUserId("st-1".into()),
+            discord_user_id: None,
+            discord_handle: None,
+            email: Email("m@b.test".into()),
+            full_name: None,
+            standing,
+            join_date: None,
+            expires: Some(today() - chrono::Duration::days(days_ago)),
+            membership_type: None,
+            monthly_dues: None,
+            yearly_dues: None,
+        }
+    }
+
+    #[test]
+    fn the_window_is_inclusive_at_its_edge() {
+        let lapsed = |days| record(Some(domain::MigsStatus::Lapsed), days);
+        assert!(payment_processing(&lapsed(7), today()), "7 days is inside");
+        assert!(
+            !payment_processing(&lapsed(8), today()),
+            "8 days is outside"
+        );
+    }
+
+    #[test]
+    fn a_future_expiry_is_covered() {
+        // Lapsed before its own expiry date is self-contradictory - the shape the defect
+        // would take if the upstream data shifts again.
+        let rec = record(Some(domain::MigsStatus::Lapsed), -30);
+        assert!(payment_processing(&rec, today()));
+    }
+
+    #[test]
+    fn an_absent_expiry_has_no_anchor() {
+        let mut rec = record(Some(domain::MigsStatus::Lapsed), 1);
+        rec.expires = None;
+        assert!(!payment_processing(&rec, today()));
+    }
+
+    #[test]
+    fn only_a_lapsed_standing_qualifies() {
+        assert!(!payment_processing(
+            &record(Some(domain::MigsStatus::MemberInGoodStanding), 1),
+            today()
+        ));
+        assert!(!payment_processing(&record(None, 1), today()));
+    }
+
+    #[test]
+    fn moderator_grace_outranks_the_window() {
+        // Both apply; the hold must name the moderator so the scan does not count a
+        // hand-granted window as an upstream artifact.
+        let rec = record(Some(domain::MigsStatus::Lapsed), 1);
+        assert_eq!(hold_for(&rec, true, today()), Hold::Moderator);
+        assert_eq!(hold_for(&rec, false, today()), Hold::PaymentProcessing);
+    }
+
+    #[test]
+    fn a_held_record_resolves_to_member() {
+        let rec = record(Some(domain::MigsStatus::Lapsed), 1);
+        assert_eq!(
+            effective_role(&rec, hold_for(&rec, false, today())),
+            Ok(Role::Member)
+        );
+        // Outside the window the standing decides, as it always has.
+        let stale = record(Some(domain::MigsStatus::Lapsed), 30);
+        assert_eq!(
+            effective_role(&stale, hold_for(&stale, false, today())),
+            Ok(Role::DuesExpired)
+        );
     }
 }
 
@@ -306,8 +458,8 @@ impl<M: Heal> Member<'_, M> {
             .await?;
         match decide(located, self.target.id, &self.target.handle) {
             MatchOutcome::Matched { record, heal } => {
-                let grace = self.store.active_grace(self.target.id).await?;
-                match effective_role(&record, grace) {
+                let hold = self.store.hold(&record, self.target.id).await?;
+                match effective_role(&record, hold) {
                     Ok(role) => {
                         self.store
                             .record(
@@ -322,7 +474,7 @@ impl<M: Heal> Member<'_, M> {
                         self.heal(&record, &heal).await;
                         Ok(VerifyOutcome::Verified(role))
                     }
-                    Err(()) => {
+                    Err(_) => {
                         // Matched a record with no usable standing: assign no role, audit the encounter,
                         // and let the caller offer a hand-override.
                         self.store
@@ -397,8 +549,8 @@ impl<M: Heal> Member<'_, M> {
             .await?;
         match decide(located, self.target.id, &self.target.handle) {
             MatchOutcome::Matched { record, heal } => {
-                let grace = self.store.active_grace(self.target.id).await?;
-                match effective_role(&record, grace) {
+                let hold = self.store.hold(&record, self.target.id).await?;
+                match effective_role(&record, hold) {
                     Ok(role) => {
                         if crate::bulk::already_in_role(held, role) {
                             self.heal(&record, &heal).await;
@@ -418,7 +570,7 @@ impl<M: Heal> Member<'_, M> {
                             Ok(ResyncOutcome::Changed(role))
                         }
                     }
-                    Err(()) => {
+                    Err(_) => {
                         // Matched a record with no usable standing: audit the encounter and queue
                         // for the wizard's override-only path. No role is written.
                         self.store
@@ -475,8 +627,8 @@ impl<M: Heal> Member<'_, M> {
         Ok(
             match match_by_email(records, self.target.id, &self.target.handle) {
                 EmailMatchOutcome::Matched { record, heal } => {
-                    let grace = self.store.active_grace(self.target.id).await?;
-                    match effective_role(&record, grace) {
+                    let hold = self.store.hold(&record, self.target.id).await?;
+                    match effective_role(&record, hold) {
                         Ok(role) => {
                             self.store
                                 .record(
@@ -491,7 +643,7 @@ impl<M: Heal> Member<'_, M> {
                             self.heal(&record, &heal).await;
                             EmailGrant::Verified { role, record }
                         }
-                        Err(()) => {
+                        Err(_) => {
                             // Matched a record with no usable standing: assign no role, audit the
                             // encounter, and let the caller offer a hand-override.
                             self.store

@@ -7,6 +7,12 @@ edition = "2024"
 name = "botonio-botsci" # avoids the package name (Windows launch-name trap)
 path = "src/main.rs"
 
+[features]
+# Passthrough for the engine's temporary payment-processing grace, on by default so the
+# release build carries it without a feature argument. Goes with the engine feature.
+default = ["lapse-grace"]
+lapse-grace = ["engine/lapse-grace"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
