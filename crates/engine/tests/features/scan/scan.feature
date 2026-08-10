@@ -38,6 +38,22 @@ Feature: The scheduled scan plans role changes and guards against mass demotion
     And the scan would change 0 members
     And the scan proceeds
 
+  Scenario: A member whose renewal payment is still processing is held at Member
+    Given Cream is in the roster holding the Member role, recorded as lapsed 1 day ago
+    When the scan plans a pass
+    Then the scan holds 1 member for payment processing
+    And the scan counts 0 demotions
+    And the scan would change 0 members
+    And the scan proceeds
+
+  Scenario: A member lapsed well past the window is demoted as usual
+    Given Eggman is in the roster holding the Member role, recorded as lapsed 21 days ago
+    When the scan plans a pass
+    Then the scan holds 0 members for payment processing
+    And the scan counts 1 demotion
+    And the scan would change 1 member
+    And the scan proceeds
+
   Scenario: A manually-overridden member is held at Member and never demoted
     Given Amy is in the roster holding the Member role, manually overridden, unknown to us
     When the scan plans a pass

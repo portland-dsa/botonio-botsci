@@ -3,7 +3,9 @@
 //! Cast: the scan reconciles a roster of Sonic-cast members. Sonic (good standing) and Tails
 //! (lapsed) are named actors for the mix scenario; Ghost is linked in the cache to a different
 //! account (conflict); Rouge is linked but her record has no standing (malformed - left
-//! untouched). Bulk scenarios use anonymous numeric members.
+//! untouched); Cream is recorded as lapsed but her renewal payment is still processing, and
+//! Eggman is the genuine lapse the window must not shelter. Bulk scenarios use anonymous
+//! numeric members.
 
 use cucumber::{World as _, given, then, when};
 
@@ -31,6 +33,8 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
         "Ghost" => 8,
         "Rouge" => 7,
         "Amy" => 5,
+        "Cream" => 6,
+        "Eggman" => 9,
         other => panic!("unknown actor {other}"),
     };
     (DiscordUserId(raw), DiscordHandle(name.to_lowercase()))
@@ -72,6 +76,16 @@ fn record(name: &str, standing: MigsStatus) -> MemberRecord {
         membership_type: None,
         monthly_dues: None,
         yearly_dues: None,
+    }
+}
+
+/// Build a cache record for `name` recorded as lapsed, with its expiry `days_ago` days back.
+/// The pair of fields the payment-processing window reads: a `Lapsed` standing and a date to
+/// measure it against.
+fn lapsed_expiring(name: &str, days_ago: i64) -> MemberRecord {
+    MemberRecord {
+        expires: Some(Utc::now().date_naive() - chrono::Duration::days(days_ago)),
+        ..record(name, MigsStatus::Lapsed)
     }
 }
 
@@ -216,6 +230,16 @@ async fn roster_overridden_unknown(world: &mut ScanWorld, name: String) {
     world.overridden.push(id);
 }
 
+#[given(
+    regex = r"^(\w+) is in the roster holding the Member role, recorded as lapsed (\d+) days? ago$"
+)]
+async fn roster_lapsed_days_ago(world: &mut ScanWorld, name: String, days: i64) {
+    world
+        .roster
+        .push(roster_member(&name, vec![domain::Role::Member]));
+    world.known.push(lapsed_expiring(&name, days));
+}
+
 // ---------------------------------------------------------------------------
 // When steps
 // ---------------------------------------------------------------------------
@@ -269,6 +293,15 @@ async fn scan_counts_demotions(world: &mut ScanWorld, count: usize) {
 async fn scan_counts_misses(world: &mut ScanWorld, count: usize) {
     let p = world.plan.as_ref().expect("no plan");
     assert_eq!(p.misses, count, "miss count mismatch");
+}
+
+#[then(regex = r"^the scan holds (\d+) members? for payment processing$")]
+async fn scan_holds_payment_processing(world: &mut ScanWorld, count: usize) {
+    let p = world.plan.as_ref().expect("no plan");
+    assert_eq!(
+        p.held_processing, count,
+        "payment-processing hold count mismatch"
+    );
 }
 
 #[then(regex = r"^the scan counts (\d+) conflict(?:s)?$")]

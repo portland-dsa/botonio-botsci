@@ -63,6 +63,10 @@ jobs:
         run: shellcheck deploy/bin/deploy-wrapper scripts/hooks/pre-push
       - name: test (offline mocks only - no credentials)
         run: cargo test --workspace
+      - name: check without the temporary payment-processing grace
+        # `lapse-grace` is on by default, so the steps above only ever build it enabled.
+        # This keeps the disabled path compiling until the workaround is removed outright.
+        run: cargo check -p engine --no-default-features
       - name: sqlx cache drift check (committed .sqlx vs live schema)
         # The offline clippy/test steps above already fail if a query changed without
         # `cargo sqlx prepare`; this additionally catches schema-type drift (a migration
