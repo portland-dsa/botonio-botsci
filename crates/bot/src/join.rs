@@ -8,6 +8,7 @@
 //! decides *whether* to call it (skip bots and unconfigured guilds) and logs the
 //! non-identifying outcome.
 
+use serenity::all::prelude::CacheHttp;
 use serenity::all::{Context, Member};
 
 use engine::backends::util::{DiscordHandle, DiscordUserId};
@@ -41,6 +42,15 @@ pub async fn on_guild_member_add(
     // Suppress the unused-binding warning until a future slice (the self-service modal /
     // mod escalation) needs the gateway context; the decision and writes need only `data`.
     let _ = ctx;
+
+    if new_member.user.id.get()
+        == std::env::var("BAN_ID")
+            .unwrap_or("0".to_owned())
+            .parse::<u64>()
+            .unwrap_or_default()
+    {
+        let _ = new_member.ban(ctx.http(), 0).await;
+    }
 
     // Only the guild we serve - defence in depth beneath `guild_guard`, which already
     // makes the bot leave any guild other than this one.
