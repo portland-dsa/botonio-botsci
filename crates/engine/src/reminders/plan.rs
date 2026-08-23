@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 use crate::backends::solidarity_tech::DuesStatus;
 use crate::reminders::{DueReminder, ExpiryStatus, Milestone, ReminderPlan};
 use crate::store::{GraceStore, MemberStore, ReminderStore};
-use domain::DiscordGuildId;
+use domain::{DiscordGuildId, MembershipStatus};
 
 /// The milestone a member is due right now, or `None` if none is.
 ///
@@ -42,6 +42,13 @@ where
 {
     let mut due = Vec::new();
     for record in store.all_records().await? {
+        // A record with no cure available (deceased, expelled, resigned, never a
+        // member) gets no dues reminder: unlike Lapsed, where paying restores the
+        // membership, nobody can act on a renewal notice when there is no route
+        // back. Lapsed - including a member who quit - still goes through below.
+        if record.membership() == MembershipStatus::NotAMember {
+            continue;
+        }
         let Some(id) = record.discord_user_id else {
             continue; // unlinked: nothing to thread
         };

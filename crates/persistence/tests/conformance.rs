@@ -14,7 +14,7 @@
 
 use chrono::NaiveDate;
 
-use domain::MigsStatus;
+use domain::{GoodStanding, Lapsed, MigsStatus};
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::channels::{ChannelSnapshot, SNAPSHOT_FORMAT_VERSION};
 use engine::reminders::{MessageKind, Milestone};
@@ -58,7 +58,9 @@ fn fixture() -> Vec<MemberRecord> {
             discord_handle: Some(DiscordHandle("zoopgoop".into())),
             email: Email("zoopgoop@b.test".into()),
             full_name: Some("Zoop Goop".into()),
-            standing: Some(MigsStatus::MemberInGoodStanding),
+            standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             join_date: Some(date(2021, 3, 15)),
             expires: Some(date(2026, 12, 31)),
             membership_type: Some(MembershipType::Monthly),
@@ -75,7 +77,7 @@ fn fixture() -> Vec<MemberRecord> {
             discord_handle: Some(DiscordHandle("yearly".into())),
             email: Email("yearly@b.test".into()),
             full_name: Some("Yearly Member".into()),
-            standing: Some(MigsStatus::Lapsed),
+            standing: Some(MigsStatus::Lapsed(Lapsed::Lapsed)),
             join_date: Some(date(2020, 1, 1)),
             expires: Some(date(2025, 1, 1)),
             membership_type: Some(MembershipType::Yearly),
@@ -88,7 +90,9 @@ fn fixture() -> Vec<MemberRecord> {
             discord_handle: Some(DiscordHandle("onetime".into())),
             email: Email("onetime@b.test".into()),
             full_name: Some("One Time".into()),
-            standing: Some(MigsStatus::MemberInGoodStanding),
+            standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             join_date: None,
             expires: None,
             membership_type: Some(MembershipType::OneTime),
@@ -134,7 +138,7 @@ fn fixture() -> Vec<MemberRecord> {
             discord_handle: Some(DiscordHandle("impostor".into())),
             email: Email("dupe-42@b.test".into()),
             full_name: Some("Dupe".into()),
-            standing: Some(MigsStatus::Lapsed),
+            standing: Some(MigsStatus::Lapsed(Lapsed::Lapsed)),
             join_date: None,
             expires: None,
             membership_type: None,

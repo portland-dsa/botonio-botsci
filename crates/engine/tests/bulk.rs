@@ -14,7 +14,7 @@ use engine::store::{
 };
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
-use domain::{DiscordGuildId, MigsStatus};
+use domain::{DiscordGuildId, GoodStanding, Lapsed, MigsStatus};
 
 const SONIC: u64 = 1;
 const GUILD: u64 = 100;
@@ -34,7 +34,10 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
 
 /// Build a `MemberRecord` for `name` that the cache knows, with `MemberInGoodStanding`.
 fn known_record(name: &str) -> MemberRecord {
-    known_record_standing(name, MigsStatus::MemberInGoodStanding)
+    known_record_standing(
+        name,
+        MigsStatus::MemberInGoodStanding(GoodStanding::InGoodStanding),
+    )
 }
 
 /// Build a `MemberRecord` for `name` that the cache knows, with the given `standing`.
@@ -187,9 +190,10 @@ async fn roster_known_already_dues_expired(world: &mut BulkWorld, name: String) 
     world
         .roster
         .push(roster_member(&name, vec![Role::DuesExpired]));
-    world
-        .known
-        .push(known_record_standing(&name, MigsStatus::Lapsed));
+    world.known.push(known_record_standing(
+        &name,
+        MigsStatus::Lapsed(Lapsed::Lapsed),
+    ));
 }
 
 #[given(regex = r"^(\w+) is in the roster holding only the Unverified role, unknown to us$")]
@@ -240,7 +244,11 @@ async fn preview_unmanaged(world: &mut BulkWorld) {
         .await
         .unwrap();
     let store = InMemoryStore::new(Index::from_records(known.clone()));
-    world.tally = Some(bulk::preview(&store, &members, chrono::Utc::now().date_naive()).await.unwrap());
+    world.tally = Some(
+        bulk::preview(&store, &members, chrono::Utc::now().date_naive())
+            .await
+            .unwrap(),
+    );
 }
 
 #[when("Sonic previews a whole-server sweep")]
@@ -253,7 +261,11 @@ async fn preview_whole_guild(world: &mut BulkWorld) {
         .await
         .unwrap();
     let store = InMemoryStore::new(Index::from_records(known.clone()));
-    world.tally = Some(bulk::preview(&store, &members, chrono::Utc::now().date_naive()).await.unwrap());
+    world.tally = Some(
+        bulk::preview(&store, &members, chrono::Utc::now().date_naive())
+            .await
+            .unwrap(),
+    );
 }
 
 #[when("Sonic resumes the session")]

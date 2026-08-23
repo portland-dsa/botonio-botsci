@@ -152,7 +152,7 @@ mod tests {
     use crate::backends::solidarity_tech::SolidarityTechMember;
     use crate::store::{InMemoryStore, Index};
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-    use domain::MigsStatus;
+    use domain::{GoodStanding, MigsStatus};
 
     fn member(handle: &str, id: u64) -> SolidarityTechMember {
         SolidarityTechMember {
@@ -208,7 +208,9 @@ mod tests {
             email: Email("m@b.test".into()),
             discord_handle: Some(DiscordHandle("zoop".into())),
             discord_user_id: Some(DiscordUserId(42)),
-            membership_standing: Some(MigsStatus::MemberInGoodStanding),
+            membership_standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             ..Default::default()
         };
         let store = InMemoryStore::new(Index::build(vec![good_standing]));

@@ -9,7 +9,7 @@ use cucumber::{World as _, given, then, when};
 use secrecy::SecretString;
 
 use backends::solidarity_tech::{SolidarityTechClient, SolidarityTechHttp, SolidarityTechMember};
-use domain::MigsStatus;
+use domain::{GoodStanding, Lapsed, MigsStatus};
 
 /// Sonic's Discord account - the good-standing member.
 const SONIC_ID: u64 = 1001;
@@ -81,7 +81,9 @@ async fn two_members(world: &mut RosterWorld) {
 async fn sonic_good(world: &mut RosterWorld) {
     assert_eq!(
         world.member(SONIC_ID).membership_standing,
-        Some(MigsStatus::MemberInGoodStanding)
+        Some(MigsStatus::MemberInGoodStanding(
+            GoodStanding::InGoodStanding
+        ))
     );
 }
 
@@ -89,7 +91,7 @@ async fn sonic_good(world: &mut RosterWorld) {
 async fn tails_lapsed(world: &mut RosterWorld) {
     assert_eq!(
         world.member(TAILS_ID).membership_standing,
-        Some(MigsStatus::Lapsed)
+        Some(MigsStatus::Lapsed(Lapsed::Lapsed))
     );
 }
 

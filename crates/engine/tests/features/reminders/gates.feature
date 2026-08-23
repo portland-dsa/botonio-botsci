@@ -39,3 +39,12 @@ Feature: Dues-reminder gates
     And Amy's last cycle was for a different xdate
     When the reminder sweep is planned
     Then Amy is due the renewal notice
+
+  Scenario: a record with no cure gets no reminder, but a member who quit still does
+    Given Tails lapsed yesterday
+    And Tails's membership status is "Deceased"
+    And Amy lapsed yesterday
+    And Amy's membership status is "Quit"
+    When the reminder sweep is planned
+    Then Tails is due no reminder
+    And Amy is due the lapse notice
