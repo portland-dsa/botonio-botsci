@@ -4,7 +4,7 @@
 
 use chrono::NaiveDate;
 use cucumber::{given, then, when};
-use domain::MigsStatus;
+use domain::{GoodStanding, MigsStatus};
 
 use backends::solidarity_tech::{
     DuesStatus, MembershipType, SolidarityTechClient, SolidarityTechError, StClearFlags,
@@ -616,7 +616,9 @@ async fn member_carries_verification(world: &mut EspioWorld) {
     assert_eq!(m.membership_type, Some(MembershipType::Yearly));
     assert_eq!(
         m.membership_standing,
-        Some(MigsStatus::MemberInGoodStanding)
+        Some(MigsStatus::MemberInGoodStanding(
+            GoodStanding::InGoodStanding
+        ))
     );
     world.server.verify().await;
 }

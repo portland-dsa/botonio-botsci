@@ -94,7 +94,7 @@ mod tests {
     use crate::backends::solidarity_tech::SolidarityTechMember;
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
     use chrono::{NaiveDate, Utc};
-    use domain::{MembershipStatus, MigsStatus, Role};
+    use domain::{GoodStanding, MembershipStatus, MigsStatus, Role};
 
     #[tokio::test]
     async fn sweep_roster_fetches_the_discord_list() {
@@ -115,7 +115,9 @@ mod tests {
             first_name: Some("zoop".into()),
             discord_handle: Some(DiscordHandle("zoop".into())),
             discord_user_id: Some(DiscordUserId(42)),
-            membership_standing: Some(MigsStatus::MemberInGoodStanding),
+            membership_standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             xdate: NaiveDate::from_ymd_opt(2026, 12, 31),
             join_date: NaiveDate::from_ymd_opt(2021, 3, 15),
             ..Default::default()
@@ -124,7 +126,12 @@ mod tests {
         assert_eq!(r.discord_user_id, Some(DiscordUserId(42)));
         assert_eq!(r.email.as_str(), "a@b.com");
         assert_eq!(r.full_name.as_deref(), Some("zoop"));
-        assert_eq!(r.standing, Some(MigsStatus::MemberInGoodStanding));
+        assert_eq!(
+            r.standing,
+            Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding
+            ))
+        );
         assert_eq!(Role::try_from(r.membership()), Ok(Role::Member));
         assert_eq!(r.join_date, NaiveDate::from_ymd_opt(2021, 3, 15));
     }
@@ -171,7 +178,9 @@ mod tests {
             first_name: Some(name.into()),
             discord_handle: Some(DiscordHandle(handle.into())),
             discord_user_id: Some(DiscordUserId(id)),
-            membership_standing: Some(MigsStatus::MemberInGoodStanding),
+            membership_standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             ..Default::default()
         }
     }

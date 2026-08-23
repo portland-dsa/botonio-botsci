@@ -15,7 +15,7 @@ use engine::store::{InMemoryStore, Index, MemberRecord, OverrideLog};
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 
 use chrono::Utc;
-use domain::{DiscordGuildId, MigsStatus};
+use domain::{DiscordGuildId, GoodStanding, Lapsed, MigsStatus};
 
 // The fixed threshold from the migrated plan_tests.
 const THRESH: ScanThreshold = ScanThreshold {
@@ -85,7 +85,7 @@ fn record(name: &str, standing: MigsStatus) -> MemberRecord {
 fn lapsed_expiring(name: &str, days_ago: i64) -> MemberRecord {
     MemberRecord {
         expires: Some(Utc::now().date_naive() - chrono::Duration::days(days_ago)),
-        ..record(name, MigsStatus::Lapsed)
+        ..record(name, MigsStatus::Lapsed(Lapsed::Lapsed))
     }
 }
 
@@ -145,9 +145,10 @@ impl ScanWorld {
 #[given(regex = r"^(\w+) is in the roster holding no role, known to us as a Member$")]
 async fn roster_known_member(world: &mut ScanWorld, name: String) {
     world.roster.push(roster_member(&name, vec![]));
-    world
-        .known
-        .push(record(&name, MigsStatus::MemberInGoodStanding));
+    world.known.push(record(
+        &name,
+        MigsStatus::MemberInGoodStanding(GoodStanding::InGoodStanding),
+    ));
 }
 
 #[given(regex = r"^(\w+) is in the roster holding the Member role, known to us as Dues Expired$")]
@@ -155,7 +156,9 @@ async fn roster_known_dues_expired(world: &mut ScanWorld, name: String) {
     world
         .roster
         .push(roster_member(&name, vec![domain::Role::Member]));
-    world.known.push(record(&name, MigsStatus::Lapsed));
+    world
+        .known
+        .push(record(&name, MigsStatus::Lapsed(Lapsed::Lapsed)));
 }
 
 #[given(regex = r"^(\d+) members hold the Member role, none known to us$")]
@@ -198,7 +201,9 @@ async fn member_conflict(world: &mut ScanWorld, name: String) {
         discord_handle: Some(handle),
         email: Email(format!("{}@b.test", name.to_lowercase())),
         full_name: Some(name.to_owned()),
-        standing: Some(MigsStatus::MemberInGoodStanding),
+        standing: Some(MigsStatus::MemberInGoodStanding(
+            GoodStanding::InGoodStanding,
+        )),
         join_date: None,
         expires: None,
         membership_type: None,
@@ -238,6 +243,17 @@ async fn roster_lapsed_days_ago(world: &mut ScanWorld, name: String, days: i64) 
         .roster
         .push(roster_member(&name, vec![domain::Role::Member]));
     world.known.push(lapsed_expiring(&name, days));
+}
+
+#[given(
+    regex = r#"^(\w+) is in the roster holding the Member role, recorded by national as "([^"]+)"$"#
+)]
+async fn roster_known_with_status(world: &mut ScanWorld, name: String, status: String) {
+    let standing = MigsStatus::decode(Some(&status)).expect("a live membership status");
+    world
+        .roster
+        .push(roster_member(&name, vec![domain::Role::Member]));
+    world.known.push(record(&name, standing));
 }
 
 // ---------------------------------------------------------------------------
@@ -320,6 +336,33 @@ async fn scan_counts_malformed(world: &mut ScanWorld, count: usize) {
 async fn scan_holds_by_override(world: &mut ScanWorld, count: usize) {
     let p = world.plan.as_ref().expect("no plan");
     assert_eq!(p.overridden, count, "overridden count mismatch");
+}
+
+/// Parse a guild-facing role name (`Role::as_str()`) as it appears in scenario text,
+/// mirroring how `actor()` panics on an unknown name rather than silently mismatching.
+fn role_named(name: &str) -> domain::Role {
+    match name {
+        "Member" => domain::Role::Member,
+        "Dues Expired" => domain::Role::DuesExpired,
+        "Unverified" => domain::Role::Unverified,
+        other => panic!("unknown role {other}"),
+    }
+}
+
+#[then(regex = r"^the plan moves (\w+) to (.+)$")]
+async fn plan_moves_to(world: &mut ScanWorld, name: String, role: String) {
+    let (id, _) = actor(&name);
+    let p = world.plan.as_ref().expect("no plan");
+    let change = p
+        .changes
+        .iter()
+        .find(|c| c.id == id)
+        .unwrap_or_else(|| panic!("{name} has no planned change"));
+    assert_eq!(
+        change.target,
+        role_named(&role),
+        "{name}'s planned target role mismatch"
+    );
 }
 
 #[then("the scan proceeds")]

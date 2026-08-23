@@ -118,9 +118,17 @@ const PAYMENT_PROCESSING_DAYS: i64 = 7;
 /// so is covered too - a record claiming to be lapsed before its own expiry date is
 /// self-contradictory, which is the shape the defect would take if the upstream data shifts
 /// again.
+///
+/// Only the bare `Lapsed` value qualifies, not the whole lapsed group: the defect is a
+/// renewal payment still clearing, which `Quit` cannot be. Holding a member who quit at
+/// `Member` for a further week on the strength of a payment that is not coming would be
+/// plainly wrong.
 #[cfg(feature = "lapse-grace")]
 fn payment_processing(record: &MemberRecord, today: chrono::NaiveDate) -> bool {
-    if record.standing != Some(domain::MigsStatus::Lapsed) {
+    if !matches!(
+        record.standing,
+        Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed))
+    ) {
         return false;
     }
     let Some(xdate) = record.expires else {
@@ -222,7 +230,12 @@ mod payment_processing_tests {
 
     #[test]
     fn the_window_is_inclusive_at_its_edge() {
-        let lapsed = |days| record(Some(domain::MigsStatus::Lapsed), days);
+        let lapsed = |days| {
+            record(
+                Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed)),
+                days,
+            )
+        };
         assert!(payment_processing(&lapsed(7), today()), "7 days is inside");
         assert!(
             !payment_processing(&lapsed(8), today()),
@@ -234,44 +247,70 @@ mod payment_processing_tests {
     fn a_future_expiry_is_covered() {
         // Lapsed before its own expiry date is self-contradictory - the shape the defect
         // would take if the upstream data shifts again.
-        let rec = record(Some(domain::MigsStatus::Lapsed), -30);
+        let rec = record(
+            Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed)),
+            -30,
+        );
         assert!(payment_processing(&rec, today()));
     }
 
     #[test]
     fn an_absent_expiry_has_no_anchor() {
-        let mut rec = record(Some(domain::MigsStatus::Lapsed), 1);
+        let mut rec = record(Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed)), 1);
         rec.expires = None;
         assert!(!payment_processing(&rec, today()));
     }
 
     #[test]
-    fn only_a_lapsed_standing_qualifies() {
+    fn only_the_bare_lapsed_value_qualifies() {
+        // The window is for a renewal payment still clearing. `Quit` is in the same
+        // group but no payment is coming, so it must not buy a week at Member.
         assert!(!payment_processing(
-            &record(Some(domain::MigsStatus::MemberInGoodStanding), 1),
+            &record(Some(domain::MigsStatus::Lapsed(domain::Lapsed::Quit)), 1),
+            today()
+        ));
+        assert!(!payment_processing(
+            &record(
+                Some(domain::MigsStatus::MemberInGoodStanding(
+                    domain::GoodStanding::InGoodStanding
+                )),
+                1
+            ),
+            today()
+        ));
+        assert!(!payment_processing(
+            &record(
+                Some(domain::MigsStatus::NotAMember(domain::NotAMember::Deceased)),
+                1
+            ),
             today()
         ));
         assert!(!payment_processing(&record(None, 1), today()));
+        // The value the window exists for still qualifies.
+        assert!(payment_processing(
+            &record(Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed)), 1),
+            today()
+        ));
     }
 
     #[test]
     fn moderator_grace_outranks_the_window() {
         // Both apply; the hold must name the moderator so the scan does not count a
         // hand-granted window as an upstream artifact.
-        let rec = record(Some(domain::MigsStatus::Lapsed), 1);
+        let rec = record(Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed)), 1);
         assert_eq!(hold_for(&rec, true, today()), Hold::Moderator);
         assert_eq!(hold_for(&rec, false, today()), Hold::PaymentProcessing);
     }
 
     #[test]
     fn a_held_record_resolves_to_member() {
-        let rec = record(Some(domain::MigsStatus::Lapsed), 1);
+        let rec = record(Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed)), 1);
         assert_eq!(
             effective_role(&rec, hold_for(&rec, false, today())),
             Ok(Role::Member)
         );
         // Outside the window the standing decides, as it always has.
-        let stale = record(Some(domain::MigsStatus::Lapsed), 30);
+        let stale = record(Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed)), 30);
         assert_eq!(
             effective_role(&stale, hold_for(&stale, false, today())),
             Ok(Role::DuesExpired)

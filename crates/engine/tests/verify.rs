@@ -22,7 +22,7 @@ use engine::verify::{
     VerifyOutcome,
 };
 
-use domain::MigsStatus;
+use domain::{GoodStanding, MigsStatus};
 
 const SONIC: u64 = 1;
 
@@ -61,7 +61,9 @@ fn record(name: &str, handle: DiscordHandle, id: Option<DiscordUserId>) -> Membe
         discord_handle: Some(handle),
         email: Email(format!("{}@b.test", name.to_lowercase())),
         full_name: Some(name.to_owned()),
-        standing: Some(MigsStatus::MemberInGoodStanding),
+        standing: Some(MigsStatus::MemberInGoodStanding(
+            GoodStanding::InGoodStanding,
+        )),
         join_date: None,
         expires: None,
         membership_type: None,
@@ -884,7 +886,7 @@ async fn resync_audited_once(world: &mut VerifyWorld) {
 async fn lapsed_record(world: &mut VerifyWorld, name: String) {
     let (id, handle) = actor(&name);
     let mut rec = record(&name, handle, Some(id));
-    rec.standing = Some(domain::MigsStatus::Lapsed);
+    rec.standing = Some(domain::MigsStatus::Lapsed(domain::Lapsed::Lapsed));
     world.members.push(rec);
 }
 

@@ -252,7 +252,7 @@ mod datastore_tests {
     use crate::store::{InMemoryStore, Index, MemberRecord};
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
     use crate::verify::{HealAction, MemberError, MemberWrite};
-    use domain::MigsStatus;
+    use domain::{GoodStanding, MigsStatus};
     use std::convert::Infallible;
 
     #[derive(Default)]
@@ -278,7 +278,9 @@ mod datastore_tests {
             discord_handle: Some(DiscordHandle(handle.into())),
             email: Email(format!("{handle}@b.test")),
             full_name: None,
-            standing: Some(MigsStatus::MemberInGoodStanding),
+            standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             join_date: None,
             expires: None,
             membership_type: None,
@@ -314,7 +316,9 @@ mod datastore_tests {
             email: Email("rosy@b.test".into()),
             discord_handle: Some(DiscordHandle("old".into())),
             discord_user_id: Some(DiscordUserId(7)),
-            membership_standing: Some(MigsStatus::MemberInGoodStanding),
+            membership_standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             ..Default::default()
         }]);
         let discord = FakeDiscord::new();
@@ -371,7 +375,9 @@ mod datastore_tests {
                 email: Email("rosy@b.test".into()),
                 discord_handle: Some(DiscordHandle("old".into())),
                 discord_user_id: Some(DiscordUserId(7)),
-                membership_standing: Some(MigsStatus::MemberInGoodStanding),
+                membership_standing: Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
                 ..Default::default()
             }])
             .failing_writes();

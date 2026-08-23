@@ -501,7 +501,9 @@ mod tests {
         let m = SolidarityTechMember::try_from(resp).unwrap();
         assert_eq!(
             m.membership_standing,
-            Some(domain::MigsStatus::MemberInGoodStanding)
+            Some(domain::MigsStatus::MemberInGoodStanding(
+                domain::GoodStanding::InGoodStanding
+            ))
         );
         assert_eq!(m.join_date, chrono::NaiveDate::from_ymd_opt(2023, 10, 15));
     }

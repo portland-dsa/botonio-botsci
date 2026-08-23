@@ -188,7 +188,7 @@ mod match_tests {
     use super::*;
     use crate::store::MemberRecord;
     use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
-    use domain::MigsStatus;
+    use domain::{GoodStanding, MigsStatus};
 
     fn rec(st: &str, id: Option<u64>, handle: &str) -> MemberRecord {
         MemberRecord {
@@ -197,7 +197,9 @@ mod match_tests {
             discord_handle: Some(DiscordHandle(handle.into())),
             email: Email("m@b.test".into()),
             full_name: None,
-            standing: Some(MigsStatus::MemberInGoodStanding),
+            standing: Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding,
+            )),
             join_date: None,
             expires: None,
             membership_type: None,

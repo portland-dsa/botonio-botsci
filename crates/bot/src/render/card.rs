@@ -141,7 +141,7 @@ fn role_label(rec: &MemberRecord, hold: Hold) -> &'static str {
 // heads-up while a *future* xdate sits inside the reminder window.
 fn status_line(rec: &MemberRecord, today: NaiveDate) -> String {
     match rec.standing {
-        Some(MigsStatus::MemberInGoodStanding) => match rec.expires {
+        Some(MigsStatus::MemberInGoodStanding(_)) => match rec.expires {
             Some(x) if x >= today && (x - today).num_days() <= SOON_DAYS => {
                 let days = (x - today).num_days();
                 match days {
@@ -152,20 +152,23 @@ fn status_line(rec: &MemberRecord, today: NaiveDate) -> String {
             }
             _ => "✅ Member in Good Standing".to_string(),
         },
-        Some(MigsStatus::Lapsed) => "⚠️ Lapsed".to_string(),
+        Some(MigsStatus::Lapsed(_)) => "⚠️ Lapsed".to_string(),
+        // Deliberately neutral, and deliberately not the `Not a DSA Member` label:
+        // every value in this group shares this line, including `Deceased`.
+        Some(MigsStatus::NotAMember(_)) => "🚫 Not a current member".to_string(),
         None => "❔ Status unknown".to_string(),
     }
 }
 
 fn card_color(rec: &MemberRecord, today: NaiveDate) -> u32 {
     match rec.standing {
-        Some(MigsStatus::MemberInGoodStanding) => match rec.expires {
+        Some(MigsStatus::MemberInGoodStanding(_)) => match rec.expires {
             // Amber only as a heads-up for a *future* xdate in the reminder window; a
             // past xdate does not turn a good-standing member red - standing prevails.
             Some(x) if x >= today && (x - today).num_days() <= SOON_DAYS => COLOR_AMBER,
             _ => COLOR_GREEN,
         },
-        Some(MigsStatus::Lapsed) | None => COLOR_RED,
+        Some(MigsStatus::Lapsed(_)) | Some(MigsStatus::NotAMember(_)) | None => COLOR_RED,
     }
 }
 
@@ -173,7 +176,7 @@ fn card_color(rec: &MemberRecord, today: NaiveDate) -> u32 {
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use domain::MigsStatus;
+    use domain::{GoodStanding, Lapsed, MigsStatus, NotAMember};
     use engine::backends::util::{Email, StUserId};
     use engine::store::MemberRecord;
 
@@ -211,7 +214,9 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let e = membership_card(
             &rec(
-                Some(MigsStatus::MemberInGoodStanding),
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
                 NaiveDate::from_ymd_opt(2026, 12, 31),
             ),
             "rose",
@@ -228,7 +233,9 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 12, 10).unwrap();
         let e = membership_card(
             &rec(
-                Some(MigsStatus::MemberInGoodStanding),
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
                 NaiveDate::from_ymd_opt(2026, 12, 31),
             ),
             "rose",
@@ -244,7 +251,7 @@ mod tests {
     fn lapsed_is_red() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let e = membership_card(
-            &rec(Some(MigsStatus::Lapsed), None),
+            &rec(Some(MigsStatus::Lapsed(Lapsed::Lapsed)), None),
             "rose",
             None,
             today,
@@ -255,13 +262,34 @@ mod tests {
     }
 
     #[test]
+    fn not_a_member_reads_as_a_neutral_current_membership_line() {
+        let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let e = membership_card(
+            &rec(Some(MigsStatus::NotAMember(NotAMember::Deceased)), None),
+            "rose",
+            None,
+            today,
+            None,
+            false,
+        );
+        let v = json(e);
+        assert_eq!(v["description"], "🚫 Not a current member");
+        assert_eq!(v["color"].as_u64(), Some(COLOR_RED as u64));
+    }
+
+    #[test]
     fn good_standing_with_past_xdate_stays_member_not_expired() {
         // Standing is authoritative: a past xdate must NOT flip a good-standing member
         // to red/"Expired" - that would contradict the "Role" field, which reads "Member".
         let today = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
         let past = NaiveDate::from_ymd_opt(2026, 1, 1);
         let e = membership_card(
-            &rec(Some(MigsStatus::MemberInGoodStanding), past),
+            &rec(
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
+                past,
+            ),
             "rose",
             None,
             today,
@@ -278,7 +306,12 @@ mod tests {
     fn pronouns_absent_keeps_bare_nickname() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let e = membership_card(
-            &rec(Some(MigsStatus::MemberInGoodStanding), None),
+            &rec(
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
+                None,
+            ),
             "rose",
             None,
             today,
@@ -292,7 +325,12 @@ mod tests {
     fn pronouns_present_append_to_nickname() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let e = membership_card(
-            &rec(Some(MigsStatus::MemberInGoodStanding), None),
+            &rec(
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
+                None,
+            ),
             "rose",
             Some("she/her"),
             today,
@@ -307,7 +345,7 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         // Lapsed standing -> role() == DuesExpired; the field must read "Dues Expired".
         let e = membership_card(
-            &rec(Some(MigsStatus::Lapsed), None),
+            &rec(Some(MigsStatus::Lapsed(Lapsed::Lapsed)), None),
             "rose",
             None,
             today,
@@ -325,7 +363,12 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let tomorrow = NaiveDate::from_ymd_opt(2026, 1, 2);
         let e = membership_card(
-            &rec(Some(MigsStatus::MemberInGoodStanding), tomorrow),
+            &rec(
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
+                tomorrow,
+            ),
             "rose",
             None,
             today,
@@ -342,7 +385,12 @@ mod tests {
     fn expires_today_on_the_expiry_day() {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let e = membership_card(
-            &rec(Some(MigsStatus::MemberInGoodStanding), Some(today)),
+            &rec(
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
+                Some(today),
+            ),
             "rose",
             None,
             today,
@@ -455,7 +503,12 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let long = "x".repeat(200);
         let e = membership_card(
-            &rec(Some(MigsStatus::MemberInGoodStanding), None),
+            &rec(
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
+                None,
+            ),
             &long,
             None,
             today,
@@ -470,7 +523,9 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
         let e = membership_card(
             &rec(
-                Some(MigsStatus::MemberInGoodStanding),
+                Some(MigsStatus::MemberInGoodStanding(
+                    GoodStanding::InGoodStanding,
+                )),
                 NaiveDate::from_ymd_opt(2026, 12, 31),
             ),
             "rose",
@@ -518,7 +573,7 @@ mod tests {
             reason: Some("annual hardship waiver".to_string()),
         };
         let e = membership_card(
-            &rec(Some(MigsStatus::Lapsed), None),
+            &rec(Some(MigsStatus::Lapsed(Lapsed::Lapsed)), None),
             "amy",
             None,
             today,
@@ -555,7 +610,7 @@ mod tests {
             reason: None,
         };
         let e = membership_card(
-            &rec(Some(MigsStatus::Lapsed), None),
+            &rec(Some(MigsStatus::Lapsed(Lapsed::Lapsed)), None),
             "amy",
             None,
             today,
@@ -585,7 +640,7 @@ mod tests {
             reason: Some("annual hardship waiver".to_string()),
         };
         let e = membership_card(
-            &rec(Some(MigsStatus::Lapsed), None),
+            &rec(Some(MigsStatus::Lapsed(Lapsed::Lapsed)), None),
             "amy",
             None,
             today,

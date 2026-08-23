@@ -8,7 +8,7 @@
 use chrono::NaiveDate;
 use cucumber::{World as _, given, then, when};
 
-use domain::{DiscordGuildId, MigsStatus};
+use domain::{DiscordGuildId, GoodStanding, MigsStatus};
 
 use engine::backends::solidarity_tech::{DuesStatus, MembershipType};
 use engine::reminders::plan as reminder_plan;
@@ -50,7 +50,9 @@ fn record_with_xdate(name: &str, xdate: Option<NaiveDate>, linked: bool) -> Memb
         discord_handle: Some(handle),
         email: Email(format!("{}@b.test", name.to_lowercase())),
         full_name: Some(name.to_owned()),
-        standing: Some(MigsStatus::MemberInGoodStanding),
+        standing: Some(MigsStatus::MemberInGoodStanding(
+            GoodStanding::InGoodStanding,
+        )),
         join_date: None,
         expires: xdate,
         membership_type: Some(MembershipType::Monthly),
@@ -237,6 +239,30 @@ async fn tails_unlinked(world: &mut RemindersWorld) {
     world
         .records
         .push(record_with_xdate("Tails", Some(xdate), false));
+}
+
+#[given(regex = r"^Amy lapsed yesterday$")]
+async fn amy_lapsed_yesterday(world: &mut RemindersWorld) {
+    let xdate = today() - chrono::Duration::days(1);
+    world
+        .records
+        .push(record_with_xdate("Amy", Some(xdate), true));
+}
+
+/// Override the standing of an already-seeded actor's record, decoding `status` (the
+/// exact Solidarity Tech label, e.g. `"Deceased"` or `"Quit"`) the same way a live
+/// sweep would.
+#[given(regex = "^(\\w+)'s membership status is \"([^\"]+)\"$")]
+async fn actor_membership_status(world: &mut RemindersWorld, name: String, status: String) {
+    let standing = MigsStatus::decode(Some(&status))
+        .unwrap_or_else(|e| panic!("unknown membership status {status:?}: {e}"));
+    let handle = name.to_lowercase();
+    let rec = world
+        .records
+        .iter_mut()
+        .find(|r| r.discord_handle.as_ref().map(|h| h.0.as_str()) == Some(handle.as_str()))
+        .unwrap_or_else(|| panic!("{name}'s record must be seeded before its membership status"));
+    rec.standing = Some(standing);
 }
 
 #[given(regex = r"^Amy's last cycle was for a different xdate$")]

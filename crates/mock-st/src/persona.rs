@@ -135,7 +135,7 @@ impl Persona {
 mod tests {
     use super::*;
     use backends::solidarity_tech::fixtures::decode_user;
-    use domain::{MembershipStatus, MigsStatus, Role};
+    use domain::{GoodStanding, Lapsed, MembershipStatus, MigsStatus, Role};
 
     /// Replicate the standing-to-role chain locally so the guard test does not
     /// depend on the engine crate, keeping the mock-st crate independent.
@@ -161,7 +161,9 @@ mod tests {
         let m = decode_user(&Persona::GoodStanding.user_json(1, Some(111), None, today)).unwrap();
         assert_eq!(
             m.membership_standing,
-            Some(MigsStatus::MemberInGoodStanding)
+            Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding
+            ))
         );
         assert_eq!(m.discord_user_id.map(|d| d.0), Some(111));
         assert_eq!(role_of(m.membership_standing), Role::Member);
@@ -169,7 +171,9 @@ mod tests {
         let m = decode_user(&Persona::Amber.user_json(2, Some(222), None, today)).unwrap();
         assert_eq!(
             m.membership_standing,
-            Some(MigsStatus::MemberInGoodStanding)
+            Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding
+            ))
         );
         let x = m.xdate.expect("amber has an x-date");
         assert!(
@@ -178,7 +182,10 @@ mod tests {
         );
 
         let m = decode_user(&Persona::Lapsed.user_json(3, Some(333), None, today)).unwrap();
-        assert_eq!(m.membership_standing, Some(MigsStatus::Lapsed));
+        assert_eq!(
+            m.membership_standing,
+            Some(MigsStatus::Lapsed(Lapsed::Lapsed))
+        );
         assert_eq!(role_of(m.membership_standing), Role::DuesExpired);
 
         // Found only by email: good standing, no linked Discord id, email from its key.
@@ -191,7 +198,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             m.membership_standing,
-            Some(MigsStatus::MemberInGoodStanding)
+            Some(MigsStatus::MemberInGoodStanding(
+                GoodStanding::InGoodStanding
+            ))
         );
         assert_eq!(role_of(m.membership_standing), Role::Member);
         assert_eq!(m.discord_user_id, None);

@@ -61,3 +61,26 @@ Feature: The scheduled scan plans role changes and guards against mass demotion
     And the scan counts 0 demotions
     And the scan would change 0 members
     And the scan proceeds
+
+  Scenario: A member national marked Quit is demoted to Dues Expired
+    Given Shadow is in the roster holding the Member role, recorded by national as "Quit"
+    When the scan plans a pass
+    Then the scan counts 1 demotion
+    And the scan would change 1 member
+    And the plan moves Shadow to Dues Expired
+    And the scan proceeds
+
+  Scenario: A member national marked Expelled is demoted to Unverified
+    Given Eggman is in the roster holding the Member role, recorded by national as "Expelled"
+    When the scan plans a pass
+    Then the scan counts 1 demotion
+    And the scan would change 1 member
+    And the plan moves Eggman to Unverified
+    And the scan proceeds
+
+  Scenario: A member national marked Subscriber keeps the Member role
+    Given Cream is in the roster holding the Member role, recorded by national as "Subscriber"
+    When the scan plans a pass
+    Then the scan counts 0 demotions
+    And the scan would change 0 members
+    And the scan proceeds
