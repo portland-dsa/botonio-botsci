@@ -10,13 +10,18 @@
 use crate::role::Role;
 
 /// The verification outcome for a member - the role decision the bot acts on.
-/// A closed set of exactly three computed results.
+/// A closed set of exactly four computed results.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MembershipStatus {
     /// In good standing - qualifies for the `Member` role.
     Member,
     /// A known not-in-good-standing status (e.g. lapsed) - gets `Dues Expired`.
     DuesExpired,
+    /// The record positively says this person does not hold membership (expelled,
+    /// resigned, deceased, never a member) - gets `Unverified`. Distinct from
+    /// [`Malformed`](Self::Malformed): here the source gave a usable answer, and the
+    /// answer is no.
+    NotAMember,
     /// A matched record with no usable standing - no role can be decided from it,
     /// so it is resolved by hand rather than auto-assigned.
     Malformed,
@@ -37,6 +42,7 @@ impl TryFrom<MembershipStatus> for Role {
         match status {
             MembershipStatus::Member => Ok(Role::Member),
             MembershipStatus::DuesExpired => Ok(Role::DuesExpired),
+            MembershipStatus::NotAMember => Ok(Role::Unverified),
             MembershipStatus::Malformed => Err(MalformedMembership),
         }
     }
@@ -52,6 +58,10 @@ mod tests {
         assert_eq!(
             Role::try_from(MembershipStatus::DuesExpired),
             Ok(Role::DuesExpired)
+        );
+        assert_eq!(
+            Role::try_from(MembershipStatus::NotAMember),
+            Ok(Role::Unverified)
         );
         assert_eq!(
             Role::try_from(MembershipStatus::Malformed),
