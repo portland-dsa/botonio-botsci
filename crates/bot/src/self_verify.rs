@@ -20,7 +20,7 @@ use engine::verify::{DataStore, EmailGrant, Member as VerifyMember, Target};
 use crate::data::{Data, Error};
 use crate::render::modal::{REASON_FIELD_ID, override_modal, parse_email, parse_reason};
 use crate::render::self_verify::{
-    EMAIL_FIELD_ID, EMAIL_FIELD_LABEL, FIRST_FIELD_ID, LAST_FIELD_ID, PROMPT_BUTTON_ID,
+    EMAIL_FIELD_ID, EMAIL_FIELD_LABEL, FIRST_FIELD_ID, LAST_FIELD_ID, ManualLog, PROMPT_BUTTON_ID,
     REVIEW_MODAL_ID, REVIEW_OVERRIDE_ID, REVIEW_REJECT_ID, REVIEW_REVERIFY_ID, ReviewReason,
     SUBMIT_MODAL_ID, VerifyLog, log_embed, manual_log_embed, review_request, self_verify_modal,
 };
@@ -320,6 +320,13 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
                 name_check(record.full_name.as_deref(), &first, &last_initial),
                 NameCheck::Mismatch
             );
+            // Fixed-vocabulary status only - the member's email and name stay out of
+            // the log and ride only in the (private) channel embed.
+            tracing::info!(
+                role = role.as_str(),
+                status = record.standing.map(|s| s.as_str()).unwrap_or("none"),
+                "self-service verification granted"
+            );
             let log = VerifyLog {
                 member: submit.user.id,
                 handle: &submit.user.name,
@@ -328,6 +335,7 @@ async fn on_submit(ctx: &Context, submit: &ModalInteraction, data: &Data) -> Res
                 role,
                 email: &email.0,
                 name_mismatch,
+                standing: record.standing,
             };
             post_log(ctx, data, &log).await;
             reply(SUCCESS).await;
@@ -502,7 +510,7 @@ async fn review_reverify(
     .verify_by_email_with_record(invoker, email)
     .await;
     match outcome {
-        Ok(EmailGrant::Verified { role, .. }) => {
+        Ok(EmailGrant::Verified { role, record }) => {
             // Keep the request post (signal approval, drop the buttons) and log the grant
             // to the verification channel, like an automatic self-verify.
             resolve_post(
@@ -513,7 +521,19 @@ async fn review_reverify(
                 "Approved by re-verify",
             )
             .await;
-            post_manual_log(ctx, data, target, &handle.0, c.user.id, "re-verify", role).await;
+            post_manual_log(
+                ctx,
+                data,
+                &ManualLog {
+                    member: UserId::new(target.0),
+                    handle: &handle.0,
+                    approver: c.user.id,
+                    how: "re-verify",
+                    role,
+                    standing: record.standing,
+                },
+            )
+            .await;
             followup(ctx, c, &format!("Verified - granted {}.", role.as_str())).await;
         }
         Ok(_) => {
@@ -655,11 +675,14 @@ async fn review_override_submit(
             post_manual_log(
                 ctx,
                 data,
-                target,
-                &handle.0,
-                m.user.id,
-                "manual override",
-                Role::Member,
+                &ManualLog {
+                    member: UserId::new(target.0),
+                    handle: &handle.0,
+                    approver: m.user.id,
+                    how: "manual override",
+                    role: Role::Member,
+                    standing: None,
+                },
             )
             .await;
             reply("Approved - they now hold the Member role and the Manual Override marker.").await;
@@ -761,23 +784,8 @@ async fn resolve_post(ctx: &Context, data: &Data, message_id: u64, resolver: Use
 
 /// Log a moderator-driven grant (re-verify or manual override) to the verification channel,
 /// the same place automatic self-verifications are recorded.
-async fn post_manual_log(
-    ctx: &Context,
-    data: &Data,
-    member: DiscordUserId,
-    handle: &str,
-    approver: UserId,
-    how: &str,
-    role: Role,
-) {
-    let embed = manual_log_embed(
-        UserId::new(member.0),
-        handle,
-        approver,
-        how,
-        role,
-        data.config.accent_color,
-    );
+async fn post_manual_log(ctx: &Context, data: &Data, log: &ManualLog<'_>) {
+    let embed = manual_log_embed(log, data.config.accent_color);
     send_to_log(ctx, data, embed).await;
 }
 

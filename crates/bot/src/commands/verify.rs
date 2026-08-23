@@ -121,11 +121,15 @@ pub async fn verify(
     .await;
 
     match result {
-        Ok(VerifyOutcome::Verified(role)) => {
+        Ok(VerifyOutcome::Verified { role, standing }) => {
+            let status_note = match standing {
+                Some(s) => format!(" Solidarity Tech records them as \"{}\".", s.as_str()),
+                None => String::new(),
+            };
             ctx.send(plain(&format!(
-                "Verified {} as {}.",
+                "Verified {} as {}.{status_note}",
                 target.name,
-                role.as_str()
+                role.as_str(),
             )))
             .await?;
         }
@@ -532,7 +536,9 @@ pub(crate) async fn verify_step(
                 .verify_by_email(invoker, email)
                 .await
                 {
-                    Ok(VerifyOutcome::Verified(role)) => VerifyState::Verified(role),
+                    Ok(VerifyOutcome::Verified { role, standing }) => {
+                        VerifyState::Verified { role, standing }
+                    }
                     Ok(VerifyOutcome::NotFound) => VerifyState::NotFound,
                     Ok(VerifyOutcome::Conflict) => VerifyState::Conflict,
                     Ok(VerifyOutcome::Unverified) => VerifyState::NotFound,
@@ -569,7 +575,7 @@ pub(crate) async fn verify_step(
 
         if !keep_live {
             let outcome = match next {
-                VerifyState::Verified(role) => StepOutcome::Verified(role),
+                VerifyState::Verified { role, .. } => StepOutcome::Verified(role),
                 VerifyState::Conflict => StepOutcome::Conflict,
                 _ => StepOutcome::Errored,
             };

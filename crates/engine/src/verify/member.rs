@@ -2,7 +2,7 @@
 
 use crate::store::MemberRecord;
 use crate::util::{DiscordHandle, DiscordUserId, Email};
-use domain::{MalformedMembership, Role};
+use domain::{MalformedMembership, MigsStatus, Role};
 
 use super::decision::{EmailMatchOutcome, HealAction, MatchOutcome, decide, match_by_email};
 use super::facade::{Heal, MemberError, MemberRead, MemberWrite};
@@ -10,8 +10,13 @@ use super::facade::{Heal, MemberError, MemberRead, MemberWrite};
 /// What a verification resolved to - the moderator-facing result.
 #[derive(Debug, PartialEq, Eq)]
 pub enum VerifyOutcome {
-    /// Matched; the member was assigned this standing-derived role.
-    Verified(Role),
+    /// Matched; the member was assigned this standing-derived role. `standing` is the
+    /// raw value the decision came from, carried so a caller can report *why* rather
+    /// than only what - it is `None` for a hand-approval, which has no source record.
+    Verified {
+        role: Role,
+        standing: Option<MigsStatus>,
+    },
     /// No record found; the member was assigned `Unverified`.
     Unverified,
     /// A record matched but carries no usable standing - nothing was assigned; the
@@ -191,14 +196,22 @@ pub fn effective_role(record: &MemberRecord, hold: Hold) -> Result<Role, Malform
 }
 
 /// The non-identifying audit detail for a verify-family outcome: the outcome verb, the method,
-/// and (when a role is granted) its name - never PII or the conflicting account.
-fn verify_detail(outcome: &str, role: Option<Role>, method: VerifyMethod) -> serde_json::Value {
-    match role {
-        Some(r) => {
-            serde_json::json!({ "outcome": outcome, "role": r.as_str(), "method": method.as_str() })
-        }
-        None => serde_json::json!({ "outcome": outcome, "method": method.as_str() }),
+/// the raw membership status the decision rested on, and (when a role is granted) its name -
+/// never PII or the conflicting account.
+fn verify_detail(
+    outcome: &str,
+    role: Option<Role>,
+    standing: Option<MigsStatus>,
+    method: VerifyMethod,
+) -> serde_json::Value {
+    let mut detail = serde_json::json!({ "outcome": outcome, "method": method.as_str() });
+    if let Some(r) = role {
+        detail["role"] = serde_json::Value::from(r.as_str());
     }
+    if let Some(s) = standing {
+        detail["status"] = serde_json::Value::from(s.as_str());
+    }
+    detail
 }
 
 #[cfg(all(test, feature = "lapse-grace"))]
@@ -352,6 +365,7 @@ impl<M: MemberWrite> Member<'_, M> {
         &self,
         invoker: DiscordUserId,
         role: Role,
+        standing: Option<MigsStatus>,
         method: VerifyMethod,
     ) -> Result<(), MemberError> {
         let Err(e) = self.store.assign_role(self.target.id, role).await else {
@@ -363,7 +377,7 @@ impl<M: MemberWrite> Member<'_, M> {
                 invoker,
                 self.target.id,
                 "member_verify",
-                verify_detail("verify_failed", Some(role), method),
+                verify_detail("verify_failed", Some(role), standing, method),
             )
             .await
         {
@@ -389,13 +403,13 @@ impl<M: MemberWrite> Member<'_, M> {
                 invoker,
                 self.target.id,
                 "member_verify",
-                verify_detail("override", Some(Role::Member), VerifyMethod::Override),
+                verify_detail("override", Some(Role::Member), None, VerifyMethod::Override),
             )
             .await?;
         self.store
             .stamp_override(self.target.id, invoker, note)
             .await?;
-        self.assign_or_record_failure(invoker, Role::Member, VerifyMethod::Override)
+        self.assign_or_record_failure(invoker, Role::Member, None, VerifyMethod::Override)
             .await?;
         if let Err(e) = self.store.set_override_marker(self.target.id).await {
             tracing::warn!(error = %e, "override: marker role write failed; Member granted and stamped, will re-add on retry");
@@ -405,7 +419,7 @@ impl<M: MemberWrite> Member<'_, M> {
                     invoker,
                     self.target.id,
                     "member_verify",
-                    verify_detail("override_marker_failed", None, VerifyMethod::Override),
+                    verify_detail("override_marker_failed", None, None, VerifyMethod::Override),
                 )
                 .await
             {
@@ -484,12 +498,15 @@ impl<M: Heal> Member<'_, M> {
                     invoker,
                     self.target.id,
                     "member_verify",
-                    verify_detail("verified", Some(Role::Member), VerifyMethod::Override),
+                    verify_detail("verified", Some(Role::Member), None, VerifyMethod::Override),
                 )
                 .await?;
-            self.assign_or_record_failure(invoker, Role::Member, VerifyMethod::Override)
+            self.assign_or_record_failure(invoker, Role::Member, None, VerifyMethod::Override)
                 .await?;
-            return Ok(VerifyOutcome::Verified(Role::Member));
+            return Ok(VerifyOutcome::Verified {
+                role: Role::Member,
+                standing: None,
+            });
         }
         let located = self
             .store
@@ -505,13 +522,26 @@ impl<M: Heal> Member<'_, M> {
                                 invoker,
                                 self.target.id,
                                 "member_verify",
-                                verify_detail("verified", Some(role), VerifyMethod::Discord),
+                                verify_detail(
+                                    "verified",
+                                    Some(role),
+                                    record.standing,
+                                    VerifyMethod::Discord,
+                                ),
                             )
                             .await?;
-                        self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
-                            .await?;
+                        self.assign_or_record_failure(
+                            invoker,
+                            role,
+                            record.standing,
+                            VerifyMethod::Discord,
+                        )
+                        .await?;
                         self.heal(&record, &heal).await;
-                        Ok(VerifyOutcome::Verified(role))
+                        Ok(VerifyOutcome::Verified {
+                            role,
+                            standing: record.standing,
+                        })
                     }
                     Err(_) => {
                         // Matched a record with no usable standing: assign no role, audit the encounter,
@@ -521,7 +551,12 @@ impl<M: Heal> Member<'_, M> {
                                 invoker,
                                 self.target.id,
                                 "member_verify",
-                                verify_detail("malformed", None, VerifyMethod::Discord),
+                                verify_detail(
+                                    "malformed",
+                                    None,
+                                    record.standing,
+                                    VerifyMethod::Discord,
+                                ),
                             )
                             .await?;
                         Ok(VerifyOutcome::Malformed)
@@ -534,11 +569,21 @@ impl<M: Heal> Member<'_, M> {
                         invoker,
                         self.target.id,
                         "member_verify",
-                        verify_detail("unverified", Some(Role::Unverified), VerifyMethod::Discord),
+                        verify_detail(
+                            "unverified",
+                            Some(Role::Unverified),
+                            None,
+                            VerifyMethod::Discord,
+                        ),
                     )
                     .await?;
-                self.assign_or_record_failure(invoker, Role::Unverified, VerifyMethod::Discord)
-                    .await?;
+                self.assign_or_record_failure(
+                    invoker,
+                    Role::Unverified,
+                    None,
+                    VerifyMethod::Discord,
+                )
+                .await?;
                 Ok(VerifyOutcome::Unverified)
             }
             MatchOutcome::Conflict => {
@@ -547,7 +592,7 @@ impl<M: Heal> Member<'_, M> {
                         invoker,
                         self.target.id,
                         "member_verify",
-                        verify_detail("conflict", None, VerifyMethod::Discord),
+                        verify_detail("conflict", None, None, VerifyMethod::Discord),
                     )
                     .await?;
                 Ok(VerifyOutcome::Conflict)
@@ -575,10 +620,10 @@ impl<M: Heal> Member<'_, M> {
                     invoker,
                     self.target.id,
                     "member_verify",
-                    verify_detail("verified", Some(Role::Member), VerifyMethod::Override),
+                    verify_detail("verified", Some(Role::Member), None, VerifyMethod::Override),
                 )
                 .await?;
-            self.assign_or_record_failure(invoker, Role::Member, VerifyMethod::Override)
+            self.assign_or_record_failure(invoker, Role::Member, None, VerifyMethod::Override)
                 .await?;
             return Ok(ResyncOutcome::Changed(Role::Member));
         }
@@ -600,11 +645,21 @@ impl<M: Heal> Member<'_, M> {
                                     invoker,
                                     self.target.id,
                                     "member_verify",
-                                    verify_detail("verified", Some(role), VerifyMethod::Discord),
+                                    verify_detail(
+                                        "verified",
+                                        Some(role),
+                                        record.standing,
+                                        VerifyMethod::Discord,
+                                    ),
                                 )
                                 .await?;
-                            self.assign_or_record_failure(invoker, role, VerifyMethod::Discord)
-                                .await?;
+                            self.assign_or_record_failure(
+                                invoker,
+                                role,
+                                record.standing,
+                                VerifyMethod::Discord,
+                            )
+                            .await?;
                             self.heal(&record, &heal).await;
                             Ok(ResyncOutcome::Changed(role))
                         }
@@ -617,7 +672,12 @@ impl<M: Heal> Member<'_, M> {
                                 invoker,
                                 self.target.id,
                                 "member_verify",
-                                verify_detail("malformed", None, VerifyMethod::Discord),
+                                verify_detail(
+                                    "malformed",
+                                    None,
+                                    record.standing,
+                                    VerifyMethod::Discord,
+                                ),
                             )
                             .await?;
                         Ok(ResyncOutcome::Malformed)
@@ -633,11 +693,21 @@ impl<M: Heal> Member<'_, M> {
                         invoker,
                         self.target.id,
                         "member_verify",
-                        verify_detail("unverified", Some(Role::Unverified), VerifyMethod::Discord),
+                        verify_detail(
+                            "unverified",
+                            Some(Role::Unverified),
+                            None,
+                            VerifyMethod::Discord,
+                        ),
                     )
                     .await?;
-                self.assign_or_record_failure(invoker, Role::Unverified, VerifyMethod::Discord)
-                    .await?;
+                self.assign_or_record_failure(
+                    invoker,
+                    Role::Unverified,
+                    None,
+                    VerifyMethod::Discord,
+                )
+                .await?;
                 Ok(ResyncOutcome::Miss)
             }
             MatchOutcome::Conflict => {
@@ -646,7 +716,7 @@ impl<M: Heal> Member<'_, M> {
                         invoker,
                         self.target.id,
                         "member_verify",
-                        verify_detail("conflict", None, VerifyMethod::Discord),
+                        verify_detail("conflict", None, None, VerifyMethod::Discord),
                     )
                     .await?;
                 Ok(ResyncOutcome::Conflict)
@@ -674,11 +744,21 @@ impl<M: Heal> Member<'_, M> {
                                     invoker,
                                     self.target.id,
                                     "member_verify",
-                                    verify_detail("verified", Some(role), VerifyMethod::Email),
+                                    verify_detail(
+                                        "verified",
+                                        Some(role),
+                                        record.standing,
+                                        VerifyMethod::Email,
+                                    ),
                                 )
                                 .await?;
-                            self.assign_or_record_failure(invoker, role, VerifyMethod::Email)
-                                .await?;
+                            self.assign_or_record_failure(
+                                invoker,
+                                role,
+                                record.standing,
+                                VerifyMethod::Email,
+                            )
+                            .await?;
                             self.heal(&record, &heal).await;
                             EmailGrant::Verified { role, record }
                         }
@@ -690,7 +770,12 @@ impl<M: Heal> Member<'_, M> {
                                     invoker,
                                     self.target.id,
                                     "member_verify",
-                                    verify_detail("malformed", None, VerifyMethod::Email),
+                                    verify_detail(
+                                        "malformed",
+                                        None,
+                                        record.standing,
+                                        VerifyMethod::Email,
+                                    ),
                                 )
                                 .await?;
                             EmailGrant::Malformed
@@ -703,7 +788,7 @@ impl<M: Heal> Member<'_, M> {
                             invoker,
                             self.target.id,
                             "member_verify",
-                            verify_detail("conflict", None, VerifyMethod::Email),
+                            verify_detail("conflict", None, None, VerifyMethod::Email),
                         )
                         .await?;
                     EmailGrant::Conflict
@@ -714,7 +799,7 @@ impl<M: Heal> Member<'_, M> {
                             invoker,
                             self.target.id,
                             "member_verify",
-                            verify_detail("not_found", None, VerifyMethod::Email),
+                            verify_detail("not_found", None, None, VerifyMethod::Email),
                         )
                         .await?;
                     EmailGrant::NotFound
@@ -733,7 +818,10 @@ impl<M: Heal> Member<'_, M> {
         email: Email,
     ) -> Result<VerifyOutcome, MemberError> {
         Ok(match self.email_grant(invoker, email).await? {
-            EmailGrant::Verified { role, .. } => VerifyOutcome::Verified(role),
+            EmailGrant::Verified { role, record } => VerifyOutcome::Verified {
+                role,
+                standing: record.standing,
+            },
             EmailGrant::Malformed => VerifyOutcome::Malformed,
             EmailGrant::Conflict => VerifyOutcome::Conflict,
             EmailGrant::NotFound => VerifyOutcome::NotFound,

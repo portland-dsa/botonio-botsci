@@ -79,8 +79,12 @@ pub async fn on_guild_member_add(
 
     // Member identifiers stay out of `info` logs; only the non-PII outcome is recorded.
     match VerifyMember::new(&store, target).verify(actor).await {
-        Ok(VerifyOutcome::Verified(role)) => {
-            tracing::info!(role = role.as_str(), "auto-verified a joining member");
+        Ok(VerifyOutcome::Verified { role, standing }) => {
+            tracing::info!(
+                role = role.as_str(),
+                status = standing.map(|s| s.as_str()).unwrap_or("none"),
+                "auto-verified a joining member"
+            );
         }
         Ok(VerifyOutcome::Unverified | VerifyOutcome::NotFound) => {
             tracing::info!("joining member not in Solidarity Tech; assigned Unverified");

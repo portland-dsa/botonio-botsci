@@ -4,7 +4,7 @@
 
 use serenity::all::{CreateEmbed, CreateEmbedAuthor};
 
-use domain::Role;
+use domain::{MigsStatus, Role};
 
 use crate::render::card::{COLOR_AMBER, COLOR_GREEN, COLOR_RED};
 
@@ -18,8 +18,11 @@ const COLOR_VIOLET: u32 = 0x92_56_e0;
 pub enum VerifyState {
     /// Automatic match missed; invite the moderator to look up by email.
     Prompt,
-    /// Matched and assigned this standing role.
-    Verified(Role),
+    /// Matched and assigned this standing role, with the raw source value it came from.
+    Verified {
+        role: Role,
+        standing: Option<MigsStatus>,
+    },
     /// The email matched no record; offer a retry.
     NotFound,
     /// The email is on record for a different account.
@@ -54,13 +57,21 @@ pub fn state_embed(
              Know their email? Look them up:"
                 .to_string(),
         ),
-        VerifyState::Verified(role) => {
+        VerifyState::Verified { role, standing } => {
             let color = match role {
                 Role::Member => COLOR_GREEN,
                 Role::DuesExpired => COLOR_RED,
                 Role::Unverified => COLOR_AMBER,
             };
-            (color, format!("\u{2705} Verified as {}.", role.as_str()))
+            let body = match standing {
+                Some(s) => format!(
+                    "\u{2705} Verified as {}.\nSolidarity Tech records them as \"{}\".",
+                    role.as_str(),
+                    s.as_str()
+                ),
+                None => format!("\u{2705} Verified as {}.", role.as_str()),
+            };
+            (color, body)
         }
         VerifyState::NotFound => (
             COLOR_AMBER,
@@ -128,16 +139,32 @@ mod tests {
 
     #[test]
     fn verified_member_is_green() {
-        let v = json(VerifyState::Verified(Role::Member));
+        let v = json(VerifyState::Verified {
+            role: Role::Member,
+            standing: None,
+        });
         assert_eq!(color(&v), COLOR_GREEN as u64);
         assert!(desc(&v).contains("Verified as Member"));
     }
 
     #[test]
     fn verified_dues_expired_is_red() {
-        let v = json(VerifyState::Verified(Role::DuesExpired));
+        let v = json(VerifyState::Verified {
+            role: Role::DuesExpired,
+            standing: None,
+        });
         assert_eq!(color(&v), COLOR_RED as u64);
         assert!(desc(&v).contains("Verified as Dues Expired"));
+    }
+
+    #[test]
+    fn a_verified_embed_names_the_source_status() {
+        let v = json(VerifyState::Verified {
+            role: Role::Unverified,
+            standing: Some(MigsStatus::NotAMember(domain::NotAMember::Expelled)),
+        });
+        assert!(desc(&v).contains("Verified as Unverified"));
+        assert!(desc(&v).contains("Expelled"));
     }
 
     #[test]
@@ -158,7 +185,10 @@ mod tests {
     fn every_state_carries_the_handle() {
         for state in [
             VerifyState::Prompt,
-            VerifyState::Verified(Role::Member),
+            VerifyState::Verified {
+                role: Role::Member,
+                standing: None,
+            },
             VerifyState::NotFound,
             VerifyState::Conflict,
             VerifyState::InvalidEmail,
