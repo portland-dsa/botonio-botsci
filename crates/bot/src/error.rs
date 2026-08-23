@@ -7,12 +7,21 @@ use crate::data::{Data, Error};
 pub enum BotError {
     #[error("engine error")]
     Engine(#[from] engine::Error),
+    /// Boxed because it's too large (clippy gets mad at us)
     #[error("serenity error")]
-    Serenity(#[from] serenity::Error),
+    Serenity(#[source] Box<serenity::Error>),
     #[error("discord error")]
     Discord(#[from] engine::backends::discord::DiscordError),
     #[error("database error")]
     Db(#[from] persistence::PersistenceError),
+}
+
+// `serenity::Error` is held boxed, so its `From` is
+// written by hand rather than derived with `#[from]`.
+impl From<serenity::Error> for BotError {
+    fn from(e: serenity::Error) -> Self {
+        BotError::Serenity(Box::new(e))
+    }
 }
 
 impl BotError {
