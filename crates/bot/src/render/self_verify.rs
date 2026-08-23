@@ -7,7 +7,7 @@ use serenity::all::{
     CreateModal, EditMessage, InputTextStyle, UserId,
 };
 
-use domain::Role;
+use domain::{MigsStatus, Role};
 
 /// The standing prompt button: pressing it opens [`self_verify_modal`]. A constant
 /// id so the button keeps working across restarts with no stored message state.
@@ -102,6 +102,7 @@ pub struct VerifyLog<'a> {
     pub email: &'a str,
     /// The submitted name failed `name_check` - draw the eyeball warning.
     pub name_mismatch: bool,
+    pub standing: Option<MigsStatus>,
 }
 
 /// The moderator-log embed for a successful self-verification: who verified, the
@@ -123,6 +124,11 @@ pub fn log_embed(log: &VerifyLog<'_>, accent: u32) -> CreateEmbed {
             true,
         )
         .field("Granted role", log.role.as_str(), true)
+        .field(
+            "Membership status",
+            log.standing.map(|s| s.as_str()).unwrap_or("(none on file)"),
+            true,
+        )
         .field("Email", log.email, false)
         .color(accent);
     if log.name_mismatch {
@@ -204,24 +210,88 @@ pub fn review_request(
         ])])
 }
 
+/// The fields of a moderator-driven grant's log entry: who approved it, how (a re-verify
+/// or a manual override), the granted role, and the standing behind it (`None` for a
+/// manual override, which has no matched record). Mirrors [`VerifyLog`] for the
+/// self-service path, minus the name double-check a moderator action has no use for.
+pub struct ManualLog<'a> {
+    pub member: UserId,
+    pub handle: &'a str,
+    pub approver: UserId,
+    pub how: &'a str,
+    pub role: Role,
+    pub standing: Option<MigsStatus>,
+}
+
 /// The verification-log entry for a grant a moderator made by acting on a review request
 /// (a re-verify or a manual override). Mirrors [`log_embed`] for the self-service path but
 /// records who approved it and how, and carries no name double-check.
-pub fn manual_log_embed(
-    member: UserId,
-    handle: &str,
-    approver: UserId,
-    how: &str,
-    role: Role,
-    accent: u32,
-) -> CreateEmbed {
+pub fn manual_log_embed(log: &ManualLog<'_>, accent: u32) -> CreateEmbed {
     CreateEmbed::new()
         .title("Self-service verification - approved by a moderator")
         .description(format!(
-            "<@{}> ({handle}) was verified by <@{}> ({how}).",
-            member.get(),
-            approver.get(),
+            "<@{}> ({}) was verified by <@{}> ({}).",
+            log.member.get(),
+            log.handle,
+            log.approver.get(),
+            log.how,
         ))
-        .field("Granted role", role.as_str(), true)
+        .field("Granted role", log.role.as_str(), true)
+        .field(
+            "Membership status",
+            log.standing.map(|s| s.as_str()).unwrap_or("(none on file)"),
+            true,
+        )
         .color(accent)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_embed_names_the_source_status() {
+        let log = VerifyLog {
+            member: UserId::new(1),
+            handle: "shadow",
+            submitted_name: "Shadow H.",
+            record_name: Some("Shadow Hedgehog"),
+            role: Role::Member,
+            email: "shadow@b.test",
+            name_mismatch: false,
+            standing: Some(MigsStatus::MemberInGoodStanding(
+                domain::GoodStanding::Subscriber,
+            )),
+        };
+        let v = serde_json::to_value(log_embed(&log, 0)).unwrap();
+        let field = v["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "Membership status")
+            .expect("the status field must be present");
+        assert_eq!(field["value"], "Subscriber");
+    }
+
+    #[test]
+    fn a_manual_log_with_no_standing_says_none_on_file() {
+        // The normal case for a manual override, which has no matched record to draw a
+        // standing from.
+        let log = ManualLog {
+            member: UserId::new(1),
+            handle: "shadow",
+            approver: UserId::new(2),
+            how: "manual override",
+            role: Role::Member,
+            standing: None,
+        };
+        let v = serde_json::to_value(manual_log_embed(&log, 0)).unwrap();
+        let field = v["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "Membership status")
+            .expect("the status field must be present");
+        assert_eq!(field["value"], "(none on file)");
+    }
 }

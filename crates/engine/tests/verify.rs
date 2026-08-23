@@ -605,6 +605,9 @@ async fn conflict_recorded(world: &mut VerifyWorld) {
     let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["outcome"], "conflict");
+    // The matched record belongs to a different account, so its standing must never
+    // leak into this member's audit row.
+    assert!(rows[0].get("status").is_none());
 }
 
 #[then(regex = r"^(\w+) is not assigned any role$")]
@@ -624,7 +627,12 @@ async fn attempt_and_failure_recorded(world: &mut VerifyWorld) {
     let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["outcome"], "verified");
+    assert_eq!(rows[0]["status"], "Member in Good Standing");
     assert_eq!(rows[1]["outcome"], "verify_failed");
+    // rows[1] is written by assign_or_record_failure's own verify_detail call, from the
+    // standing it was threaded - distinct from rows[0]'s, which comes from the standalone
+    // call made before the assign. Asserting here is what actually locks the threading.
+    assert_eq!(rows[1]["status"], "Member in Good Standing");
 }
 
 #[then(regex = r"^the email lookup finds no record$")]
