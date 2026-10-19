@@ -471,6 +471,60 @@ async fn unlink_clears_the_cached_identity(pool: sqlx::PgPool) {
     );
 }
 
+/// Seed one linked member, then insert a changed copy of that row and a brand-new record:
+/// returns the existing row's name and the new record's id, as each store reports them.
+async fn insert_members<S>(store: &S) -> (Option<String>, Option<StUserId>)
+where
+    S: MemberStore + RosterWrite + IdentityWrite,
+{
+    let amy = |st: &str, id: Option<u64>, handle: &str, name: &str| MemberRecord {
+        st_user_id: StUserId(st.into()),
+        discord_user_id: id.map(DiscordUserId),
+        discord_handle: Some(DiscordHandle(handle.into())),
+        email: Email(format!("{handle}@b.test")),
+        full_name: Some(name.into()),
+        standing: None,
+        join_date: None,
+        expires: None,
+        membership_type: None,
+        monthly_dues: None,
+        yearly_dues: None,
+    };
+    store
+        .replace_roster(vec![amy("st-amy", Some(8), "amy", "Amy")])
+        .await
+        .unwrap();
+    store
+        .insert_member(&amy("st-amy", Some(8), "amy", "Rewritten"))
+        .await
+        .unwrap();
+    store
+        .insert_member(&amy("st-amy-new", None, "amyrose", "Amy Rose"))
+        .await
+        .unwrap();
+    let existing = store.by_discord_id(DiscordUserId(8)).await.unwrap();
+    let added = store
+        .by_handle(&DiscordHandle("amyrose".into()))
+        .await
+        .unwrap();
+    (
+        existing.and_then(|r| r.full_name),
+        added.map(|r| r.st_user_id),
+    )
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn insert_member_adds_a_missing_row_and_keeps_an_existing_one(pool: sqlx::PgPool) {
+    let pg = insert_members(&PgStore::new(pool)).await;
+    let mem = insert_members(&InMemoryStore::new(Index::default())).await;
+    assert_eq!(
+        pg,
+        (Some("Amy".into()), Some(StUserId("st-amy-new".into()))),
+        "the existing row is untouched and the new record is added"
+    );
+    assert_eq!(pg, mem, "both stores agree");
+}
+
 fn session(guild: u64) -> BulkSession {
     BulkSession {
         guild: domain::DiscordGuildId(guild),

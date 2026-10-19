@@ -3,7 +3,8 @@
 //! Cast: Sonic is the moderator; Tails is known only by handle (backfill), Knuckles a linked
 //! member whose handle drifted (repair), Shadow someone we do not know (Unverified), Eggman a
 //! handle claimed by a different account (conflict), Rouge a matched member whose record has no
-//! usable standing (malformed). The facade is a single in-memory fake the world holds across a
+//! usable standing (malformed), Amy a member who signed up again and has a second record under
+//! a new email (email change). The facade is a single in-memory fake the world holds across a
 //! run, so each step reads the resulting roles, markers, write-backs, and audit rows; the fake's
 //! audit can be made unavailable, so the suite runs offline.
 
@@ -18,8 +19,8 @@ use engine::backends::discord::Role;
 use engine::store::MemberRecord;
 use engine::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use engine::verify::{
-    HealAction, Located, Member, MemberError, MemberRead, MemberWrite, ResyncOutcome, Target,
-    VerifyOutcome,
+    HealAction, Located, Member, MemberError, MemberRead, MemberWrite, RelinkOutcome,
+    ResyncOutcome, Target, VerifyOutcome,
 };
 
 use domain::{GoodStanding, MigsStatus};
@@ -35,6 +36,7 @@ fn actor(name: &str) -> (DiscordUserId, DiscordHandle) {
         "Eggman" => 5,
         "Silver" => 6,
         "Rouge" => 7,
+        "Amy" => 8,
         other => panic!("unknown actor {other}"),
     };
     (DiscordUserId(raw), DiscordHandle(name.to_lowercase()))
@@ -92,9 +94,14 @@ struct FakeMembers {
     pushes: Mutex<Vec<(String, Option<DiscordUserId>, DiscordHandle)>>,
     /// (st_user_id -> id/handle): the cache write-through self_heal performs.
     links: Mutex<Vec<(String, DiscordUserId, DiscordHandle)>>,
+    /// Solidarity Tech ids whose Discord identity was blanked (moving a link off a record).
+    cleared: Mutex<Vec<String>>,
+    /// Solidarity Tech ids of records added to the cache.
+    cached: Mutex<Vec<String>>,
     audit_available: bool,
     assign_fails: bool,
     marker_fails: bool,
+    clear_fails: bool,
     /// Per-member grace expiry date; `None` means no grace.
     grace: HashMap<u64, NaiveDate>,
     /// Pre-seeded manual-override stamps; `active_override` reads this set.
@@ -117,13 +124,15 @@ impl FakeMembers {
         self.overrides.insert(id.0);
     }
 
-    /// Seed a record into the id/handle/email maps the reads consult.
+    /// Seed a record into the id/handle/email maps the reads consult. First-wins on id and
+    /// handle, as the real cache's dedup is, so a second record claiming an id stays out of
+    /// the id lookup but is still found by email.
     fn seed(&mut self, rec: MemberRecord) {
         if let Some(id) = rec.discord_user_id {
-            self.by_id.insert(id.0, rec.clone());
+            self.by_id.entry(id.0).or_insert_with(|| rec.clone());
         }
         if let Some(h) = rec.discord_handle.clone() {
-            self.by_handle.insert(h.0, rec.clone());
+            self.by_handle.entry(h.0).or_insert_with(|| rec.clone());
         }
         self.by_email
             .entry(rec.email.as_str().to_owned())
@@ -150,7 +159,10 @@ impl FakeMembers {
 
     /// Total source + cache write-backs - the analogue of the old `st.writes()` plus cache count.
     fn write_backs(&self) -> usize {
-        self.pushes.lock().unwrap().len() + self.links.lock().unwrap().len()
+        self.pushes.lock().unwrap().len()
+            + self.links.lock().unwrap().len()
+            + self.cleared.lock().unwrap().len()
+            + self.cached.lock().unwrap().len()
     }
 }
 
@@ -305,6 +317,22 @@ impl MemberWrite for FakeMembers {
             .push((st.as_str().to_owned(), id, handle.clone()));
         Ok(())
     }
+
+    async fn clear_identity(&self, st: &StUserId) -> Result<(), MemberError> {
+        if self.clear_fails {
+            return Err(MemberError::SolidarityTech("clear failing".into()));
+        }
+        self.cleared.lock().unwrap().push(st.as_str().to_owned());
+        Ok(())
+    }
+
+    async fn cache_member(&self, record: &MemberRecord) -> Result<(), MemberError> {
+        self.cached
+            .lock()
+            .unwrap()
+            .push(record.st_user_id.as_str().to_owned());
+        Ok(())
+    }
 }
 
 impl engine::verify::Heal for FakeMembers {}
@@ -317,8 +345,10 @@ struct VerifyWorld {
     audit_available: bool,
     discord_fails: bool,
     marker_fails: bool,
+    clear_fails: bool,
     last: Option<Result<VerifyOutcome, MemberError>>,
     last_resync: Option<Result<ResyncOutcome, MemberError>>,
+    last_relink: Option<Result<RelinkOutcome, MemberError>>,
     forget_result: Option<Result<(), MemberError>>,
     last_target: Option<DiscordUserId>,
     fake: Option<FakeMembers>,
@@ -345,8 +375,10 @@ impl VerifyWorld {
             audit_available: true,
             discord_fails: false,
             marker_fails: false,
+            clear_fails: false,
             last: None,
             last_resync: None,
+            last_relink: None,
             forget_result: None,
             last_target: None,
             fake: None,
@@ -365,6 +397,7 @@ impl VerifyWorld {
         fake.audit_available = self.audit_available;
         fake.assign_fails = self.discord_fails;
         fake.marker_fails = self.marker_fails;
+        fake.clear_fails = self.clear_fails;
         if let Some(until) = self.grace_until {
             fake.set_grace(target, until);
         }
@@ -391,6 +424,16 @@ impl VerifyWorld {
             .verify_by_email(DiscordUserId(SONIC), email)
             .await;
         self.last = Some(result);
+        self.fake = Some(fake);
+    }
+
+    async fn run_relink(&mut self, target: DiscordUserId, handle: DiscordHandle, email: Email) {
+        self.last_target = Some(target);
+        let fake = self.build_fake(target);
+        let result = Member::new(&fake, Target { id: target, handle })
+            .relink_by_email(DiscordUserId(SONIC), email)
+            .await;
+        self.last_relink = Some(result);
         self.fake = Some(fake);
     }
 
@@ -921,6 +964,147 @@ async fn expired_grace(world: &mut VerifyWorld, _name: String) {
         .checked_sub_days(chrono::Days::new(1))
         .unwrap();
     world.grace_until = Some(yesterday);
+}
+
+// ---------------------------------------------------------------------------
+// Email change steps
+// ---------------------------------------------------------------------------
+
+/// The Solidarity Tech id of `name`'s second record.
+fn new_st_id(name: &str) -> String {
+    format!("{}-new", st_id(name))
+}
+
+/// `name`'s second record, under `email`: in good standing and not yet linked to Discord.
+fn new_record(name: &str, email: &str) -> MemberRecord {
+    MemberRecord {
+        st_user_id: StUserId(new_st_id(name)),
+        discord_user_id: None,
+        discord_handle: None,
+        email: Email(email.to_owned()),
+        ..record(name, DiscordHandle(String::new()), None)
+    }
+}
+
+#[given(regex = r"^(\w+) is in our records linked to her Discord id$")]
+async fn linked(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    world.members.push(record(&name, handle, Some(id)));
+}
+
+#[given(regex = r"^(\w+) has a new record under (\S+)$")]
+async fn has_new_record(world: &mut VerifyWorld, name: String, email: String) {
+    world.members.push(new_record(&name, &email));
+}
+
+#[given(regex = r"^(\w+) has a new record under (\S+) that already carries her Discord id$")]
+async fn has_new_record_linked(world: &mut VerifyWorld, name: String, email: String) {
+    let (id, handle) = actor(&name);
+    world.members.push(MemberRecord {
+        discord_user_id: Some(id),
+        discord_handle: Some(handle),
+        ..new_record(&name, &email)
+    });
+}
+
+#[given(regex = r"^(\w+) has a new record under (\S+) with no membership status$")]
+async fn has_new_record_malformed(world: &mut VerifyWorld, name: String, email: String) {
+    world.members.push(MemberRecord {
+        standing: None,
+        ..new_record(&name, &email)
+    });
+}
+
+#[given("clearing an old link is failing")]
+async fn clear_failing(world: &mut VerifyWorld) {
+    world.clear_fails = true;
+}
+
+#[when(regex = r"^Sonic changes (\w+)'s email to (\S+)$")]
+async fn sonic_changes_email(world: &mut VerifyWorld, name: String, email: String) {
+    let (id, handle) = actor(&name);
+    world.run_relink(id, handle, Email(email)).await;
+}
+
+#[then(regex = r"^the email change is reported as (\w+)$")]
+async fn relink_reported(world: &mut VerifyWorld, outcome: String) {
+    let got = world.last_relink.as_ref().expect("an email change ran");
+    let matched = match outcome.as_str() {
+        "relinked" => matches!(got, Ok(RelinkOutcome::Relinked { .. })),
+        "malformed" => matches!(got, Ok(RelinkOutcome::Malformed)),
+        "already_linked" => matches!(got, Ok(RelinkOutcome::AlreadyLinked)),
+        "conflict" => matches!(got, Ok(RelinkOutcome::Conflict)),
+        "not_found" => matches!(got, Ok(RelinkOutcome::NotFound)),
+        other => panic!("unknown email change outcome {other}"),
+    };
+    assert!(matched, "expected {outcome}, got {got:?}");
+}
+
+#[then("the email change fails with an error")]
+async fn relink_failed(world: &mut VerifyWorld) {
+    assert!(matches!(world.last_relink, Some(Err(_))));
+}
+
+#[then(regex = r"^(\w+)'s new record carries her Discord identity$")]
+async fn new_record_carries_identity(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    let pushes = world.fake.as_ref().unwrap().pushes.lock().unwrap();
+    assert!(
+        pushes.contains(&(new_st_id(&name), Some(id), handle)),
+        "{name}'s full identity was written to her new record; pushes: {pushes:?}"
+    );
+}
+
+#[then(regex = r"^(\w+)'s old record no longer carries her Discord identity$")]
+async fn old_record_cleared(world: &mut VerifyWorld, name: String) {
+    let cleared = world.fake.as_ref().unwrap().cleared.lock().unwrap();
+    assert_eq!(
+        *cleared,
+        vec![st_id(&name)],
+        "only the old record is cleared"
+    );
+}
+
+#[then(regex = r"^(\w+)'s new record is linked in the cache$")]
+async fn new_record_cached(world: &mut VerifyWorld, name: String) {
+    let (id, handle) = actor(&name);
+    let fake = world.fake.as_ref().unwrap();
+    assert!(
+        fake.unlinked.lock().unwrap().contains(&id.0),
+        "old cache link removed"
+    );
+    assert!(
+        fake.cached.lock().unwrap().contains(&new_st_id(&name)),
+        "new record cached"
+    );
+    assert!(
+        fake.links
+            .lock()
+            .unwrap()
+            .contains(&(new_st_id(&name), id, handle)),
+        "new record linked in the cache"
+    );
+}
+
+#[then(regex = r"^the (\w+) email change is recorded in the audit log$")]
+async fn relink_recorded(world: &mut VerifyWorld, outcome: String) {
+    let rows = world.fake.as_ref().unwrap().audit_rows.lock().unwrap();
+    let change = rows
+        .iter()
+        .find(|r| r["action"] == "member_relink")
+        .expect("a member_relink audit row");
+    assert_eq!(change["outcome"], outcome.as_str());
+    assert_eq!(change["method"], "email");
+    if outcome == "conflict" {
+        // The matched record belongs to another account; its standing must not leak.
+        assert!(change.get("status").is_none());
+    }
+}
+
+#[then(regex = r"^(\w+) is assigned no role$")]
+async fn assigned_no_role(world: &mut VerifyWorld, name: String) {
+    let (id, _) = actor(&name);
+    assert!(world.fake.as_ref().unwrap().roles_of(id).is_empty());
 }
 
 #[tokio::main]

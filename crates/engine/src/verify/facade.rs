@@ -112,6 +112,14 @@ pub trait MemberWrite: Send + Sync {
         id: DiscordUserId,
         handle: &DiscordHandle,
     ) -> Result<(), MemberError>;
+
+    /// Blank the Discord identity (id and handle) on the Solidarity Tech record `st` - the
+    /// inverse of a [`BackfillId`](HealAction::BackfillId) push, for moving a link off a record.
+    async fn clear_identity(&self, st: &StUserId) -> Result<(), MemberError>;
+
+    /// Add `record` to the cache unless it is already held, so a record linked between roster
+    /// refreshes is found by id straight away.
+    async fn cache_member(&self, record: &MemberRecord) -> Result<(), MemberError>;
 }
 
 /// The combiner for operations that read a record and then write a repair. Its

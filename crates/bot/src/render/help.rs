@@ -58,7 +58,7 @@ pub fn help_embed(topic: Topic, accent: u32) -> CreateEmbed {
         ),
         Topic::ForModerators => (
             "📋 Help · For moderators",
-            "**/lookup** - pull up any current member's card.\n**/verify** - match a member in our records and set their role.",
+            "**/lookup** - pull up any current member's card.\n**/verify** - match a member in our records and set their role.\n**/change-email** - move a member onto their record under a new email. Or right-click them → *Apps* → **Change Email**.",
         ),
     };
     CreateEmbed::new()

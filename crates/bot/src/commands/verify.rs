@@ -160,7 +160,7 @@ pub async fn verify(
 }
 
 /// Display name + avatar for the target, for the host and outcome embeds.
-fn header(target: &User) -> (String, String, String) {
+pub(crate) fn header(target: &User) -> (String, String, String) {
     let display = target
         .global_name
         .clone()
@@ -619,7 +619,7 @@ fn buttons_for(state: &VerifyState, extra_buttons: &[CreateButton]) -> CreateAct
 }
 
 /// Read the value the moderator typed into the named modal field.
-fn read_input(submit: &serenity::all::ModalInteraction, field_id: &str) -> String {
+pub(crate) fn read_input(submit: &serenity::all::ModalInteraction, field_id: &str) -> String {
     submit
         .data
         .components

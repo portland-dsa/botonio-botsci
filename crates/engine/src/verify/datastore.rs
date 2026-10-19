@@ -3,7 +3,7 @@
 use crate::audit::AuditLog;
 use crate::backends::discord::DiscordClient;
 use crate::backends::discord::roles::MarkerRole;
-use crate::backends::solidarity_tech::SolidarityTechClient;
+use crate::backends::solidarity_tech::{SolidarityTechClient, StClearFlags};
 use crate::store::{GraceStore, IdentityWrite, MemberRecord, MemberStore, OverrideLog};
 use crate::util::{DiscordHandle, DiscordUserId, Email, StUserId};
 use domain::{DiscordGuildId, Role};
@@ -229,6 +229,24 @@ where
     ) -> Result<(), MemberError> {
         self.store
             .link_identity(st, id, handle)
+            .await
+            .map_err(|e| MemberError::Store(e.to_string()))
+    }
+
+    async fn clear_identity(&self, st: &StUserId) -> Result<(), MemberError> {
+        let flags = StClearFlags {
+            handle: true,
+            user_id: true,
+        };
+        self.st
+            .clear_discord_identity(st.as_str(), flags)
+            .await
+            .map_err(|e| MemberError::SolidarityTech(e.to_string()))
+    }
+
+    async fn cache_member(&self, record: &MemberRecord) -> Result<(), MemberError> {
+        self.store
+            .insert_member(record)
             .await
             .map_err(|e| MemberError::Store(e.to_string()))
     }
