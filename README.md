@@ -196,6 +196,7 @@ Click `back` then `Membership & access` ->
 
 Click `back` then `Moderators` ->
 - In the dropdown select `Discord Admin` from step 2
+  - Any role works here, but the moderator commands only appear for members with `Manage Roles`. For a non-admin moderator role, either grant it `Manage Roles` or allow the role per command under Server Settings -> Integrations.
 - toggle `Automatic Membership Checks`: `On`, `SSO: On`
 
 Now *shut the bot down* (this is a bit of jank, SSO only enables for safety if roles for SSO auth are set on boot), `ctrl+c` in your terminal should work.

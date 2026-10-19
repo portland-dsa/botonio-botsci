@@ -16,7 +16,7 @@ use engine::verify::{DataStore, Member, Target, VerifyOutcome};
 
 use crate::commands::reclick::{ReclickAction, reclick_action};
 use crate::data::{Context, Error};
-use crate::moderator::invoker_is_moderator;
+use crate::moderator::{MODERATORS_ONLY, invoker_is_moderator};
 use crate::render::modal::{
     EMAIL_FIELD_ID, EMAIL_MODAL_ID, OVERRIDE_MODAL_ID, REASON_FIELD_ID, email_modal,
     override_modal, parse_email, parse_reason,
@@ -65,9 +65,9 @@ enum ModalWait {
 
 /// Verify a member and assign their standing role. Moderators only.
 ///
-/// Hidden from non-moderators via `default_member_permissions`; the in-code
+/// Hidden from members without Manage Roles via `default_member_permissions`; the in-code
 /// moderator check is the real gate.
-#[poise::command(slash_command, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, default_member_permissions = "MANAGE_ROLES")]
 pub async fn verify(
     ctx: Context<'_>,
     #[description = "The member to verify"] target: User,
@@ -76,7 +76,7 @@ pub async fn verify(
         tracing::warn!("non-moderator attempted a member verify");
         ctx.send(
             poise::CreateReply::default()
-                .content("That command is for moderators only.")
+                .content(MODERATORS_ONLY)
                 .ephemeral(true),
         )
         .await?;

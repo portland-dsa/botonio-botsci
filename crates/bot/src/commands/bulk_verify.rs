@@ -22,7 +22,7 @@ use engine::verify::{DataStore, Member, ResyncOutcome, Target};
 
 use crate::commands::verify::{StepOutcome, verify_step};
 use crate::data::{Context, Error};
-use crate::moderator::invoker_is_moderator;
+use crate::moderator::{MODERATORS_ONLY, invoker_is_moderator};
 use crate::render::bulk_verify as embeds;
 
 /// A conservative pause between per-member writes during apply, well under Discord's
@@ -69,9 +69,9 @@ impl From<ScopeChoice> for BulkScope {
 
 /// Sweep the server roster and walk through unmatched members. Moderators only.
 ///
-/// Hidden from non-moderators via `default_member_permissions`; the in-code
+/// Hidden from members without Manage Roles via `default_member_permissions`; the in-code
 /// moderator check is the real gate.
-#[poise::command(slash_command, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, default_member_permissions = "MANAGE_ROLES")]
 pub async fn bulk_verify(
     ctx: Context<'_>,
     #[description = "Which members to sweep"] scope: Option<ScopeChoice>,
@@ -80,7 +80,7 @@ pub async fn bulk_verify(
         tracing::warn!("non-moderator attempted a bulk verify");
         ctx.send(
             poise::CreateReply::default()
-                .content("That command is for moderators only.")
+                .content(MODERATORS_ONLY)
                 .ephemeral(true),
         )
         .await?;

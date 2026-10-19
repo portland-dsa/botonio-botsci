@@ -9,10 +9,10 @@ use engine::backends::util::{DiscordHandle, DiscordUserId};
 use engine::verify::{DataStore, Member, Target};
 
 use crate::data::{Context, Error};
-use crate::moderator::invoker_is_moderator;
+use crate::moderator::{MODERATORS_ONLY, invoker_is_moderator};
 
 /// Reset a member to an unverified, unlinked state. Moderators only.
-#[poise::command(slash_command, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, default_member_permissions = "MANAGE_ROLES")]
 pub async fn forget(
     ctx: Context<'_>,
     #[description = "The member to reset"] target: User,
@@ -23,8 +23,7 @@ pub async fn forget(
             .ephemeral(true)
     };
     if !invoker_is_moderator(&ctx).await {
-        ctx.send(plain("That command is for moderators only."))
-            .await?;
+        ctx.send(plain(MODERATORS_ONLY)).await?;
         return Ok(());
     }
     let data = ctx.data();

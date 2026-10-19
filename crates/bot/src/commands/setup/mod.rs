@@ -126,6 +126,9 @@ enum Page {
     Moderation,
 }
 
+/// The refusal the Manage-Server-gated commands send a member without that permission.
+pub const SERVER_MANAGERS_ONLY: &str = "That command is for server managers only.";
+
 /// Whether the invoker actually holds Manage Guild. `default_member_permissions` only
 /// hides the command in the client; this is the enforced gate (mirroring the moderator
 /// commands, which treat the permission as a hint and check in code).
@@ -144,7 +147,7 @@ pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
     if !invoker_can_configure(&ctx).await {
         ctx.send(
             poise::CreateReply::default()
-                .content("That command is for server managers only.")
+                .content(SERVER_MANAGERS_ONLY)
                 .ephemeral(true),
         )
         .await?;

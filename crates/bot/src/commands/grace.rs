@@ -14,15 +14,15 @@ use engine::store::GraceStore;
 use engine::verify::{DataStore, Member, Target};
 
 use crate::data::{Context, Error};
-use crate::moderator::invoker_is_moderator;
+use crate::moderator::{MODERATORS_ONLY, invoker_is_moderator};
 
 /// Grant or clear a dues-grace window for a member. Moderators only.
 ///
-/// Hidden from non-moderators via `default_member_permissions`; the in-code
+/// Hidden from members without Manage Roles via `default_member_permissions`; the in-code
 /// moderator check is the real gate.
 #[poise::command(
     slash_command,
-    default_member_permissions = "ADMINISTRATOR",
+    default_member_permissions = "MANAGE_ROLES",
     guild_only,
     subcommands("set", "clear")
 )]
@@ -43,7 +43,7 @@ async fn set(
         tracing::warn!("non-moderator attempted a grace set");
         ctx.send(
             poise::CreateReply::default()
-                .content("That command is for moderators only.")
+                .content(MODERATORS_ONLY)
                 .ephemeral(true),
         )
         .await?;
@@ -109,7 +109,7 @@ async fn clear(
         tracing::warn!("non-moderator attempted a grace clear");
         ctx.send(
             poise::CreateReply::default()
-                .content("That command is for moderators only.")
+                .content(MODERATORS_ONLY)
                 .ephemeral(true),
         )
         .await?;
