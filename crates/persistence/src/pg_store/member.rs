@@ -125,6 +125,27 @@ impl From<MemberCacheRow> for MemberRecord {
     }
 }
 
+/// The inverse of [`From<MemberCacheRow>`](MemberRecord): encode a record's enums to their
+/// cache-local tokens. The one place the record-to-row mapping lives, shared by the roster
+/// load and the single-row insert.
+impl From<MemberRecord> for MemberCacheRow {
+    fn from(r: MemberRecord) -> Self {
+        MemberCacheRow {
+            st_user_id: r.st_user_id.0,
+            discord_user_id: r.discord_user_id.map(|id| id.0 as i64),
+            discord_handle: r.discord_handle.map(|h| h.0),
+            email: r.email.0,
+            full_name: r.full_name,
+            standing: r.standing.map(|s| migs_to_token(s).to_owned()),
+            join_date: r.join_date,
+            expires: r.expires,
+            membership_type: r.membership_type.map(|t| mtype_to_token(t).to_owned()),
+            monthly_dues: r.monthly_dues.map(|d| dues_to_token(d).to_owned()),
+            yearly_dues: r.yearly_dues.map(|d| dues_to_token(d).to_owned()),
+        }
+    }
+}
+
 #[async_trait]
 impl MemberStore for PgStore {
     type Error = PersistenceError;
@@ -215,26 +236,11 @@ impl RosterWrite for PgStore {
         // Encode the deduplicated records into stored rows. Dedup runs through
         // [`dedup_records`] - the rule the in-memory `Index` shares - so the two stores
         // keep the same row on a collision; records with no Discord id are retained, since
-        // they are exactly who the verify backfill repairs. Each row's fields are encoded
-        // together in one struct literal, so the column mapping lives in one place rather
-        // than spread across parallel pushes.
-        let deduped = dedup_records(records);
-        let mut rows: Vec<MemberCacheRow> = Vec::with_capacity(deduped.len());
-        for r in deduped {
-            rows.push(MemberCacheRow {
-                st_user_id: r.st_user_id.0,
-                discord_user_id: r.discord_user_id.map(|id| id.0 as i64),
-                discord_handle: r.discord_handle.map(|h| h.0),
-                email: r.email.0,
-                full_name: r.full_name,
-                standing: r.standing.map(|s| migs_to_token(s).to_owned()),
-                join_date: r.join_date,
-                expires: r.expires,
-                membership_type: r.membership_type.map(|t| mtype_to_token(t).to_owned()),
-                monthly_dues: r.monthly_dues.map(|d| dues_to_token(d).to_owned()),
-                yearly_dues: r.yearly_dues.map(|d| dues_to_token(d).to_owned()),
-            });
-        }
+        // they are exactly who the verify backfill repairs.
+        let rows: Vec<MemberCacheRow> = dedup_records(records)
+            .into_iter()
+            .map(MemberCacheRow::from)
+            .collect();
 
         // Never wipe a populated cache for an empty roster: a sweep that resolves to zero
         // storable members is almost always an upstream glitch, not a real membership of
@@ -351,6 +357,34 @@ impl IdentityWrite for PgStore {
             r#"UPDATE member_cache SET discord_user_id = NULL, discord_handle = NULL
                WHERE discord_user_id = $1"#,
             discord_id.0 as i64
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Insert one row unless its Solidarity Tech id is already cached. `ON CONFLICT DO
+    /// NOTHING` needs only the `INSERT` the runtime role holds, and leaves an existing row
+    /// exactly as the last roster refresh wrote it.
+    async fn insert_member(&self, record: &MemberRecord) -> Result<(), PersistenceError> {
+        let row = MemberCacheRow::from(record.clone());
+        sqlx::query!(
+            r#"INSERT INTO member_cache
+               (st_user_id, discord_user_id, discord_handle, email, full_name, standing,
+                join_date, expires, membership_type, monthly_dues, yearly_dues)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               ON CONFLICT (st_user_id) DO NOTHING"#,
+            row.st_user_id,
+            row.discord_user_id,
+            row.discord_handle,
+            row.email,
+            row.full_name,
+            row.standing,
+            row.join_date,
+            row.expires,
+            row.membership_type,
+            row.monthly_dues,
+            row.yearly_dues,
         )
         .execute(&self.pool)
         .await?;

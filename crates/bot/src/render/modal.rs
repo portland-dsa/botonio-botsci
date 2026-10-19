@@ -36,15 +36,26 @@ pub fn verify_title(display_name: &str) -> String {
 /// The manual-verify modal: a single required **Member email** field, titled for the
 /// member being verified. `custom_id` is normally [`EMAIL_MODAL_ID`].
 pub fn email_modal(custom_id: &str, display_name: &str) -> CreateModal {
-    CreateModal::new(custom_id, verify_title(display_name)).components(vec![
-        CreateActionRow::InputText(
-            CreateInputText::new(InputTextStyle::Short, "Member email", EMAIL_FIELD_ID)
-                .placeholder("name@example.com")
-                .required(true)
-                .min_length(1)
-                .max_length(254),
-        ),
-    ])
+    CreateModal::new(custom_id, verify_title(display_name)).components(vec![email_field()])
+}
+
+/// The email-change modal: the same single **Member email** field, titled for the member
+/// whose email is changing.
+pub fn change_email_modal(custom_id: &str, display_name: &str) -> CreateModal {
+    CreateModal::new(custom_id, modal_title("Change email for", display_name))
+        .components(vec![email_field()])
+}
+
+/// The required **Member email** input both email modals carry, read back by
+/// [`EMAIL_FIELD_ID`].
+fn email_field() -> CreateActionRow {
+    CreateActionRow::InputText(
+        CreateInputText::new(InputTextStyle::Short, "Member email", EMAIL_FIELD_ID)
+            .placeholder("name@example.com")
+            .required(true)
+            .min_length(1)
+            .max_length(254),
+    )
 }
 
 /// The override-reason text-input id; read back off the submission.

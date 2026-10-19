@@ -9,7 +9,7 @@ use domain::{MigsStatus, Role};
 use crate::render::card::{COLOR_AMBER, COLOR_GREEN, COLOR_RED};
 
 /// A neutral action-prompt colour (Discord blurple) for the pre-lookup state.
-const COLOR_BLURPLE: u32 = 0x58_65_f2;
+pub(crate) const COLOR_BLURPLE: u32 = 0x58_65_f2;
 
 /// The Manual Override accent (violet): approved by hand, not matched in Solidarity Tech.
 const COLOR_VIOLET: u32 = 0x92_56_e0;
@@ -57,22 +57,14 @@ pub fn state_embed(
              Know their email? Look them up:"
                 .to_string(),
         ),
-        VerifyState::Verified { role, standing } => {
-            let color = match role {
-                Role::Member => COLOR_GREEN,
-                Role::DuesExpired => COLOR_RED,
-                Role::Unverified => COLOR_AMBER,
-            };
-            let body = match standing {
-                Some(s) => format!(
-                    "\u{2705} Verified as {}.\nSolidarity Tech records them as \"{}\".",
-                    role.as_str(),
-                    s.as_str()
-                ),
-                None => format!("\u{2705} Verified as {}.", role.as_str()),
-            };
-            (color, body)
-        }
+        VerifyState::Verified { role, standing } => (
+            role_color(*role),
+            format!(
+                "\u{2705} Verified as {}.{}",
+                role.as_str(),
+                standing_note(*standing)
+            ),
+        ),
         VerifyState::NotFound => (
             COLOR_AMBER,
             "\u{2753} No Solidarity Tech record matches that email. Want to try a different one?"
@@ -110,10 +102,40 @@ pub fn state_embed(
             "Something went wrong on my end - please try again in a moment.".to_string(),
         ),
     };
+    member_embed(display_name, handle, avatar_url, color, &body)
+}
+
+/// A moderator-flow embed about one member: headed by their avatar and display name, with
+/// their handle above `body`. Shared by the verify and email-change replies.
+pub(crate) fn member_embed(
+    display_name: &str,
+    handle: &str,
+    avatar_url: &str,
+    color: u32,
+    body: &str,
+) -> CreateEmbed {
     CreateEmbed::new()
         .author(CreateEmbedAuthor::new(display_name).icon_url(avatar_url))
         .colour(color)
         .description(format!("`@{handle}`\n\n{body}"))
+}
+
+/// The colour for a granted role, echoing the membership card: green for Member, red for
+/// Dues Expired, amber for Unverified.
+pub(crate) fn role_color(role: Role) -> u32 {
+    match role {
+        Role::Member => COLOR_GREEN,
+        Role::DuesExpired => COLOR_RED,
+        Role::Unverified => COLOR_AMBER,
+    }
+}
+
+/// The line naming the raw status a role came from, or nothing when there is none.
+pub(crate) fn standing_note(standing: Option<MigsStatus>) -> String {
+    match standing {
+        Some(s) => format!("\nSolidarity Tech records them as \"{}\".", s.as_str()),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]

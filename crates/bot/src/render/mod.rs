@@ -1,5 +1,6 @@
 pub mod bulk_verify;
 pub mod card;
+pub mod change_email;
 pub mod help;
 pub mod modal;
 pub mod reminders;

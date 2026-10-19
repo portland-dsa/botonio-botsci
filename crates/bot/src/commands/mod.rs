@@ -1,5 +1,6 @@
 pub mod bulk_verify;
 pub mod card;
+pub mod change_email;
 pub mod channels;
 pub mod forget;
 pub mod grace;
@@ -20,6 +21,8 @@ pub fn all() -> Vec<poise::Command<Data, Error>> {
         card::membership_card_menu(),
         card::lookup(),
         verify::verify(),
+        change_email::change_email(),
+        change_email::change_email_menu(),
         bulk_verify::bulk_verify(),
         channels::channels(),
         grace::grace(),

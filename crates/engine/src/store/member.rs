@@ -246,6 +246,11 @@ pub trait IdentityWrite: Send + Sync {
     /// holds `discord_id`, returning the member to an unlinked state so a later verify
     /// misses by both id and handle. A `discord_id` no row holds is a silent no-op.
     async fn unlink_by_discord_id(&self, discord_id: DiscordUserId) -> Result<(), Self::Error>;
+
+    /// Add `record` unless a row with its Solidarity Tech id is already held, which is left
+    /// untouched - only the roster refresh rewrites a row wholesale. Makes a record that was
+    /// just linked findable before the next refresh brings it in.
+    async fn insert_member(&self, record: &MemberRecord) -> Result<(), Self::Error>;
 }
 
 /// Sweep the Solidarity Tech user list (pre-filtered to Discord-linked members)
@@ -278,16 +283,20 @@ impl InMemoryStore {
     /// the duplicates collapse in [`Index::from_records`], the single dedup point, so no
     /// pre-dedup is needed.
     fn rebuild_records(&self, mutate: impl FnMut(&mut MemberRecord)) {
-        let mut records: Vec<MemberRecord> = {
-            let snap = self.snapshot();
-            snap.by_id
-                .values()
-                .chain(snap.by_handle.values())
-                .cloned()
-                .collect()
-        };
+        let mut records = self.records();
         records.iter_mut().for_each(mutate);
         self.swap(Index::from_records(records));
+    }
+
+    /// Every record in the current snapshot, collected from both maps. A record mapped by
+    /// both id and handle appears twice; callers collapse the pair through the dedup rule.
+    fn records(&self) -> Vec<MemberRecord> {
+        let snap = self.snapshot();
+        snap.by_id
+            .values()
+            .chain(snap.by_handle.values())
+            .cloned()
+            .collect()
     }
 }
 
@@ -304,16 +313,7 @@ impl MemberStore for InMemoryStore {
     }
 
     async fn all_records(&self) -> Result<Vec<MemberRecord>, Infallible> {
-        let snap = self.snapshot();
-        // Collect from both maps then dedup: a record with both a Discord id and a handle
-        // appears in both maps and collapses to one entry via `Index::from_records`'s rule.
-        let records: Vec<MemberRecord> = snap
-            .by_id
-            .values()
-            .chain(snap.by_handle.values())
-            .cloned()
-            .collect();
-        Ok(dedup_records(records))
+        Ok(dedup_records(self.records()))
     }
 }
 
@@ -362,6 +362,19 @@ impl IdentityWrite for InMemoryStore {
                 rec.discord_handle = None;
             }
         });
+        Ok(())
+    }
+
+    async fn insert_member(&self, record: &MemberRecord) -> Result<(), Infallible> {
+        let mut records = self.records();
+        if records
+            .iter()
+            .any(|rec| rec.st_user_id == record.st_user_id)
+        {
+            return Ok(());
+        }
+        records.push(record.clone());
+        self.swap(Index::from_records(records));
         Ok(())
     }
 }

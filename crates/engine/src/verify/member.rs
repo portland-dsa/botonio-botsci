@@ -1,5 +1,9 @@
 //! Member handle and verify/resync outcome types.
 
+mod relink;
+
+pub use relink::RelinkOutcome;
+
 use crate::store::MemberRecord;
 use crate::util::{DiscordHandle, DiscordUserId, Email};
 use domain::{MalformedMembership, MigsStatus, Role};
