@@ -10,11 +10,11 @@
 use std::time::Instant;
 
 use crate::data::{Context, Error};
-use crate::moderator::invoker_is_moderator;
+use crate::moderator::{MODERATORS_ONLY, invoker_is_moderator};
 use crate::refresh::{self, RefreshReport};
 
 /// Re-warm the member cache from Solidarity Tech. Moderators only.
-#[poise::command(slash_command, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, default_member_permissions = "MANAGE_ROLES")]
 pub async fn refresh_cache(ctx: Context<'_>) -> Result<(), Error> {
     let plain = |content: &str| {
         poise::CreateReply::default()
@@ -23,8 +23,7 @@ pub async fn refresh_cache(ctx: Context<'_>) -> Result<(), Error> {
     };
 
     if !invoker_is_moderator(&ctx).await {
-        ctx.send(plain("That command is for moderators only."))
-            .await?;
+        ctx.send(plain(MODERATORS_ONLY)).await?;
         return Ok(());
     }
 

@@ -11,7 +11,7 @@ use engine::store::{GraceOverride, GraceStore};
 
 use crate::data::{Context, Error};
 use crate::lookup::{self, LookupOutcome};
-use crate::moderator::invoker_is_moderator;
+use crate::moderator::{MODERATORS_ONLY, invoker_is_moderator};
 use crate::render;
 
 /// Slash form: always the invoker's own card.
@@ -28,7 +28,7 @@ pub async fn membership_card_menu(ctx: Context<'_>, target: User) -> Result<(), 
 }
 
 /// Look up another member's membership card. Moderators only.
-#[poise::command(slash_command, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, default_member_permissions = "MANAGE_ROLES")]
 pub async fn lookup(
     ctx: Context<'_>,
     #[description = "The member to look up"] target: User,
@@ -111,8 +111,7 @@ async fn render_outcome(
         }
         LookupOutcome::NotModerator => {
             tracing::warn!("non-moderator attempted a member lookup");
-            ctx.send(reply("That command is for moderators only."))
-                .await?;
+            ctx.send(reply(MODERATORS_ONLY)).await?;
         }
         LookupOutcome::RateLimited => {
             tracing::warn!("moderator lookup rate limit hit");

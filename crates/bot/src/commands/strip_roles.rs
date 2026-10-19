@@ -17,14 +17,14 @@ use engine::store::{BulkScope, OverrideLog};
 use engine::verify::{DataStore, Member, StripOutcome, Target};
 
 use crate::data::{Context, Error};
-use crate::moderator::invoker_is_moderator;
+use crate::moderator::{MODERATORS_ONLY, invoker_is_moderator};
 
 /// A conservative pause between members we write to, matching `/bulk-verify`'s apply pacing
 /// so a whole-server strip stays well under Discord's role-write limits.
 const STRIP_PACING: Duration = Duration::from_millis(500);
 
 /// Strip the managed roles from every member in the server. Moderators only, staging only.
-#[poise::command(slash_command, default_member_permissions = "ADMINISTRATOR")]
+#[poise::command(slash_command, default_member_permissions = "MANAGE_ROLES")]
 pub async fn strip_roles(ctx: Context<'_>) -> Result<(), Error> {
     let plain = |content: &str| {
         poise::CreateReply::default()
@@ -33,8 +33,7 @@ pub async fn strip_roles(ctx: Context<'_>) -> Result<(), Error> {
     };
 
     if !invoker_is_moderator(&ctx).await {
-        ctx.send(plain("That command is for moderators only."))
-            .await?;
+        ctx.send(plain(MODERATORS_ONLY)).await?;
         return Ok(());
     }
 

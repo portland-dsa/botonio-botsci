@@ -49,6 +49,18 @@ pub async fn channels(_ctx: Context<'_>) -> Result<(), Error> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Manage-Server gate for the channels subcommands. Returns `Ok(true)` when the invoker may
+/// proceed; otherwise sends the refusal and returns `Ok(false)`. `default_member_permissions`
+/// is only a client-side hint an admin can override.
+async fn ensure_can_configure(ctx: &Context<'_>) -> Result<bool, Error> {
+    if crate::commands::setup::invoker_can_configure(ctx).await {
+        return Ok(true);
+    }
+    ctx.send(ephemeral_text(crate::commands::setup::SERVER_MANAGERS_ONLY))
+        .await?;
+    Ok(false)
+}
+
 /// Build a channel-capable `DiscordHttp` using the gateway's shared `Http` handle. Channel
 /// reads and overwrite writes need only http + guild; the managed-role list is empty because
 /// this path never touches membership roles.
@@ -152,6 +164,9 @@ fn ephemeral_text(content: &str) -> poise::CreateReply {
 /// Show which channels are out of sync with their category overwrites.
 #[poise::command(slash_command)]
 pub async fn check(ctx: Context<'_>) -> Result<(), Error> {
+    if !ensure_can_configure(&ctx).await? {
+        return Ok(());
+    }
     // Defer first: reading the guild's channels + roles can exceed Discord's 3-second
     // initial-response deadline on a large guild, which would expire the interaction and
     // fail the reply. Deferring buys the followup window.
@@ -216,6 +231,9 @@ fn format_desync_report(report: &DesyncReport) -> String {
 /// Snapshot the current channel overwrites so they can be restored later.
 #[poise::command(slash_command)]
 pub async fn save(ctx: Context<'_>) -> Result<(), Error> {
+    if !ensure_can_configure(&ctx).await? {
+        return Ok(());
+    }
     // Defer first: snapshotting reads the whole guild, which can exceed Discord's
     // 3-second initial-response deadline on a large guild (see `check`).
     ctx.defer_ephemeral().await?;
@@ -248,6 +266,9 @@ pub async fn save(ctx: Context<'_>) -> Result<(), Error> {
 /// Restore channel overwrites from the latest saved snapshot.
 #[poise::command(slash_command)]
 pub async fn restore(ctx: Context<'_>) -> Result<(), Error> {
+    if !ensure_can_configure(&ctx).await? {
+        return Ok(());
+    }
     let sctx = ctx.serenity_context();
 
     // Send the confirm prompt as an ephemeral message with two buttons.
@@ -387,6 +408,9 @@ const SETUP_MODAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// Preview and apply the channel-permission terraform. Requires typing the write count to confirm.
 #[poise::command(slash_command)]
 pub async fn setup(ctx: Context<'_>) -> Result<(), Error> {
+    if !ensure_can_configure(&ctx).await? {
+        return Ok(());
+    }
     ctx.defer_ephemeral().await?;
 
     let data = ctx.data();

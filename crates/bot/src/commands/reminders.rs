@@ -1,4 +1,4 @@
-//! `/reminders` - Manage-Guild-gated commands for dues-reminder configuration and testing.
+//! `/reminders` - moderator-gated commands for dues-reminder configuration and testing.
 //! Subcommands:
 //!   `clear-optout <member>` - clear a member's permanent dues-reminder opt-out.
 //!
@@ -41,11 +41,11 @@ impl From<MilestoneChoice> for Milestone {
 // Parent command
 // ---------------------------------------------------------------------------
 
-/// Manage dues-reminder opt-outs. Server managers only.
+/// Manage dues-reminder opt-outs. Moderators only.
 #[poise::command(
     slash_command,
     subcommands("clear_optout"),
-    default_member_permissions = "MANAGE_GUILD",
+    default_member_permissions = "MANAGE_ROLES",
     guild_only
 )]
 pub async fn reminders(_ctx: Context<'_>) -> Result<(), Error> {
@@ -66,15 +66,15 @@ fn guild_ctx(ctx: &Context<'_>) -> DiscordGuildId {
     ctx.data().config.guild()
 }
 
-/// Manage-Guild gate for the reminders subcommands. Returns `Ok(true)` when the invoker may
+/// Moderator gate for the reminders subcommands. Returns `Ok(true)` when the invoker may
 /// proceed; otherwise sends the refusal and returns `Ok(false)`. `default_member_permissions`
-/// is only a client-side hint an admin can override, so - mirroring /setup and /grace - this
+/// is only a client-side hint an admin can override, so - mirroring /verify and /grace - this
 /// in-code check is the real gate.
-async fn ensure_can_manage(ctx: &Context<'_>) -> Result<bool, Error> {
-    if crate::commands::setup::invoker_can_configure(ctx).await {
+async fn ensure_moderator(ctx: &Context<'_>) -> Result<bool, Error> {
+    if crate::moderator::invoker_is_moderator(ctx).await {
         return Ok(true);
     }
-    ctx.send(ephemeral_text("That command is for server managers only."))
+    ctx.send(ephemeral_text(crate::moderator::MODERATORS_ONLY))
         .await?;
     Ok(false)
 }
@@ -91,7 +91,7 @@ pub async fn clear_optout(
     ctx: Context<'_>,
     #[description = "The member whose opt-out to clear"] member: User,
 ) -> Result<(), Error> {
-    if !ensure_can_manage(&ctx).await? {
+    if !ensure_moderator(&ctx).await? {
         return Ok(());
     }
     let data = ctx.data();
@@ -124,13 +124,13 @@ pub async fn clear_optout(
 /// to be configured in /setup.
 ///
 /// Registered only when `BOT_REMINDER_TEST_SEND` is set.
-#[poise::command(slash_command, default_member_permissions = "MANAGE_GUILD", guild_only)]
+#[poise::command(slash_command, default_member_permissions = "MANAGE_ROLES", guild_only)]
 pub async fn test_send(
     ctx: Context<'_>,
     #[description = "The member to send the test reminder to"] member: User,
     #[description = "Which milestone to send"] milestone: MilestoneChoice,
 ) -> Result<(), Error> {
-    if !ensure_can_manage(&ctx).await? {
+    if !ensure_moderator(&ctx).await? {
         return Ok(());
     }
     let data = ctx.data();

@@ -7,6 +7,9 @@ use serenity::all::RoleId;
 
 use crate::data::Context;
 
+/// The refusal every moderator-gated command sends a non-moderator.
+pub const MODERATORS_ONLY: &str = "That command is for moderators only.";
+
 /// Whether the invoker holds the configured moderator role. A member the gateway
 /// cannot resolve (e.g. an interaction outside a guild) is treated as a
 /// non-moderator.
